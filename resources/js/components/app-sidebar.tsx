@@ -1,5 +1,5 @@
 import { Link } from '@inertiajs/react';
-import { BookOpen, FolderGit2, Layers, LayoutGrid } from 'lucide-react';
+import { BookOpen, Coffee, FolderGit2, Layers, LayoutGrid } from 'lucide-react';
 import AppLogo from '@/components/app-logo';
 import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
@@ -26,6 +26,11 @@ const mainNavItems: NavItem[] = [
         title: 'Kategori Menu',
         href: '/admin/categories',
         icon: Layers,
+    },
+    {
+        title: 'Menu & Produk',
+        href: '/admin/menus',
+        icon: Coffee,
     },
 ];
 
