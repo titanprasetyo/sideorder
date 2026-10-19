@@ -18,6 +18,8 @@ void createInertiaApp({
                 return AuthLayout;
             case name.startsWith('settings/'):
                 return [AppLayout, SettingsLayout];
+            case name.startsWith('customer/'):
+                return null; // Bebas dari sidebar admin (layar penuh customer)
             default:
                 return AppLayout;
         }
