@@ -3,6 +3,7 @@
 use App\Http\Controllers\Admin\CafeTableController;
 use App\Http\Controllers\Admin\CategoryController;
 use App\Http\Controllers\Admin\MenuController;
+use App\Http\Controllers\Cashier\OrderController as CashierOrderController;
 use App\Http\Controllers\Customer\OrderController as CustomerOrderController;
 use Illuminate\Support\Facades\Route;
 
@@ -16,6 +17,12 @@ Route::get('order/status/{order_number}', [CustomerOrderController::class, 'stat
 // Rute Dashboard Autentikasi Staf
 Route::middleware(['auth'])->group(function () {
     Route::inertia('dashboard', 'dashboard')->name('dashboard');
+});
+// Rute Operasional Kasir & Barista (Admin & Kasir Boleh Akses)
+Route::middleware(['auth', 'role:admin,cashier'])->prefix('cashier')->name('cashier.')->group(function () {
+    Route::get('orders', [CashierOrderController::class, 'index'])->name('orders.index');
+    Route::post('orders/{order}/confirm-payment', [CashierOrderController::class, 'confirmPayment'])->name('orders.confirm-payment');
+    Route::post('orders/{order}/update-status', [CashierOrderController::class, 'updateStatus'])->name('orders.update-status');
 });
 
 // Rute Khusus Administrator SIDE LINE

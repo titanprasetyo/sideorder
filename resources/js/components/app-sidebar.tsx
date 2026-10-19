@@ -1,5 +1,5 @@
 import { Link } from '@inertiajs/react';
-import { BookOpen, Coffee, FolderGit2, Layers, LayoutGrid, QrCode } from 'lucide-react';
+import { BookOpen, ClipboardList, Coffee, FolderGit2, Layers, LayoutGrid, QrCode } from 'lucide-react';
 import AppLogo from '@/components/app-logo';
 import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
@@ -21,6 +21,11 @@ const mainNavItems: NavItem[] = [
         title: 'Dashboard',
         href: dashboard(),
         icon: LayoutGrid,
+    },
+    {
+        title: 'Pesanan Masuk (Kasir)',
+        href: '/cashier/orders',
+        icon: ClipboardList,
     },
     {
         title: 'Kategori Menu',
