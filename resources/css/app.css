@@ -5,11 +5,22 @@
 @source '../views';
 @source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
 
-@custom-variant dark (&:is(.dark *));
+/* `dark:` utilities are disabled inside the warm admin theme scope (.theme-sideline) */
+@custom-variant dark (&:is(.dark *):not(.theme-sideline, .theme-sideline *));
 
 @theme {
     --font-sans:
-        'Instrument Sans', ui-sans-serif, system-ui, sans-serif,
+        'DM Sans', ui-sans-serif, system-ui, sans-serif,
+        'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
+        'Noto Color Emoji';
+
+    --font-heading:
+        'Plus Jakarta Sans', 'DM Sans', ui-sans-serif, system-ui, sans-serif,
+        'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
+        'Noto Color Emoji';
+
+    --font-mono:
+        'DM Sans', ui-sans-serif, system-ui, sans-serif,
         'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
         'Noto Color Emoji';
 
@@ -62,74 +73,134 @@
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --destructive-foreground: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.87 0 0);
+    --background: #FAF6EC;
+    --foreground: #18181B;
+    --card: #FFFDF9;
+    --card-foreground: #18181B;
+    --popover: #FFFDF9;
+    --popover-foreground: #18181B;
+    --primary: #C52828;
+    --primary-foreground: #FFFFFF;
+    --secondary: #F5EEDC;
+    --secondary-foreground: #3F2D1C;
+    --muted: #F5EEDC;
+    --muted-foreground: #78716C;
+    --accent: #EFE5CF;
+    --accent-foreground: #18181B;
+    --destructive: #B91C1C;
+    --destructive-foreground: #B91C1C;
+    --border: #E8DFC8;
+    --input: #DFCFA9;
+    --ring: #C52828;
     --chart-1: oklch(0.646 0.222 41.116);
     --chart-2: oklch(0.6 0.118 184.704);
     --chart-3: oklch(0.398 0.07 227.392);
     --chart-4: oklch(0.828 0.189 84.429);
     --chart-5: oklch(0.769 0.188 70.08);
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.87 0 0);
+    --sidebar: #FAF6EC;
+    --sidebar-foreground: #18181B;
+    --sidebar-primary: #C52828;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: #EBDDC1;
+    --sidebar-accent-foreground: #18181B;
+    --sidebar-border: #E8DFC8;
+    --sidebar-ring: #DFCFA9;
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.145 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.145 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.985 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.396 0.141 25.723);
-    --destructive-foreground: oklch(0.637 0.237 25.331);
-    --border: oklch(0.269 0 0);
-    --input: oklch(0.269 0 0);
-    --ring: oklch(0.439 0 0);
+    --background: #FAF6EC;
+    --foreground: #18181B;
+    --card: #FFFDF9;
+    --card-foreground: #18181B;
+    --popover: #FFFDF9;
+    --popover-foreground: #18181B;
+    --primary: #C52828;
+    --primary-foreground: #FFFFFF;
+    --secondary: #F5EEDC;
+    --secondary-foreground: #3F2D1C;
+    --muted: #F5EEDC;
+    --muted-foreground: #78716C;
+    --accent: #EFE5CF;
+    --accent-foreground: #18181B;
+    --destructive: #B91C1C;
+    --destructive-foreground: #B91C1C;
+    --border: #E8DFC8;
+    --input: #DFCFA9;
+    --ring: #C52828;
     --chart-1: oklch(0.488 0.243 264.376);
     --chart-2: oklch(0.696 0.17 162.48);
     --chart-3: oklch(0.769 0.188 70.08);
     --chart-4: oklch(0.627 0.265 303.9);
     --chart-5: oklch(0.645 0.246 16.439);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.985 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(0.269 0 0);
-    --sidebar-ring: oklch(0.439 0 0);
+    --sidebar: #FAF6EC;
+    --sidebar-foreground: #18181B;
+    --sidebar-primary: #C52828;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: #EBDDC1;
+    --sidebar-accent-foreground: #18181B;
+    --sidebar-border: #E8DFC8;
+    --sidebar-ring: #DFCFA9;
+}
+
+/*
+ * SIDEORDER Admin Theme (warm cream + brand red).
+ * Applied to the admin shell (and <body> for portaled dialogs/selects) so every
+ * shadcn component uses the same palette regardless of OS dark mode.
+ */
+.theme-sideline {
+    color-scheme: light;
+    --background: #FAF6EC;
+    --foreground: #18181B;
+    --card: #FFFFFF;
+    --card-foreground: #18181B;
+    --popover: #FFFFFF;
+    --popover-foreground: #18181B;
+    --primary: #C52828;
+    --primary-foreground: #FFFFFF;
+    --secondary: #F5EEDC;
+    --secondary-foreground: #3F2D1C;
+    --muted: #F5EEDC;
+    --muted-foreground: #78716C;
+    --accent: #EFE5CF;
+    --accent-foreground: #18181B;
+    --destructive: #B91C1C;
+    --destructive-foreground: #B91C1C;
+    --border: #E8DFC8;
+    --input: #DFCFA9;
+    --ring: #C52828;
+    --sidebar: #FAF6EC;
+    --sidebar-foreground: #18181B;
+    --sidebar-primary: #C52828;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: #EBDDC1;
+    --sidebar-accent-foreground: #18181B;
+    --sidebar-border: #E8DFC8;
+    --sidebar-ring: #DFCFA9;
+}
+
+/* Sidebar SIDEORDER Admin Theme: High-contrast warm cream matching kiblat */
+[data-sidebar="sidebar"],
+[data-slot="sidebar"],
+[data-slot="sidebar-inset"] {
+    background-color: #FAF6EC !important;
+    color: #18181B !important;
+    border-color: #E8DFC8 !important;
+}
+
+[data-sidebar="menu-button"] {
+    color: #18181B !important;
+}
+
+[data-sidebar="menu-button"]:hover {
+    background-color: #EFE5CF !important;
+    color: #000000 !important;
+}
+
+[data-sidebar="menu-button"][data-active="true"] {
+    background-color: #EBDDC1 !important;
+    color: #18181B !important;
+    font-weight: 700 !important;
 }
 
 @layer base {
@@ -138,6 +209,75 @@
     }
 
     body {
-        @apply bg-background text-foreground;
+        @apply bg-background text-foreground font-sans;
+        font-family: var(--font-sans);
+    }
+
+    .font-heading {
+        font-family: var(--font-heading);
+    }
+
+    .font-mono {
+        font-family: var(--font-sans);
+        font-variant-numeric: tabular-nums;
+    }
+}
+
+/* Konsistensi 1 keluarga font (DM Sans) untuk seluruh halaman Admin & Kasir */
+.theme-sideline,
+.theme-sideline * {
+    font-family: var(--font-sans);
+}
+
+@media print {
+    /* Isolasi pencetakan struk kasir thermal */
+    body * {
+        visibility: hidden !important;
+    }
+
+    .printable-receipt,
+    .printable-receipt * {
+        visibility: visible !important;
+    }
+
+    .printable-receipt {
+        position: fixed !important;
+        left: 0 !important;
+        top: 0 !important;
+        width: 80mm !important;
+        max-width: 80mm !important;
+        margin: 0 !important;
+        padding: 10px !important;
+        color: #000000 !important;
+        background: #ffffff !important;
+        box-shadow: none !important;
+        border: none !important;
+        z-index: 999999 !important;
+    }
+
+    .no-print {
+        display: none !important;
+    }
+
+    /* Kartu QR meja (admin) */
+    .printable-qr,
+    .printable-qr * {
+        visibility: visible !important;
+    }
+
+    .printable-qr {
+        position: fixed !important;
+        left: 50% !important;
+        top: 24px !important;
+        transform: translateX(-50%) !important;
+        box-shadow: none !important;
+        z-index: 999999 !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    @page {
+        size: 80mm auto;
+        margin: 0;
     }
 }

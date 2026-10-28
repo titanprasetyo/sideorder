@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -21,6 +22,10 @@ class OrderItem extends Model
         'unit_price',
         'total_price',
         'customer_notes',
+        'status',
+        'rejection_reason',
+        'rejected_at',
+        'rejected_by',
     ];
 
     protected function casts(): array
@@ -31,6 +36,7 @@ class OrderItem extends Model
             'subtotal_options' => 'decimal:2',
             'unit_price' => 'decimal:2',
             'total_price' => 'decimal:2',
+            'rejected_at' => 'datetime',
         ];
     }
 
@@ -51,10 +57,44 @@ class OrderItem extends Model
     }
 
     /**
+     * Relasi: Kasir/staf yang menolak menu ini
+     */
+    public function rejectedByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'rejected_by');
+    }
+
+    /**
      * Relasi: Satu item pesanan memiliki banyak rincian opsi
      */
     public function options(): HasMany
     {
         return $this->hasMany(OrderItemOption::class);
+    }
+
+    /**
+     * Scope: Hanya item aktif (belum ditolak)
+     */
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query->where('status', 'active');
+    }
+
+    /**
+     * Scope: Hanya item yang ditolak
+     */
+    public function scopeRejected(Builder $query): Builder
+    {
+        return $query->where('status', 'rejected');
+    }
+
+    public function isRejected(): bool
+    {
+        return $this->status === 'rejected';
+    }
+
+    public function isActive(): bool
+    {
+        return $this->status === 'active';
     }
 }

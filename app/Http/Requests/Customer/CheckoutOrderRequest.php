@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Customer;
 
+use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 
 class CheckoutOrderRequest extends FormRequest
@@ -17,20 +18,23 @@ class CheckoutOrderRequest extends FormRequest
     /**
      * Aturan validasi data pesanan dari customer.
      *
-     * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
+     * @return array<string, ValidationRule|array<mixed>|string>
      */
     public function rules(): array
     {
         return [
             'qr_token' => ['required', 'string', 'exists:cafe_tables,qr_token'],
-            'customer_name' => ['required', 'string', 'max:100'],
+            'order_number' => ['nullable', 'string', 'max:50'],
+            'force_new_order' => ['nullable', 'boolean'],
+            'customer_name' => ['required_without:order_number', 'nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:500'],
+            'idempotency_key' => ['nullable', 'string', 'max:100'],
             'items' => ['required', 'array', 'min:1'],
-            'items.*.menu_id' => ['required', 'exists:menus,id'],
+            'items.*.menu_id' => ['required', 'integer', 'exists:menus,id'],
             'items.*.quantity' => ['required', 'integer', 'min:1', 'max:50'],
             'items.*.customer_notes' => ['nullable', 'string', 'max:255'],
             'items.*.selected_option_ids' => ['nullable', 'array'],
-            'items.*.selected_option_ids.*' => ['exists:menu_option_items,id'],
+            'items.*.selected_option_ids.*' => ['integer', 'distinct', 'exists:menu_option_items,id'],
         ];
     }
 

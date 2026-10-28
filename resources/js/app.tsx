@@ -20,6 +20,8 @@ void createInertiaApp({
                 return [AppLayout, SettingsLayout];
             case name.startsWith('customer/'):
                 return null; // Bebas dari sidebar admin (layar penuh customer)
+            case name.startsWith('cashier/'):
+                return null; // Bebas dari sidebar admin (UI POS khusus kasir sesuai kiblat kasir)
             default:
                 return AppLayout;
         }

@@ -1,19 +1,25 @@
 import { Head, router, useForm } from '@inertiajs/react';
-import { Layers, Pencil, Plus, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { CheckCircle2, Coffee, EyeOff, Hash, Layers, Link2, Pencil, Plus, Trash2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
-} from '@/components/ui/dialog';
+    AdminPage,
+    ConfirmDialog,
+    EmptyState,
+    FieldError,
+    FormDialogHeader,
+    IconAction,
+    PageHeader,
+    Panel,
+    SearchInput,
+    StatCard,
+    StatGrid,
+    StatusPill,
+    ToggleField,
+} from '@/components/admin/admin-ui';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
@@ -35,6 +41,9 @@ interface Props {
 export default function CategoriesIndex({ categories }: Props) {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+    const [deletingCategory, setDeletingCategory] = useState<Category | null>(null);
+    const [isDeleting, setIsDeleting] = useState(false);
+    const [search, setSearch] = useState('');
 
     const form = useForm({
         name: '',
@@ -42,6 +51,16 @@ export default function CategoriesIndex({ categories }: Props) {
         sort_order: 0,
         is_active: true,
     });
+
+    const activeCount = categories.filter((c) => c.is_active).length;
+    const totalMenus = categories.reduce((sum, c) => sum + (c.menus_count ?? 0), 0);
+
+    const filteredCategories = useMemo(() => {
+        const q = search.toLowerCase().trim();
+        if (!q) return categories;
+
+        return categories.filter((c) => c.name.toLowerCase().includes(q) || c.slug.toLowerCase().includes(q));
+    }, [categories, search]);
 
     const openCreateModal = () => {
         setEditingCategory(null);
@@ -88,211 +107,240 @@ export default function CategoriesIndex({ categories }: Props) {
         }
     };
 
-    const handleDelete = (category: Category) => {
-        if (confirm(`Apakah Anda yakin ingin menghapus kategori "${category.name}"? Semua menu di dalamnya akan ikut terhapus.`)) {
-            router.delete(`/admin/categories/${category.id}`, {
-                onSuccess: () => {
-                    toast.success('Kategori berhasil dihapus!');
-                },
-            });
-        }
+    const confirmDelete = () => {
+        if (!deletingCategory) return;
+
+        setIsDeleting(true);
+        router.delete(`/admin/categories/${deletingCategory.id}`, {
+            onSuccess: () => toast.success('Kategori berhasil dihapus!'),
+            onError: (err) => toast.error(Object.values(err)[0] || 'Gagal menghapus kategori.'),
+            onFinish: () => {
+                setIsDeleting(false);
+                setDeletingCategory(null);
+            },
+        });
     };
 
     return (
         <>
             <Head title="Manajemen Kategori Menu" />
 
-            <div className="flex h-full flex-1 flex-col gap-6 p-4 md:p-8">
-                {/* Header Halaman */}
-                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                    <div>
-                        <h1 className="text-2xl font-bold tracking-tight">Kategori Menu</h1>
-                        <p className="text-muted-foreground text-sm">
-                            Kelola kategori minuman dan makanan Café SIDE LINE.
-                        </p>
-                    </div>
-                    <Button onClick={openCreateModal} className="w-fit gap-2">
-                        <Plus className="size-4" />
-                        Tambah Kategori
-                    </Button>
-                </div>
+            <AdminPage>
+                <PageHeader
+                    icon={Layers}
+                    title="Kategori Menu"
+                    description="Kelompokkan menu minuman & makanan agar mudah ditemukan pelanggan."
+                    actions={
+                        <Button
+                            onClick={openCreateModal}
+                            className="h-10 gap-2 rounded-xl bg-[#C52828] px-4 font-bold text-white shadow-sm hover:bg-[#A81E1E]"
+                        >
+                            <Plus className="size-4" />
+                            Tambah Kategori
+                        </Button>
+                    }
+                />
 
-                {/* Tabel Kategori */}
-                <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-left text-sm">
-                            <thead className="border-b bg-muted/50 text-muted-foreground">
-                                <tr>
-                                    <th className="px-6 py-4 font-semibold w-16">Urutan</th>
-                                    <th className="px-6 py-4 font-semibold">Nama Kategori</th>
-                                    <th className="px-6 py-4 font-semibold">Slug (URL)</th>
-                                    <th className="px-6 py-4 font-semibold text-center">Jumlah Menu</th>
-                                    <th className="px-6 py-4 font-semibold text-center">Status</th>
-                                    <th className="px-6 py-4 font-semibold text-right">Aksi</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-border">
-                                {categories.length === 0 ? (
-                                    <tr>
-                                        <td colSpan={6} className="px-6 py-12 text-center text-muted-foreground">
-                                            <div className="flex flex-col items-center justify-center gap-2">
-                                                <Layers className="size-8 stroke-1 text-muted-foreground/50" />
-                                                <p>Belum ada kategori menu yang dibuat.</p>
-                                                <Button variant="outline" size="sm" onClick={openCreateModal} className="mt-2">
-                                                    Tambah Sekarang
-                                                </Button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                ) : (
-                                    categories.map((cat) => (
-                                        <tr key={cat.id} className="hover:bg-muted/30 transition-colors">
-                                            <td className="px-6 py-4 font-mono font-medium text-muted-foreground">
-                                                #{cat.sort_order}
-                                            </td>
-                                            <td className="px-6 py-4 font-medium text-foreground">
-                                                {cat.name}
-                                            </td>
-                                            <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
-                                                {cat.slug}
-                                            </td>
-                                            <td className="px-6 py-4 text-center">
-                                                <Badge variant="secondary" className="font-mono">
-                                                    {cat.menus_count ?? 0} Menu
-                                                </Badge>
-                                            </td>
-                                            <td className="px-6 py-4 text-center">
-                                                {cat.is_active ? (
-                                                    <Badge className="bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/25 border-emerald-500/20">
-                                                        Aktif
-                                                    </Badge>
-                                                ) : (
-                                                    <Badge variant="outline" className="text-muted-foreground">
-                                                        Nonaktif
-                                                    </Badge>
-                                                )}
-                                            </td>
-                                            <td className="px-6 py-4 text-right">
-                                                <div className="flex items-center justify-end gap-2">
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        onClick={() => openEditModal(cat)}
-                                                        className="size-8 p-0"
-                                                        title="Edit Kategori"
-                                                    >
-                                                        <Pencil className="size-4" />
-                                                    </Button>
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        onClick={() => handleDelete(cat)}
-                                                        className="size-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                                        title="Hapus Kategori"
-                                                    >
-                                                        <Trash2 className="size-4" />
-                                                    </Button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    ))
-                                )}
-                            </tbody>
-                        </table>
+                <StatGrid>
+                    <StatCard icon={Layers} tone="neutral" label="Total Kategori" value={categories.length} />
+                    <StatCard icon={CheckCircle2} tone="success" label="Ditampilkan" value={activeCount} hint="Terlihat oleh pelanggan" />
+                    <StatCard icon={EyeOff} tone="warning" label="Disembunyikan" value={categories.length - activeCount} hint="Tidak tampil di menu" />
+                    <StatCard icon={Coffee} tone="brand" label="Total Menu" value={totalMenus} hint="Di semua kategori" />
+                </StatGrid>
+
+                <Panel>
+                    <div className="flex flex-col gap-3 border-b border-[#E8DFC8] bg-[#FAF5E8] p-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <h2 className="text-sm font-extrabold text-[#18181B]">Daftar Kategori</h2>
+                            <p className="text-xs font-medium text-[#78716C]">Diurutkan berdasarkan urutan tampil di halaman pelanggan.</p>
+                        </div>
+                        <SearchInput value={search} onChange={setSearch} placeholder="Cari kategori..." />
                     </div>
-                </div>
-            </div>
+
+                    {filteredCategories.length === 0 ? (
+                        <EmptyState
+                            icon={Layers}
+                            title={categories.length === 0 ? 'Belum ada kategori' : 'Kategori tidak ditemukan'}
+                            description={
+                                categories.length === 0
+                                    ? 'Buat kategori seperti Coffee, Non-Coffee, atau Makanan untuk mulai menyusun menu.'
+                                    : 'Coba gunakan kata kunci lain.'
+                            }
+                            action={
+                                categories.length === 0 && (
+                                    <Button onClick={openCreateModal} className="gap-2 rounded-xl bg-[#C52828] font-bold text-white hover:bg-[#A81E1E]">
+                                        <Plus className="size-4" /> Tambah Kategori
+                                    </Button>
+                                )
+                            }
+                        />
+                    ) : (
+                        <ul className="divide-y divide-[#E8DFC8] bg-[#FFFDF9]">
+                            {filteredCategories.map((cat, index) => (
+                                <li
+                                    key={cat.id}
+                                    className={`flex flex-col gap-3 px-4 py-3.5 transition-colors sm:flex-row sm:items-center sm:gap-4 sm:px-5 ${
+                                        index % 2 === 0 ? 'bg-[#FFFDF9] hover:bg-[#F5EEDC]/60' : 'bg-[#FAF6EC]/50 hover:bg-[#F5EEDC]/75'
+                                    }`}
+                                >
+                                    <div className="flex min-w-0 flex-1 items-center gap-3.5">
+                                        <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-[#DFCFA9] bg-[#F5EEDC] text-sm font-black text-[#5B4126] shadow-2xs">
+                                            {cat.sort_order}
+                                        </div>
+                                        <div className="min-w-0">
+                                            <p className="truncate text-base font-extrabold text-[#18181B]">{cat.name}</p>
+                                            <p className="flex items-center gap-1 truncate text-xs font-medium text-[#78716C]">
+                                                <Link2 className="size-3 shrink-0 text-[#A8A29E]" />/{cat.slug}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center justify-between gap-3 pl-[3.375rem] sm:justify-end sm:pl-0">
+                                        <div className="flex items-center gap-2">
+                                            <StatusPill tone="neutral" icon={Coffee}>
+                                                {cat.menus_count ?? 0} Menu
+                                            </StatusPill>
+                                            {cat.is_active ? (
+                                                <StatusPill tone="success" dot>
+                                                    Ditampilkan
+                                                </StatusPill>
+                                            ) : (
+                                                <StatusPill tone="warning" dot>
+                                                    Disembunyikan
+                                                </StatusPill>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center gap-1 sm:ml-2">
+                                            <IconAction icon={Pencil} label="Edit kategori" onClick={() => openEditModal(cat)} />
+                                            <IconAction
+                                                icon={Trash2}
+                                                label="Hapus kategori"
+                                                variant="danger"
+                                                onClick={() => setDeletingCategory(cat)}
+                                            />
+                                        </div>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </Panel>
+            </AdminPage>
 
             {/* Modal Tambah / Edit Kategori */}
             <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-                <DialogContent className="sm:max-w-md">
-                    <form onSubmit={handleSubmit}>
-                        <DialogHeader>
-                            <DialogTitle>
-                                {editingCategory ? 'Edit Kategori' : 'Tambah Kategori Baru'}
-                            </DialogTitle>
-                            <DialogDescription>
-                                {editingCategory
+                <DialogContent className="rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] sm:max-w-md">
+                    <form onSubmit={handleSubmit} className="space-y-5">
+                        <FormDialogHeader
+                            icon={editingCategory ? Pencil : Layers}
+                            title={editingCategory ? 'Edit Kategori' : 'Tambah Kategori Baru'}
+                            description={
+                                editingCategory
                                     ? 'Perbarui detail kategori menu kafe.'
-                                    : 'Kategori baru untuk mengelompokkan menu makanan dan minuman.'}
-                            </DialogDescription>
-                        </DialogHeader>
+                                    : 'Kategori untuk mengelompokkan menu makanan dan minuman.'
+                            }
+                        />
 
-                        <div className="grid gap-4 py-4">
-                            {/* Input Nama */}
-                            <div className="grid gap-2">
-                                <Label htmlFor="name">Nama Kategori <span className="text-destructive">*</span></Label>
+                        <div className="grid gap-4">
+                            <div className="grid gap-1.5">
+                                <Label htmlFor="name" className="text-xs font-bold text-[#18181B]">
+                                    Nama Kategori <span className="text-[#C52828]">*</span>
+                                </Label>
                                 <Input
                                     id="name"
                                     value={form.data.name}
                                     onChange={(e) => form.setData('name', e.target.value)}
                                     placeholder="Contoh: Coffee, Non-Coffee, Makanan"
+                                    className="h-10 rounded-xl border-[#DFCFA9] bg-white text-sm font-medium text-[#18181B] placeholder:text-[#A8A29E] focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
                                     required
                                     autoFocus
                                 />
-                                {form.errors.name && (
-                                    <p className="text-destructive text-xs">{form.errors.name}</p>
-                                )}
+                                <FieldError message={form.errors.name} />
                             </div>
 
-                            {/* Input Slug */}
-                            <div className="grid gap-2">
-                                <Label htmlFor="slug">Slug URL (Opsional)</Label>
-                                <Input
-                                    id="slug"
-                                    value={form.data.slug}
-                                    onChange={(e) => form.setData('slug', e.target.value)}
-                                    placeholder="Otomatis jika dikosongkan (contoh: coffee)"
-                                />
-                                {form.errors.slug && (
-                                    <p className="text-destructive text-xs">{form.errors.slug}</p>
-                                )}
-                            </div>
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-[1fr_7rem]">
+                                <div className="grid gap-1.5">
+                                    <Label htmlFor="slug" className="text-xs font-bold text-[#18181B]">
+                                        Slug URL <span className="font-normal text-[#78716C]">(opsional)</span>
+                                    </Label>
+                                    <div className="relative">
+                                        <Link2 className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#A8A29E]" />
+                                        <Input
+                                            id="slug"
+                                            value={form.data.slug}
+                                            onChange={(e) => form.setData('slug', e.target.value)}
+                                            placeholder="otomatis"
+                                            className="h-10 rounded-xl border-[#DFCFA9] bg-white pl-9 text-sm font-medium text-[#18181B] placeholder:text-[#A8A29E] focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
+                                        />
+                                    </div>
+                                    <FieldError message={form.errors.slug} />
+                                </div>
 
-                            {/* Input Urutan */}
-                            <div className="grid gap-2">
-                                <Label htmlFor="sort_order">Urutan Tampil</Label>
-                                <Input
-                                    id="sort_order"
-                                    type="number"
-                                    min="0"
-                                    value={form.data.sort_order}
-                                    onChange={(e) => form.setData('sort_order', parseInt(e.target.value) || 0)}
-                                />
-                                <p className="text-muted-foreground text-xs">
-                                    Angka lebih kecil akan tampil lebih awal di tab menu customer.
-                                </p>
+                                <div className="grid gap-1.5">
+                                    <Label htmlFor="sort_order" className="text-xs font-bold text-[#18181B]">
+                                        Urutan
+                                    </Label>
+                                    <div className="relative">
+                                        <Hash className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#A8A29E]" />
+                                        <Input
+                                            id="sort_order"
+                                            type="number"
+                                            min="0"
+                                            value={form.data.sort_order}
+                                            onChange={(e) => form.setData('sort_order', parseInt(e.target.value) || 0)}
+                                            className="h-10 rounded-xl border-[#DFCFA9] bg-white pl-9 text-sm font-medium text-[#18181B] focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
+                                        />
+                                    </div>
+                                </div>
                             </div>
+                            <p className="-mt-2 text-[11px] font-medium text-[#78716C]">
+                                Angka urutan lebih kecil tampil lebih awal di tab menu pelanggan.
+                            </p>
 
-                            {/* Status Aktif */}
-                            <div className="flex items-center space-x-2 pt-2">
-                                <Checkbox
-                                    id="is_active"
-                                    checked={form.data.is_active}
-                                    onCheckedChange={(checked) => form.setData('is_active', Boolean(checked))}
-                                />
-                                <Label htmlFor="is_active" className="cursor-pointer text-sm font-normal">
-                                    Tampilkan kategori ini ke pelanggan (Aktif)
-                                </Label>
-                            </div>
+                            <ToggleField
+                                id="is_active"
+                                checked={form.data.is_active}
+                                onChange={(checked) => form.setData('is_active', checked)}
+                                label="Tampilkan ke pelanggan"
+                                description="Matikan untuk menyembunyikan kategori sementara."
+                            />
                         </div>
 
-                        <DialogFooter>
+                        <DialogFooter className="gap-2 border-t border-[#E8DFC8] pt-4">
                             <Button
                                 type="button"
                                 variant="outline"
+                                className="rounded-xl border-[#DFCFA9] bg-white font-semibold text-[#18181B] hover:bg-[#FAF5E8]"
                                 onClick={() => setIsModalOpen(false)}
                                 disabled={form.processing}
                             >
                                 Batal
                             </Button>
-                            <Button type="submit" disabled={form.processing}>
+                            <Button
+                                type="submit"
+                                disabled={form.processing}
+                                className="rounded-xl bg-[#C52828] font-bold text-white shadow-sm hover:bg-[#A81E1E]"
+                            >
                                 {form.processing ? 'Menyimpan...' : editingCategory ? 'Simpan Perubahan' : 'Tambah Kategori'}
                             </Button>
                         </DialogFooter>
                     </form>
                 </DialogContent>
             </Dialog>
+
+            <ConfirmDialog
+                open={!!deletingCategory}
+                onOpenChange={(open) => !open && setDeletingCategory(null)}
+                title="Hapus kategori?"
+                description={
+                    <>
+                        Kategori <b className="font-extrabold text-[#18181B]">{deletingCategory?.name}</b> beserta{' '}
+                        <b className="font-extrabold text-[#18181B]">{deletingCategory?.menus_count ?? 0} menu</b> di dalamnya akan ikut terhapus.
+                    </>
+                }
+                onConfirm={confirmDelete}
+                processing={isDeleting}
+            />
         </>
     );
 }

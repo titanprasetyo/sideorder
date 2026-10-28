@@ -1,23 +1,43 @@
 import { Head, router } from '@inertiajs/react';
-import { Coffee, Image as ImageIcon, Layers, Pencil, Plus, Trash2, X } from 'lucide-react';
-import { useState } from 'react';
+import {
+    CheckCircle2,
+    Coffee,
+    ImagePlus,
+    Image as ImageIcon,
+    Layers,
+    ListChecks,
+    Pencil,
+    Plus,
+    Trash2,
+    Upload,
+    X,
+    XCircle,
+} from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
-} from '@/components/ui/dialog';
+    AdminPage,
+    ConfirmDialog,
+    EmptyState,
+    FilterTabs,
+    FormDialogHeader,
+    IconAction,
+    PageHeader,
+    Panel,
+    SearchInput,
+    StatCard,
+    StatGrid,
+    StatusPill,
+    ToggleField,
+} from '@/components/admin/admin-ui';
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Dialog, DialogContent, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { cn } from '@/lib/utils';
 
 interface OptionItem {
     id?: number;
@@ -72,10 +92,27 @@ interface Props {
     categories: Category[];
 }
 
+function SectionTitle({ step, title, action }: { step: number; title: string; action?: React.ReactNode }) {
+    return (
+        <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+                <span className="flex size-6 items-center justify-center rounded-full bg-primary text-[11px] font-extrabold text-primary-foreground">
+                    {step}
+                </span>
+                <h4 className="text-sm font-extrabold text-foreground">{title}</h4>
+            </div>
+            {action}
+        </div>
+    );
+}
+
 export default function MenusIndex({ menus, categories }: Props) {
     const [selectedCategory, setSelectedCategory] = useState<number | 'all'>('all');
+    const [search, setSearch] = useState('');
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingMenu, setEditingMenu] = useState<Menu | null>(null);
+    const [deletingMenu, setDeletingMenu] = useState<Menu | null>(null);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     // Form state dasar
     const [categoryId, setCategoryId] = useState<string>('');
@@ -98,6 +135,8 @@ export default function MenusIndex({ menus, categories }: Props) {
             minimumFractionDigits: 0,
         }).format(typeof amount === 'string' ? parseFloat(amount) : amount);
     };
+
+    const availableCount = menus.filter((m) => m.is_active).length;
 
     const resetForm = () => {
         setCategoryId(categories[0]?.id.toString() || '');
@@ -276,351 +315,455 @@ export default function MenusIndex({ menus, categories }: Props) {
         }
     };
 
-    const handleDelete = (menu: Menu) => {
-        if (confirm(`Apakah Anda yakin ingin menghapus menu "${menu.name}"?`)) {
-            router.delete(`/admin/menus/${menu.id}`, {
-                onSuccess: () => toast.success('Menu berhasil dihapus!'),
-            });
-        }
+    const confirmDelete = () => {
+        if (!deletingMenu) return;
+
+        setIsDeleting(true);
+        router.delete(`/admin/menus/${deletingMenu.id}`, {
+            onSuccess: () => toast.success('Menu berhasil dihapus!'),
+            onError: (err) => toast.error(Object.values(err)[0] || 'Gagal menghapus menu.'),
+            onFinish: () => {
+                setIsDeleting(false);
+                setDeletingMenu(null);
+            },
+        });
     };
 
-    const filteredMenus = selectedCategory === 'all'
-        ? menus
-        : menus.filter((m) => m.category_id === selectedCategory);
+    const filteredMenus = useMemo(() => {
+        const q = search.toLowerCase().trim();
+
+        return menus.filter((m) => {
+            const matchCategory = selectedCategory === 'all' || m.category_id === selectedCategory;
+            const matchSearch = !q || m.name.toLowerCase().includes(q) || (m.description ?? '').toLowerCase().includes(q);
+
+            return matchCategory && matchSearch;
+        });
+    }, [menus, selectedCategory, search]);
 
     return (
         <>
             <Head title="Manajemen Menu Kafe" />
 
-            <div className="flex h-full flex-1 flex-col gap-6 p-4 md:p-8">
-                {/* Header */}
-                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                    <div>
-                        <h1 className="text-2xl font-bold tracking-tight">Menu & Produk Kafe</h1>
-                        <p className="text-muted-foreground text-sm">
-                            Kelola produk makanan, minuman, harga, foto, serta opsi ukuran dan topping.
-                        </p>
-                    </div>
-                    <Button onClick={openCreateModal} className="w-fit gap-2">
-                        <Plus className="size-4" />
-                        Tambah Menu Baru
-                    </Button>
-                </div>
-
-                {/* Filter Kategori */}
-                <div className="flex flex-wrap gap-2 items-center">
-                    <Button
-                        variant={selectedCategory === 'all' ? 'default' : 'outline'}
-                        size="sm"
-                        onClick={() => setSelectedCategory('all')}
-                        className="rounded-full text-xs"
-                    >
-                        Semua Kategori ({menus.length})
-                    </Button>
-                    {categories.map((cat) => (
-                        <Button
-                            key={cat.id}
-                            variant={selectedCategory === cat.id ? 'default' : 'outline'}
-                            size="sm"
-                            onClick={() => setSelectedCategory(cat.id)}
-                            className="rounded-full text-xs"
-                        >
-                            {cat.name} ({menus.filter((m) => m.category_id === cat.id).length})
+            <AdminPage>
+                <PageHeader
+                    icon={Coffee}
+                    title="Menu & Produk"
+                    description="Kelola produk, harga, foto, serta opsi ukuran dan topping."
+                    actions={
+                        <Button onClick={openCreateModal} className="h-10 gap-2 rounded-xl px-4 font-bold shadow-sm">
+                            <Plus className="size-4" />
+                            Tambah Menu
                         </Button>
-                    ))}
+                    }
+                />
+
+                <StatGrid>
+                    <StatCard icon={Coffee} tone="brand" label="Total Menu" value={menus.length} />
+                    <StatCard icon={CheckCircle2} tone="success" label="Tersedia" value={availableCount} hint="Bisa dipesan" />
+                    <StatCard icon={XCircle} tone="warning" label="Habis / Nonaktif" value={menus.length - availableCount} hint="Tidak tampil di pelanggan" />
+                    <StatCard icon={Layers} tone="neutral" label="Kategori" value={categories.length} />
+                </StatGrid>
+
+                {/* Toolbar */}
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <FilterTabs<number | 'all'>
+                        value={selectedCategory}
+                        onChange={setSelectedCategory}
+                        options={[
+                            { value: 'all', label: 'Semua', count: menus.length },
+                            ...categories.map((cat) => ({
+                                value: cat.id,
+                                label: cat.name,
+                                count: menus.filter((m) => m.category_id === cat.id).length,
+                            })),
+                        ]}
+                    />
+                    <SearchInput value={search} onChange={setSearch} placeholder="Cari nama menu..." />
                 </div>
 
                 {/* Katalog Card Grid */}
                 {filteredMenus.length === 0 ? (
-                    <div className="rounded-xl border bg-card p-12 text-center text-muted-foreground">
-                        <Coffee className="size-10 mx-auto stroke-1 text-muted-foreground/50 mb-3" />
-                        <p className="font-medium">Belum ada menu di kategori ini.</p>
-                        <Button variant="outline" size="sm" onClick={openCreateModal} className="mt-4">
-                            Tambah Menu Sekarang
-                        </Button>
-                    </div>
+                    <Panel>
+                        <EmptyState
+                            icon={Coffee}
+                            title={menus.length === 0 ? 'Belum ada menu' : 'Menu tidak ditemukan'}
+                            description={
+                                menus.length === 0
+                                    ? 'Tambahkan menu pertama lengkap dengan foto dan harga.'
+                                    : 'Tidak ada menu yang cocok dengan filter atau pencarian.'
+                            }
+                            action={
+                                <Button onClick={openCreateModal} className="gap-2 rounded-xl bg-[#C52828] font-bold text-white hover:bg-[#A81E1E]">
+                                    <Plus className="size-4" /> Tambah Menu
+                                </Button>
+                            }
+                        />
+                    </Panel>
                 ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                         {filteredMenus.map((menu) => (
-                            <Card key={menu.id} className="overflow-hidden flex flex-col justify-between hover:shadow-md transition-shadow">
-                                <div>
-                                    {/* Foto Menu */}
-                                    <div className="relative aspect-video w-full bg-muted overflow-hidden">
-                                        {menu.image_path ? (
-                                            <img
-                                                src={`/storage/${menu.image_path}`}
-                                                alt={menu.name}
-                                                className="size-full object-cover"
-                                            />
-                                        ) : (
-                                            <div className="size-full flex items-center justify-center text-muted-foreground/40">
-                                                <ImageIcon className="size-8 stroke-1" />
-                                            </div>
-                                        )}
-                                        <div className="absolute top-2 right-2">
-                                            {menu.is_active ? (
-                                                <Badge className="bg-emerald-500/90 text-white text-[10px]">Tersedia</Badge>
-                                            ) : (
-                                                <Badge variant="destructive" className="text-[10px]">Habis</Badge>
+                            <div
+                                key={menu.id}
+                                className="group flex flex-col overflow-hidden rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] shadow-xs transition-all hover:-translate-y-0.5 hover:border-[#DFCFA9] hover:shadow-md"
+                            >
+                                {/* Foto Menu */}
+                                <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#FAF5E8]">
+                                    {menu.image_path ? (
+                                        <img
+                                            src={`/storage/${menu.image_path}`}
+                                            alt={menu.name}
+                                            className={cn(
+                                                'size-full object-cover transition-transform duration-300 group-hover:scale-105',
+                                                !menu.is_active && 'grayscale-[60%]',
                                             )}
+                                        />
+                                    ) : (
+                                        <div className="flex size-full flex-col items-center justify-center gap-1 text-[#B8A67E]">
+                                            <ImageIcon className="size-8 stroke-[1.5]" />
+                                            <span className="text-[11px] font-semibold">Belum ada foto</span>
                                         </div>
+                                    )}
+                                    <div className="absolute top-3 left-3">
+                                        <span className="rounded-full border border-[#E8DFC8] bg-white/95 px-2.5 py-1 text-[11px] font-bold text-[#18181B] shadow-xs backdrop-blur">
+                                            {menu.category?.name || 'Tanpa Kategori'}
+                                        </span>
                                     </div>
-
-                                    {/* Detail */}
-                                    <CardContent className="p-4 space-y-2">
-                                        <div className="flex items-center justify-between text-xs text-muted-foreground">
-                                            <span>{menu.category?.name || 'Tanpa Kategori'}</span>
-                                            <span className="font-mono text-emerald-600 font-semibold">
-                                                {formatRupiah(menu.base_price)}
-                                            </span>
-                                        </div>
-                                        <h3 className="font-semibold text-base line-clamp-1">{menu.name}</h3>
-                                        {menu.description && (
-                                            <p className="text-xs text-muted-foreground line-clamp-2">{menu.description}</p>
+                                    <div className="absolute top-3 right-3">
+                                        {menu.is_active ? (
+                                            <StatusPill tone="success" dot className="bg-[#DCFCE7]/95 shadow-xs">
+                                                Tersedia
+                                            </StatusPill>
+                                        ) : (
+                                            <StatusPill tone="danger" dot className="bg-[#FEE2E2]/95 shadow-xs">
+                                                Habis
+                                            </StatusPill>
                                         )}
-
-                                        {/* Badge Opsi */}
-                                        {menu.option_groups && menu.option_groups.length > 0 && (
-                                            <div className="flex flex-wrap gap-1 pt-1">
-                                                {menu.option_groups.map((g) => (
-                                                    <Badge key={g.id} variant="outline" className="text-[10px] py-0 px-1.5 font-normal">
-                                                        {g.name} ({g.option_items.length})
-                                                    </Badge>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </CardContent>
+                                    </div>
                                 </div>
 
-                                {/* Tombol Aksi */}
-                                <div className="p-4 pt-0 border-t flex items-center justify-end gap-2 mt-2">
-                                    <Button variant="ghost" size="sm" onClick={() => openEditModal(menu)} className="size-8 p-0">
-                                        <Pencil className="size-4" />
-                                    </Button>
-                                    <Button variant="ghost" size="sm" onClick={() => handleDelete(menu)} className="size-8 p-0 text-destructive hover:bg-destructive/10">
-                                        <Trash2 className="size-4" />
-                                    </Button>
-                                </div>
-                            </Card>
-                        ))}
-                    </div>
-                )}
-            </div>
+                                {/* Detail */}
+                                <div className="flex flex-1 flex-col gap-2 p-4">
+                                    <h3 className="line-clamp-1 text-base font-extrabold text-[#18181B]">{menu.name}</h3>
+                                    <p className="line-clamp-2 min-h-8 text-xs leading-relaxed text-[#78716C]">
+                                        {menu.description || 'Belum ada deskripsi.'}
+                                    </p>
 
-            {/* Modal Tambah / Edit Menu */}
-            <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-                <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
-                    <form onSubmit={handleSubmit} className="space-y-6">
-                        <DialogHeader>
-                            <DialogTitle>{editingMenu ? 'Edit Menu Kafe' : 'Tambah Menu Baru'}</DialogTitle>
-                            <DialogDescription>
-                                Atur informasi dasar, harga reguler, foto, serta variasi ukuran dan topping.
-                            </DialogDescription>
-                        </DialogHeader>
-
-                        {/* BAGIAN 1: INFORMASI DASAR */}
-                        <div className="space-y-4">
-                            <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground border-b pb-1">
-                                1. Informasi Produk
-                            </h4>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="grid gap-2">
-                                    <Label htmlFor="category">Kategori <span className="text-destructive">*</span></Label>
-                                    <Select value={categoryId} onValueChange={setCategoryId} required>
-                                        <SelectTrigger id="category">
-                                            <SelectValue placeholder="Pilih Kategori" />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            {categories.map((c) => (
-                                                <SelectItem key={c.id} value={c.id.toString()}>
-                                                    {c.name}
-                                                </SelectItem>
+                                    {menu.option_groups && menu.option_groups.length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {menu.option_groups.map((g) => (
+                                                <span
+                                                    key={g.id}
+                                                    className="inline-flex items-center gap-1 rounded-md border border-[#DFCFA9] bg-[#FAF5E8] px-2 py-0.5 text-[10px] font-bold text-[#5B4126]"
+                                                >
+                                                    <ListChecks className="size-3" />
+                                                    {g.name} · {g.option_items.length}
+                                                </span>
                                             ))}
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-
-                                <div className="grid gap-2">
-                                    <Label htmlFor="name">Nama Menu <span className="text-destructive">*</span></Label>
-                                    <Input
-                                        id="name"
-                                        value={name}
-                                        onChange={(e) => setName(e.target.value)}
-                                        placeholder="Contoh: Kopi Susu Gula Aren"
-                                        required
-                                    />
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="grid gap-2">
-                                    <Label htmlFor="price">Harga Dasar (Rp) <span className="text-destructive">*</span></Label>
-                                    <Input
-                                        id="price"
-                                        type="number"
-                                        min="0"
-                                        step="500"
-                                        value={basePrice}
-                                        onChange={(e) => setBasePrice(e.target.value)}
-                                        placeholder="18000"
-                                        required
-                                    />
-                                    <p className="text-[11px] text-muted-foreground">Harga ukuran standar/regular.</p>
-                                </div>
-
-                                <div className="grid gap-2">
-                                    <Label htmlFor="image">Foto Produk</Label>
-                                    <Input id="image" type="file" accept="image/*" onChange={handleImageChange} />
-                                    {imagePreview && (
-                                        <div className="mt-1 size-16 rounded border overflow-hidden">
-                                            <img src={imagePreview} alt="Preview" className="size-full object-cover" />
                                         </div>
                                     )}
                                 </div>
-                            </div>
 
-                            <div className="grid gap-2">
-                                <Label htmlFor="description">Deskripsi Singkat</Label>
-                                <Input
-                                    id="description"
-                                    value={description}
-                                    onChange={(e) => setDescription(e.target.value)}
-                                    placeholder="Espresso dengan susu segar dan sirup aren alami..."
-                                />
+                                {/* Harga & Aksi */}
+                                <div className="flex items-center justify-between gap-2 border-t border-[#E8DFC8] bg-[#FAF6EC] px-4 py-3">
+                                    <div>
+                                        <p className="text-[10px] font-bold tracking-wide text-[#78716C] uppercase">Harga</p>
+                                        <p className="text-base font-black text-[#C52828]">{formatRupiah(menu.base_price)}</p>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => openEditModal(menu)}
+                                            className="h-8 gap-1.5 rounded-lg border-[#DFCFA9] bg-white text-xs font-bold text-[#18181B] hover:bg-[#FAF5E8]"
+                                        >
+                                            <Pencil className="size-3.5" /> Edit
+                                        </Button>
+                                        <IconAction icon={Trash2} label="Hapus menu" variant="danger" onClick={() => setDeletingMenu(menu)} />
+                                    </div>
+                                </div>
                             </div>
+                        ))}
+                    </div>
+                )}
+            </AdminPage>
 
-                            <div className="flex items-center space-x-2 pt-1">
-                                <Checkbox
-                                    id="menu_is_active"
-                                    checked={isActive}
-                                    onCheckedChange={(checked) => setIsActive(Boolean(checked))}
-                                />
-                                <Label htmlFor="menu_is_active" className="cursor-pointer text-sm font-normal">
-                                    Menu ini tersedia untuk dipesan customer (Aktif)
-                                </Label>
-                            </div>
+            {/* Modal Tambah / Edit Menu */}
+            <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+                <DialogContent className="max-h-[92vh] gap-0 overflow-hidden rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] p-0 sm:max-w-2xl">
+                    <form onSubmit={handleSubmit} className="flex max-h-[92vh] flex-col">
+                        <div className="border-b border-[#E8DFC8] bg-[#FAF5E8] px-6 py-5">
+                            <FormDialogHeader
+                                icon={editingMenu ? Pencil : Coffee}
+                                title={editingMenu ? 'Edit Menu' : 'Tambah Menu Baru'}
+                                description="Atur informasi produk, harga, foto, serta variasi ukuran & topping."
+                            />
                         </div>
 
-                        {/* BAGIAN 2: KUSTOMISASI (UKURAN & TOPPING) */}
-                        <div className="space-y-4 pt-2">
-                            <div className="flex items-center justify-between border-b pb-1">
-                                <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                                    2. Opsi Ukuran & Kustomisasi Topping
-                                </h4>
-                                <Button type="button" variant="outline" size="sm" onClick={addOptionGroup} className="h-7 text-xs gap-1">
-                                    <Plus className="size-3" /> Tambah Grup Opsi
-                                </Button>
-                            </div>
+                        <div className="flex-1 space-y-7 overflow-y-auto px-6 py-5">
+                            {/* BAGIAN 1: INFORMASI DASAR */}
+                            <section className="space-y-4">
+                                <SectionTitle step={1} title="Informasi Produk" />
 
-                            {optionGroups.length === 0 ? (
-                                <p className="text-xs text-muted-foreground italic py-2">
-                                    Belum ada grup opsi. Produk ini hanya memiliki satu harga dasar (tanpa pilihan ukuran/topping).
-                                </p>
-                            ) : (
-                                optionGroups.map((group, gIdx) => (
-                                    <div key={gIdx} className="rounded-lg border bg-muted/30 p-3 space-y-3">
-                                        <div className="flex items-center gap-2">
+                                <div className="grid grid-cols-1 gap-4 sm:grid-cols-[10rem_1fr]">
+                                    {/* Upload Foto */}
+                                    <label
+                                        htmlFor="image"
+                                        className="group relative flex aspect-square cursor-pointer flex-col items-center justify-center overflow-hidden rounded-2xl border-2 border-dashed border-[#DFCFA9] bg-[#FAF5E8] text-center transition-colors hover:border-[#C52828]/50 hover:bg-[#FDECEC]/40"
+                                    >
+                                        {imagePreview ? (
+                                            <>
+                                                <img src={imagePreview} alt="Preview" className="size-full object-cover" />
+                                                <div className="absolute inset-0 flex items-center justify-center bg-black/45 text-xs font-bold text-white opacity-0 transition-opacity group-hover:opacity-100">
+                                                    <Upload className="mr-1.5 size-4" /> Ganti Foto
+                                                </div>
+                                            </>
+                                        ) : (
+                                            <div className="flex flex-col items-center gap-1.5 px-3 text-[#78716C]">
+                                                <ImagePlus className="size-7 text-[#B8A67E]" />
+                                                <span className="text-xs font-bold text-[#18181B]">Unggah Foto</span>
+                                                <span className="text-[10px]">JPG / PNG, rasio 4:3</span>
+                                            </div>
+                                        )}
+                                        <input id="image" type="file" accept="image/*" onChange={handleImageChange} className="sr-only" />
+                                    </label>
+
+                                    <div className="grid content-start gap-4">
+                                        <div className="grid gap-1.5">
+                                            <Label htmlFor="name" className="text-xs font-bold text-[#18181B]">
+                                                Nama Menu <span className="text-[#C52828]">*</span>
+                                            </Label>
                                             <Input
-                                                value={group.name}
-                                                onChange={(e) => updateGroupField(gIdx, 'name', e.target.value)}
-                                                placeholder="Nama Grup (misal: Ukuran, Level Es, Topping)"
-                                                className="h-8 text-xs font-semibold bg-background"
+                                                id="name"
+                                                value={name}
+                                                onChange={(e) => setName(e.target.value)}
+                                                placeholder="Contoh: Kopi Susu Gula Aren"
+                                                className="h-10 rounded-xl border-[#DFCFA9] bg-white text-sm font-medium text-[#18181B] focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
                                                 required
                                             />
-                                            <Select
-                                                value={group.selection_type}
-                                                onValueChange={(val) => updateGroupField(gIdx, 'selection_type', val)}
-                                            >
-                                                <SelectTrigger className="w-36 h-8 text-xs bg-background">
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="single">Pilih 1 (Radio)</SelectItem>
-                                                    <SelectItem value="multiple">Bisa Banyak (Checkbox)</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                            <Button
-                                                type="button"
-                                                variant="ghost"
-                                                size="sm"
-                                                onClick={() => removeOptionGroup(gIdx)}
-                                                className="size-8 p-0 text-destructive"
-                                            >
-                                                <Trash2 className="size-4" />
-                                            </Button>
                                         </div>
 
-                                        <div className="flex items-center space-x-2 pl-1">
-                                            <Checkbox
-                                                id={`req_${gIdx}`}
-                                                checked={group.is_required}
-                                                onCheckedChange={(checked) => updateGroupField(gIdx, 'is_required', Boolean(checked))}
-                                            />
-                                            <Label htmlFor={`req_${gIdx}`} className="text-xs cursor-pointer">
-                                                Wajib Dipilih Customer (misal ukuran harus dipilih salah satu)
-                                            </Label>
-                                        </div>
+                                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                            <div className="grid gap-1.5">
+                                                <Label htmlFor="category" className="text-xs font-bold text-[#18181B]">
+                                                    Kategori <span className="text-[#C52828]">*</span>
+                                                </Label>
+                                                <Select value={categoryId} onValueChange={setCategoryId} required>
+                                                    <SelectTrigger id="category" className="h-10 w-full rounded-xl border-[#DFCFA9] bg-white text-sm font-medium text-[#18181B]">
+                                                        <SelectValue placeholder="Pilih Kategori" />
+                                                    </SelectTrigger>
+                                                    <SelectContent className="border-[#E8DFC8] bg-[#FFFDF9] text-[#18181B]">
+                                                        {categories.map((c) => (
+                                                            <SelectItem key={c.id} value={c.id.toString()}>
+                                                                {c.name}
+                                                            </SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
 
-                                        {/* Daftar Opsi di dalam Grup */}
-                                        <div className="space-y-1.5 pl-2 border-l-2 border-border/70 ml-1">
-                                            {group.items.map((item, iIdx) => (
-                                                <div key={iIdx} className="flex items-center gap-2">
+                                            <div className="grid gap-1.5">
+                                                <Label htmlFor="price" className="text-xs font-bold text-[#18181B]">
+                                                    Harga Dasar <span className="text-[#C52828]">*</span>
+                                                </Label>
+                                                <div className="relative">
+                                                    <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-xs font-bold text-[#78716C]">
+                                                        Rp
+                                                    </span>
                                                     <Input
-                                                        value={item.name}
-                                                        onChange={(e) => updateItemField(gIdx, iIdx, 'name', e.target.value)}
-                                                        placeholder="Nama Opsi (Regular, Large, Extra Shot)"
-                                                        className="h-7 text-xs bg-background flex-1"
+                                                        id="price"
+                                                        type="number"
+                                                        min="0"
+                                                        step="500"
+                                                        value={basePrice}
+                                                        onChange={(e) => setBasePrice(e.target.value)}
+                                                        placeholder="18000"
+                                                        className="h-10 rounded-xl border-[#DFCFA9] bg-white pl-9 text-sm font-medium text-[#18181B] focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
                                                         required
                                                     />
-                                                    <div className="flex items-center gap-1">
-                                                        <span className="text-[11px] text-muted-foreground">+Rp</span>
-                                                        <Input
-                                                            type="number"
-                                                            min="0"
-                                                            step="500"
-                                                            value={item.additional_price}
-                                                            onChange={(e) => updateItemField(gIdx, iIdx, 'additional_price', parseFloat(e.target.value) || 0)}
-                                                            className="h-7 w-20 text-xs bg-background"
-                                                        />
-                                                    </div>
-                                                    <Button
-                                                        type="button"
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        onClick={() => removeOptionItem(gIdx, iIdx)}
-                                                        className="size-7 p-0 text-muted-foreground hover:text-destructive"
-                                                    >
-                                                        <X className="size-3.5" />
-                                                    </Button>
                                                 </div>
-                                            ))}
-                                            <Button
-                                                type="button"
-                                                variant="ghost"
-                                                size="sm"
-                                                onClick={() => addOptionItem(gIdx)}
-                                                className="h-6 text-[11px] text-primary gap-1 px-2 mt-1"
-                                            >
-                                                <Plus className="size-3" /> Tambah Pilihan
-                                            </Button>
+                                            </div>
                                         </div>
                                     </div>
-                                ))
-                            )}
+                                </div>
+
+                                <div className="grid gap-1.5">
+                                    <Label htmlFor="description" className="text-xs font-bold text-[#18181B]">Deskripsi Singkat</Label>
+                                    <textarea
+                                        id="description"
+                                        value={description}
+                                        onChange={(e) => setDescription(e.target.value)}
+                                        rows={2}
+                                        placeholder="Espresso dengan susu segar dan sirup aren alami..."
+                                        className="w-full resize-none rounded-xl border border-[#DFCFA9] bg-white px-3 py-2 text-sm text-[#18181B] shadow-xs outline-none placeholder:text-[#A8A29E] focus-visible:border-[#C52828] focus-visible:ring-[3px] focus-visible:ring-[#C52828]/20"
+                                    />
+                                </div>
+
+                                <ToggleField
+                                    id="menu_is_active"
+                                    checked={isActive}
+                                    onChange={setIsActive}
+                                    label="Tersedia untuk dipesan"
+                                    description="Matikan jika stok habis agar tidak bisa dipesan pelanggan."
+                                />
+                            </section>
+
+                            {/* BAGIAN 2: KUSTOMISASI (UKURAN & TOPPING) */}
+                            <section className="space-y-3">
+                                <SectionTitle
+                                    step={2}
+                                    title="Opsi Ukuran & Topping"
+                                    action={
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={addOptionGroup}
+                                            className="h-8 gap-1 rounded-lg border-[#DFCFA9] bg-white text-xs font-bold text-[#18181B] hover:bg-[#FAF5E8]"
+                                        >
+                                            <Plus className="size-3.5" /> Tambah Grup
+                                        </Button>
+                                    }
+                                />
+
+                                {optionGroups.length === 0 ? (
+                                    <button
+                                        type="button"
+                                        onClick={addOptionGroup}
+                                        className="flex w-full flex-col items-center gap-1 rounded-xl border-2 border-dashed border-[#DFCFA9] bg-[#FAF5E8]/60 px-4 py-6 text-center transition-colors hover:border-[#C52828]/50 hover:bg-[#FAF5E8]"
+                                    >
+                                        <ListChecks className="size-5 text-[#B8A67E]" />
+                                        <span className="text-xs font-bold text-[#18181B]">Belum ada grup opsi</span>
+                                        <span className="text-[11px] font-medium text-[#78716C]">
+                                            Klik untuk menambah pilihan seperti Ukuran, Level Es, atau Topping.
+                                        </span>
+                                    </button>
+                                ) : (
+                                    optionGroups.map((group, gIdx) => (
+                                        <div key={gIdx} className="space-y-3 rounded-xl border border-[#E8DFC8] bg-[#FAF5E8] p-4">
+                                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                <Input
+                                                    value={group.name}
+                                                    onChange={(e) => updateGroupField(gIdx, 'name', e.target.value)}
+                                                    placeholder="Nama grup (misal: Ukuran, Topping)"
+                                                    className="h-9 flex-1 rounded-lg border-[#DFCFA9] bg-white text-sm font-bold text-[#18181B]"
+                                                    required
+                                                />
+                                                <div className="flex items-center gap-2">
+                                                    <Select
+                                                        value={group.selection_type}
+                                                        onValueChange={(val) => updateGroupField(gIdx, 'selection_type', val)}
+                                                    >
+                                                        <SelectTrigger className="h-9 w-full rounded-lg border-[#DFCFA9] bg-white text-xs font-semibold sm:w-40">
+                                                            <SelectValue />
+                                                        </SelectTrigger>
+                                                        <SelectContent className="border-[#E8DFC8] bg-[#FFFDF9] text-[#18181B]">
+                                                            <SelectItem value="single">Pilih salah satu</SelectItem>
+                                                            <SelectItem value="multiple">Boleh pilih banyak</SelectItem>
+                                                        </SelectContent>
+                                                    </Select>
+                                                    <IconAction
+                                                        icon={Trash2}
+                                                        label="Hapus grup"
+                                                        variant="danger"
+                                                        onClick={() => removeOptionGroup(gIdx)}
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <label htmlFor={`req_${gIdx}`} className="flex w-fit cursor-pointer items-center gap-2">
+                                                <Checkbox
+                                                    id={`req_${gIdx}`}
+                                                    checked={group.is_required}
+                                                    onCheckedChange={(checked) => updateGroupField(gIdx, 'is_required', Boolean(checked))}
+                                                />
+                                                <span className="text-xs font-bold text-[#18181B]">Wajib dipilih pelanggan</span>
+                                            </label>
+
+                                            {/* Daftar Opsi di dalam Grup */}
+                                            <div className="space-y-2 rounded-lg border border-[#E8DFC8] bg-[#FFFDF9] p-2.5">
+                                                {group.items.map((item, iIdx) => (
+                                                    <div key={iIdx} className="flex items-center gap-2">
+                                                        <Input
+                                                            value={item.name}
+                                                            onChange={(e) => updateItemField(gIdx, iIdx, 'name', e.target.value)}
+                                                            placeholder="Nama pilihan (Regular, Large...)"
+                                                            className="h-8 flex-1 rounded-lg border-[#DFCFA9] bg-white text-xs text-[#18181B]"
+                                                            required
+                                                        />
+                                                        <div className="relative">
+                                                            <span className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-[11px] font-bold text-[#78716C]">
+                                                                +Rp
+                                                            </span>
+                                                            <Input
+                                                                type="number"
+                                                                min="0"
+                                                                step="500"
+                                                                value={item.additional_price}
+                                                                onChange={(e) =>
+                                                                    updateItemField(gIdx, iIdx, 'additional_price', parseFloat(e.target.value) || 0)
+                                                                }
+                                                                className="h-8 w-28 rounded-lg border-[#DFCFA9] bg-white pl-10 text-xs text-[#18181B]"
+                                                            />
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => removeOptionItem(gIdx, iIdx)}
+                                                            className="flex size-8 shrink-0 items-center justify-center rounded-lg text-[#78716C] transition-colors hover:bg-[#FEE2E2] hover:text-[#B91C1C]"
+                                                            aria-label="Hapus pilihan"
+                                                        >
+                                                            <X className="size-3.5" />
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => addOptionItem(gIdx)}
+                                                    className="flex h-8 w-full items-center justify-center gap-1 rounded-lg border border-dashed border-[#DFCFA9] text-[11px] font-bold text-[#C52828] transition-colors hover:bg-[#FDECEC]/50"
+                                                >
+                                                    <Plus className="size-3.5" /> Tambah Pilihan
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </section>
                         </div>
 
-                        <DialogFooter className="border-t pt-4">
-                            <Button type="button" variant="outline" onClick={() => setIsModalOpen(false)} disabled={isSubmitting}>
+                        <DialogFooter className="gap-2 border-t border-[#E8DFC8] bg-[#FAF5E8] px-6 py-4">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                className="rounded-xl border-[#DFCFA9] bg-white font-semibold text-[#18181B] hover:bg-[#FAF5E8]"
+                                onClick={() => setIsModalOpen(false)}
+                                disabled={isSubmitting}
+                            >
                                 Batal
                             </Button>
-                            <Button type="submit" disabled={isSubmitting}>
+                            <Button
+                                type="submit"
+                                disabled={isSubmitting}
+                                className="rounded-xl bg-[#C52828] font-bold text-white shadow-sm hover:bg-[#A81E1E]"
+                            >
                                 {isSubmitting ? 'Menyimpan...' : editingMenu ? 'Simpan Perubahan' : 'Tambah Menu'}
                             </Button>
                         </DialogFooter>
                     </form>
                 </DialogContent>
             </Dialog>
+
+            <ConfirmDialog
+                open={!!deletingMenu}
+                onOpenChange={(open) => !open && setDeletingMenu(null)}
+                title="Hapus menu?"
+                description={
+                    <>
+                        Menu <b className="font-extrabold text-[#18181B]">{deletingMenu?.name}</b> akan dihapus permanen dari katalog.
+                    </>
+                }
+                onConfirm={confirmDelete}
+                processing={isDeleting}
+            />
         </>
     );
 }

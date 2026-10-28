@@ -49,7 +49,7 @@ class MenuController extends Controller
             }
 
             if (empty($validated['slug'])) {
-                $validated['slug'] = Str::slug($validated['name']) . '-' . Str::random(4);
+                $validated['slug'] = Str::slug($validated['name']).'-'.Str::random(4);
             }
 
             // Buat Menu
@@ -64,14 +64,17 @@ class MenuController extends Controller
             ]);
 
             // Buat Grup Opsi & Items jika ada
-            if (!empty($validated['option_groups'])) {
+            if (! empty($validated['option_groups'])) {
                 foreach ($validated['option_groups'] as $index => $groupData) {
+                    $isSizeGroup = in_array(strtolower(trim($groupData['name'])), ['ukuran', 'size'], true);
+                    $selectionType = $isSizeGroup ? 'single' : $groupData['selection_type'];
+
                     $group = $menu->optionGroups()->create([
                         'name' => $groupData['name'],
-                        'selection_type' => $groupData['selection_type'],
+                        'selection_type' => $selectionType,
                         'is_required' => $groupData['is_required'] ?? false,
                         'min_selection' => $groupData['min_selection'] ?? 0,
-                        'max_selection' => $groupData['max_selection'] ?? null,
+                        'max_selection' => $selectionType === 'single' ? 1 : ($groupData['max_selection'] ?? null),
                         'sort_order' => $index,
                     ]);
 
@@ -109,7 +112,7 @@ class MenuController extends Controller
             }
 
             if (empty($validated['slug'])) {
-                $validated['slug'] = Str::slug($validated['name']) . '-' . Str::random(4);
+                $validated['slug'] = Str::slug($validated['name']).'-'.Str::random(4);
             }
 
             // Update info dasar menu
@@ -125,14 +128,17 @@ class MenuController extends Controller
             // Sinkronisasi Grup Opsi: Hapus grup lama, buat grup baru
             $menu->optionGroups()->delete();
 
-            if (!empty($validated['option_groups'])) {
+            if (! empty($validated['option_groups'])) {
                 foreach ($validated['option_groups'] as $index => $groupData) {
+                    $isSizeGroup = in_array(strtolower(trim($groupData['name'])), ['ukuran', 'size'], true);
+                    $selectionType = $isSizeGroup ? 'single' : $groupData['selection_type'];
+
                     $group = $menu->optionGroups()->create([
                         'name' => $groupData['name'],
-                        'selection_type' => $groupData['selection_type'],
+                        'selection_type' => $selectionType,
                         'is_required' => $groupData['is_required'] ?? false,
                         'min_selection' => $groupData['min_selection'] ?? 0,
-                        'max_selection' => $groupData['max_selection'] ?? null,
+                        'max_selection' => $selectionType === 'single' ? 1 : ($groupData['max_selection'] ?? null),
                         'sort_order' => $index,
                     ]);
 
