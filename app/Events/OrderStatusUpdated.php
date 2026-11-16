@@ -19,6 +19,9 @@ class OrderStatusUpdated implements ShouldBroadcastNow
         public ?string $newStatus = null
     ) {}
 
+    /**
+     * @return array<int, Channel>
+     */
     public function broadcastOn(): array
     {
         return [
@@ -32,6 +35,9 @@ class OrderStatusUpdated implements ShouldBroadcastNow
         return 'order.status.updated';
     }
 
+    /**
+     * @return array<string, mixed>
+     */
     public function broadcastWith(): array
     {
         $this->order->loadMissing(['table', 'items.options']);

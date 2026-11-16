@@ -67,7 +67,11 @@ function buildBellWavDataUri(): string {
 
         // Clamp [-1, 1]
         const clamped = Math.max(-1, Math.min(1, sample * 0.85));
-        view.setInt16(44 + i * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+        view.setInt16(
+            44 + i * 2,
+            clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff,
+            true,
+        );
     }
 
     const bytes = new Uint8Array(buffer);
@@ -97,7 +101,8 @@ export function getSharedAudioContext(): AudioContext | null {
     try {
         const AudioContextClass =
             window.AudioContext ||
-            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+            (window as unknown as { webkitAudioContext: typeof AudioContext })
+                .webkitAudioContext;
         if (!AudioContextClass) return null;
         if (!sharedAudioCtx) {
             sharedAudioCtx = new AudioContextClass();
@@ -161,13 +166,22 @@ function attachGlobalAudioUnlockers(): void {
     if (typeof window === 'undefined' || globalListenersAttached) return;
     globalListenersAttached = true;
 
-    const events = ['pointerdown', 'mousedown', 'click', 'touchstart', 'keydown'];
+    const events = [
+        'pointerdown',
+        'mousedown',
+        'click',
+        'touchstart',
+        'keydown',
+    ];
     const onInteract = () => {
         unlockAudioContext();
     };
 
     events.forEach((evt) => {
-        window.addEventListener(evt, onInteract, { capture: true, passive: true });
+        window.addEventListener(evt, onInteract, {
+            capture: true,
+            passive: true,
+        });
     });
 }
 

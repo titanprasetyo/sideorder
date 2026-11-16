@@ -18,67 +18,75 @@ class UserController extends Controller
      */
     public function index(Request $request): Response
     {
+        $currentUser = $request->user();
+        abort_unless($currentUser instanceof User, 403);
+
         $users = User::select(['id', 'name', 'email', 'role', 'created_at'])
             ->orderBy('id', 'asc')
             ->get();
 
-
         return Inertia::render('admin/users/index', [
             'users' => $users,
-            
-            'currentUserId' => $request->user()->id,
+            'currentUserId' => $currentUser->id,
         ]);
     }
 
     /**
-     * Mendaftarkan akun staf / kasir baru.
+     * Mendaftarkan akun staf / kasir baru (hanya role cashier yang diizinkan).
      */
-    public function store(UserRequest $request): RedirectResponse 
-
+    public function store(UserRequest $request): RedirectResponse
     {
         $validated = $request->validated();
 
         User::create([
-            'name' => $validated['name'],
-            'email' => $validated['email'],
-            'password' => Hash::make($validated['password']),
-            'role' => $validated['role'],
+            'name' => (string) $validated['name'],
+            'email' => (string) $validated['email'],
+            'password' => Hash::make((string) $validated['password']),
+            'role' => 'cashier',
+            'email_verified_at' => now(),
         ]);
 
         return back()->with(
             'success',
-            "Akun staf {$validated['name']} berhasil didaftarkan."
+            "Akun kasir {$validated['name']} berhasil didaftarkan."
         );
     }
 
     /**
-     * Memperbarui data akun staf.
+     * Memperbarui data akun staf dengan menjaga kebijakan Admin tunggal.
      */
     public function update(UserRequest $request, User $user): RedirectResponse
     {
-        $validated = $request->validated();
+        $currentUser = $request->user();
+        abort_unless($currentUser instanceof User, 403);
 
-        // Cegah admin menurunkan role akun aktifnya sendiri.
-        if (
-            $user->id === $request->user()->id &&
-            $validated['role'] !== 'admin'
-        ) {
+        $validated = $request->validated();
+        $requestedRole = (string) ($validated['role'] ?? $user->role);
+
+        if ($user->isAdmin() && $requestedRole !== 'admin') {
             return back()->with(
                 'error',
-                'Anda tidak dapat menurunkan role akun Anda sendiri yang sedang aktif.'
+                'Role Administrator tunggal tidak dapat diturunkan ke kasir.'
+            );
+        }
+
+        if (! $user->isAdmin() && $requestedRole === 'admin') {
+            return back()->with(
+                'error',
+                'Hanya satu akun Administrator yang diizinkan dalam sistem.'
             );
         }
 
         $dataToUpdate = [
-            'name' => $validated['name'],
-            'email' => $validated['email'],
-            'role' => $validated['role'],
+            'name' => (string) $validated['name'],
+            'email' => (string) $validated['email'],
+            'role' => $user->isAdmin() ? 'admin' : 'cashier',
         ];
 
         // Perbarui password hanya jika diisi.
         if (! empty($validated['password'])) {
             $dataToUpdate['password'] = Hash::make(
-                $validated['password']
+                (string) $validated['password']
             );
         }
 
@@ -91,15 +99,24 @@ class UserController extends Controller
     }
 
     /**
-     * Menghapus akun staf dengan proteksi anti self-deletion.
+     * Menghapus akun kasir dengan proteksi terhadap penghapusan Admin tunggal.
      */
     public function destroy(Request $request, User $user): RedirectResponse
     {
-        // Cegah admin menghapus akun aktifnya sendiri.
-        if ($user->id === $request->user()->id) {
+        $currentUser = $request->user();
+        abort_unless($currentUser instanceof User, 403);
+
+        if ($user->id === $currentUser->id) {
             return back()->with(
                 'error',
                 'Anda tidak dapat menghapus akun Anda sendiri yang sedang aktif.'
+            );
+        }
+
+        if ($user->isAdmin()) {
+            return back()->with(
+                'error',
+                'Akun Administrator tunggal tidak dapat dihapus.'
             );
         }
 
@@ -109,7 +126,7 @@ class UserController extends Controller
 
         return back()->with(
             'success',
-            "Akun staf {$userName} berhasil dihapus."
+            "Akun kasir {$userName} berhasil dihapus."
         );
     }
 }

@@ -2,14 +2,54 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 
+/**
+ * @property int $id
+ * @property string $order_number
+ * @property int $cafe_table_id
+ * @property string $customer_name
+ * @property string $subtotal
+ * @property string $total_amount
+ * @property string $order_status
+ * @property string $payment_status
+ * @property string|null $payment_method
+ * @property string|null $payment_gateway
+ * @property string|null $payment_channel
+ * @property Carbon|null $paid_at
+ * @property string|null $payment_reference
+ * @property string|null $cash_received
+ * @property string|null $change_amount
+ * @property int|null $confirmed_by
+ * @property string $refunded_amount
+ * @property Carbon|null $refunded_at
+ * @property string|null $refund_reason
+ * @property string|null $notes
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ * @property-read float $settled_amount
+ * @property-read float $unpaid_balance
+ * @property-read CafeTable|null $table
+ * @property-read User|null $confirmedByUser
+ * @property-read Payment|null $latestPayment
+ * @property-read Collection<int, OrderItem> $items
+ * @property-read Collection<int, OrderItem> $activeItems
+ * @property-read Collection<int, OrderItem> $rejectedItems
+ * @property-read Collection<int, OrderStatusHistory> $statusHistories
+ * @property-read Collection<int, Payment> $payments
+ * @property-read Collection<int, Payment> $paidPayments
+ */
 class Order extends Model
 {
+    /** @use HasFactory<Factory<self>> */
     use HasFactory;
 
     protected $fillable = [
@@ -21,6 +61,8 @@ class Order extends Model
         'order_status',
         'payment_status',
         'payment_method',
+        'payment_gateway',
+        'payment_channel',
         'paid_at',
         'payment_reference',
         'cash_received',
@@ -37,6 +79,9 @@ class Order extends Model
         'unpaid_balance',
     ];
 
+    /**
+     * @return array<string, string>
+     */
     protected function casts(): array
     {
         return [
@@ -51,11 +96,11 @@ class Order extends Model
     }
 
     /**
-     * Otomatis generate nomor pesanan unik sebelum disimpan
+     * Otomatis generate nomor pesanan unik sebelum disimpan.
      */
     protected static function booted(): void
     {
-        static::creating(function (Order $order) {
+        static::creating(function (Order $order): void {
             if (empty($order->order_number)) {
                 do {
                     $candidate = 'SO-'.date('Ymd').'-'.strtoupper(Str::random(4));
@@ -66,7 +111,9 @@ class Order extends Model
     }
 
     /**
-     * Relasi: Pesanan berada di satu meja
+     * Relasi: Pesanan berada di satu meja.
+     *
+     * @return BelongsTo<CafeTable, $this>
      */
     public function table(): BelongsTo
     {
@@ -74,7 +121,9 @@ class Order extends Model
     }
 
     /**
-     * Relasi: Semua item produk (aktif maupun ditolak)
+     * Relasi: Semua item produk (aktif maupun ditolak).
+     *
+     * @return HasMany<OrderItem, $this>
      */
     public function items(): HasMany
     {
@@ -82,7 +131,9 @@ class Order extends Model
     }
 
     /**
-     * Relasi: Item yang masih aktif (belum ditolak)
+     * Relasi: Item yang masih aktif (belum ditolak).
+     *
+     * @return HasMany<OrderItem, $this>
      */
     public function activeItems(): HasMany
     {
@@ -90,7 +141,9 @@ class Order extends Model
     }
 
     /**
-     * Relasi: Item yang ditolak
+     * Relasi: Item yang ditolak.
+     *
+     * @return HasMany<OrderItem, $this>
      */
     public function rejectedItems(): HasMany
     {
@@ -98,7 +151,9 @@ class Order extends Model
     }
 
     /**
-     * Relasi: Staf kasir yang mengonfirmasi pembayaran
+     * Relasi: Staf kasir yang mengonfirmasi pembayaran.
+     *
+     * @return BelongsTo<User, $this>
      */
     public function confirmedByUser(): BelongsTo
     {
@@ -106,11 +161,43 @@ class Order extends Model
     }
 
     /**
-     * Relasi: Riwayat perpindahan status pesanan
+     * Relasi: Riwayat perpindahan status pesanan.
+     *
+     * @return HasMany<OrderStatusHistory, $this>
      */
     public function statusHistories(): HasMany
     {
         return $this->hasMany(OrderStatusHistory::class)->latest();
+    }
+
+    /**
+     * Relasi: Seluruh transaksi pembayaran yang terkait pada pesanan ini (initial + tambahan menu).
+     *
+     * @return HasMany<Payment, $this>
+     */
+    public function payments(): HasMany
+    {
+        return $this->hasMany(Payment::class)->latest('id');
+    }
+
+    /**
+     * Relasi: Transaksi pembayaran yang sudah lunas.
+     *
+     * @return HasMany<Payment, $this>
+     */
+    public function paidPayments(): HasMany
+    {
+        return $this->hasMany(Payment::class)->where('status', 'paid');
+    }
+
+    /**
+     * Relasi: Record pembayaran terbaru.
+     *
+     * @return HasOne<Payment, $this>
+     */
+    public function latestPayment(): HasOne
+    {
+        return $this->hasOne(Payment::class)->latestOfMany();
     }
 
     // Helper status
@@ -129,8 +216,15 @@ class Order extends Model
         return $this->order_status === 'cancelled';
     }
 
+    public function hasAnySettlement(): bool
+    {
+        return $this->payment_status === 'paid'
+            || $this->paid_at !== null
+            || $this->getSettledAmount() > 0;
+    }
+
     /**
-     * Apakah pesanan masih aktif dan dapat ditambahkan menu baru (pending / processing)
+     * Apakah pesanan masih aktif dan dapat ditambahkan menu baru (pending / processing).
      */
     public function canAcceptAdditionalItems(): bool
     {
@@ -139,15 +233,28 @@ class Order extends Model
 
     /**
      * Nominal yang sudah dibayar/diselesaikan pada pesanan ini.
-     * Tetap aman ketika customer menambahkan menu baru setelah pembayaran awal dilakukan.
+     * Membaca ledger tabel `payments` terlebih dahulu agar pembayaran awal tidak hilang
+     * ketika pelanggan melakukan Tambah Menu atau percobaan pembayaran kedua gagal/expired.
      */
     public function getSettledAmount(): float
     {
-        if ($this->order_status === 'cancelled' || in_array($this->payment_status, ['refunded', 'failed'], true)) {
+        if ($this->order_status === 'cancelled' || $this->payment_status === 'refunded') {
             return 0.0;
         }
 
         $refunded = (float) ($this->refunded_amount ?? 0);
+
+        $paidLedgerSum = $this->relationLoaded('payments')
+            ? (float) $this->payments->where('status', 'paid')->sum('settled_amount')
+            : (float) $this->payments()->where('status', 'paid')->sum('settled_amount');
+
+        if ($paidLedgerSum > 0) {
+            return max(0.0, min((float) $this->total_amount, $paidLedgerSum) - $refunded);
+        }
+
+        if ($this->payment_status === 'failed') {
+            return 0.0;
+        }
 
         if ($this->payment_status === 'paid') {
             return max(0.0, (float) $this->total_amount - $refunded);
@@ -185,7 +292,35 @@ class Order extends Model
     }
 
     /**
-     * Apakah pesanan ini dihitung sebagai pendapatan bersih terealisasi
+     * Label ringkas Payment Gateway yang memproses transaksi pesanan ini.
+     */
+    public function resolveEffectivePaymentGateway(): string
+    {
+        if (! empty($this->payment_gateway)) {
+            return $this->payment_gateway;
+        }
+
+        if ($this->relationLoaded('latestPayment') && $this->latestPayment) {
+            return $this->latestPayment->gateway;
+        }
+
+        return match ($this->payment_method) {
+            'qris', 'transfer', 'debit' => 'xendit',
+            default => 'manual',
+        };
+    }
+
+    public function resolvePaymentGatewayLabel(): string
+    {
+        return match ($this->resolveEffectivePaymentGateway()) {
+            'xendit' => 'Xendit Payment Gateway',
+            'midtrans' => 'Midtrans Snap',
+            default => 'Kasir POS',
+        };
+    }
+
+    /**
+     * Apakah pesanan ini dihitung sebagai pendapatan bersih terealisasi.
      */
     public function isRealizedRevenue(): bool
     {
@@ -193,7 +328,7 @@ class Order extends Model
     }
 
     /**
-     * Nilai bersih pendapatan yang diakui dari transaksi ini
+     * Nilai bersih pendapatan yang diakui dari transaksi ini.
      */
     public function getRealizedNetAmount(): float
     {

@@ -1,6 +1,5 @@
 <?php
 
-use App\Events\OrderItemRejected;
 use App\Events\OrderStatusUpdated;
 use App\Models\CafeTable;
 use App\Models\Category;
@@ -122,100 +121,63 @@ test('cashier can mark order as ready and then permanently completed', function 
     expect($order->order_status)->toBe('completed');
 });
 
-test('cashier can reject single menu item without affecting other items in order', function () {
-    Event::fake([OrderItemRejected::class, OrderStatusUpdated::class]);
-
+test('cashier cash payment confirmation on order with prior settlement computes change from remaining due', function () {
     $order = Order::create([
         'cafe_table_id' => $this->table->id,
-        'customer_name' => 'Dimas',
+        'customer_name' => 'Rina Tambah Menu',
         'subtotal' => 47000,
         'total_amount' => 47000,
-        'order_status' => 'pending',
+        'order_status' => 'processing',
         'payment_status' => 'unpaid',
+        'cash_received' => 25000,
+        'change_amount' => 0,
     ]);
 
-    $item1 = $order->items()->create([
-        'menu_id' => $this->menuCroissant->id,
-        'menu_name' => 'Butter Croissant',
-        'base_price' => 25000,
-        'quantity' => 1,
-        'subtotal_options' => 0,
-        'unit_price' => 25000,
-        'total_price' => 25000,
-        'status' => 'active',
+    // Initial settled payment recorded in payments table (25.000)
+    $order->payments()->create([
+        'payment_reference' => 'PAY-INIT-001',
+        'gateway' => 'manual',
+        'method' => 'cash',
+        'amount' => 25000,
+        'settled_amount' => 25000,
+        'status' => 'paid',
+        'paid_at' => now('Asia/Jakarta'),
     ]);
 
-    $item2 = $order->items()->create([
-        'menu_id' => $this->menuCoffee->id,
-        'menu_name' => 'Americano Hot',
-        'base_price' => 22000,
-        'quantity' => 1,
-        'subtotal_options' => 0,
-        'unit_price' => 22000,
-        'total_price' => 22000,
-        'status' => 'active',
-    ]);
-
-    // Kasir menolak Butter Croissant karena stok habis
+    // Additional due is 22.000. Customer hands over Rp 50.000 (which is >= total_amount 47.000)
     $response = $this->actingAs($this->cashier)
-        ->post(route('cashier.orders.items.reject', ['order' => $order, 'item' => $item1]), [
-            'reason' => 'Stok croissant habis di display',
+        ->post(route('cashier.orders.confirm-payment', $order), [
+            'payment_method' => 'cash',
+            'cash_received' => 50000,
         ]);
 
     $response->assertSessionHas('success');
 
-    $item1->refresh();
-    $item2->refresh();
     $order->refresh();
-
-    // Item 1 harus rejected dengan alasan & staf kasir
-    expect($item1->status)->toBe('rejected')
-        ->and($item1->rejection_reason)->toBe('Stok croissant habis di display')
-        ->and($item1->rejected_by)->toBe($this->cashier->id)
-        ->and($item1->rejected_at)->not->toBeNull();
-
-    // Item 2 harus tetap active
-    expect($item2->status)->toBe('active');
-
-    // Pesanan tetap aktif, tetapi subtotal dan total_amount berkurang sesuai sisa item aktif
-    expect($order->order_status)->toBe('pending')
-        ->and((float) $order->subtotal)->toBe(22000.0)
-        ->and((float) $order->total_amount)->toBe(22000.0);
-
-    Event::assertDispatched(OrderItemRejected::class);
+    expect($order->payment_status)->toBe('paid')
+        ->and((float) $order->cash_received)->toBe(75000.0) // 25000 initial + 50000 input
+        ->and((float) $order->change_amount)->toBe(28000.0); // 50000 - 22000 remaining due
 });
 
-test('rejecting all items in order automatically cancels the order', function () {
+test('cashier cannot cancel an order that already has settled payment', function () {
     $order = Order::create([
         'cafe_table_id' => $this->table->id,
-        'customer_name' => 'Fajar',
-        'subtotal' => 22000,
-        'total_amount' => 22000,
-        'order_status' => 'pending',
-        'payment_status' => 'unpaid',
+        'customer_name' => 'Dedi Lunas',
+        'subtotal' => 25000,
+        'total_amount' => 25000,
+        'order_status' => 'processing',
+        'payment_status' => 'paid',
+        'paid_at' => now('Asia/Jakarta'),
     ]);
 
-    $item = $order->items()->create([
-        'menu_id' => $this->menuCoffee->id,
-        'menu_name' => 'Americano Hot',
-        'base_price' => 22000,
-        'quantity' => 1,
-        'subtotal_options' => 0,
-        'unit_price' => 22000,
-        'total_price' => 22000,
-        'status' => 'active',
-    ]);
+    $response = $this->actingAs($this->cashier)
+        ->post(route('cashier.orders.update-status', $order), [
+            'status' => 'cancelled',
+        ]);
 
-    $this->actingAs($this->cashier)
-        ->post(route('cashier.orders.items.reject', ['order' => $order, 'item' => $item]), [
-            'reason' => 'Mesin espresso troubleshooting',
-        ])
-        ->assertSessionHas('success');
+    $response->assertSessionHas('error');
 
     $order->refresh();
-    $item->refresh();
-
-    expect($item->status)->toBe('rejected');
-    expect($order->order_status)->toBe('cancelled')
-        ->and((float) $order->total_amount)->toBe(0.0);
+    expect($order->order_status)->toBe('processing')
+        ->and($order->payment_status)->toBe('paid');
 });

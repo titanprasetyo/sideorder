@@ -2,17 +2,21 @@
 
 namespace App\Http\Controllers\Cashier;
 
-use App\Events\OrderItemRejected;
 use App\Events\OrderStatusUpdated;
+use App\Exceptions\PaymentGatewayException;
 use App\Http\Controllers\Controller;
 use App\Models\CafeTable;
+use App\Models\Category;
+use App\Models\Menu;
 use App\Models\Order;
-use App\Models\OrderItem;
 use App\Models\OrderStatusHistory;
+use App\Services\Payments\PaymentService;
+use App\Services\Stock\MenuStockService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -20,12 +24,17 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class OrderController extends Controller
 {
+    public function __construct(
+        private readonly PaymentService $paymentService,
+        private readonly MenuStockService $menuStockService,
+    ) {}
+
     /**
      * Menampilkan daftar pesanan masuk untuk kasir dan dapur.
      */
     public function index(Request $request): Response
     {
-        $dateFilter = $request->query('date', 'today');
+        $dateFilter = (string) $request->query('date', 'today');
         $data = $this->getCashierData($dateFilter);
 
         return Inertia::render('cashier/orders/index', $data);
@@ -36,7 +45,7 @@ class OrderController extends Controller
      */
     public function sync(Request $request): JsonResponse
     {
-        $dateFilter = $request->query('date', 'today');
+        $dateFilter = (string) $request->query('date', 'today');
         $data = $this->getCashierData($dateFilter);
 
         return response()->json($data);
@@ -47,14 +56,14 @@ class OrderController extends Controller
      */
     public function stream(Request $request): StreamedResponse
     {
-        $dateFilter = $request->query('date', 'today');
+        $dateFilter = (string) $request->query('date', 'today');
 
         // Lepas session lock agar request lain di PHP-FPM tidak terblokir
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_write_close();
         }
 
-        return response()->stream(function () use ($dateFilter) {
+        return response()->stream(function () use ($dateFilter): void {
             $data = $this->getCashierData($dateFilter);
             echo "retry: 2000\n";
             echo "event: sync\n";
@@ -73,17 +82,19 @@ class OrderController extends Controller
 
     /**
      * Helper pemuatan data operasional kasir.
+     *
+     * @return array<string, mixed>
      */
     private function getCashierData(string $dateFilter = 'today'): array
     {
         $startOfToday = Carbon::today()->startOfDay();
         $endOfToday = Carbon::today()->endOfDay();
 
-        $query = Order::with(['table', 'items.options', 'items.rejectedByUser', 'statusHistories.user'])->latest();
+        $query = Order::with(['table', 'items.options', 'latestPayment'])->latest();
 
         if ($dateFilter === 'today') {
             // Ambil semua pesanan aktif (pending/processing/ready) ATAU pesanan selesai/batal hari ini
-            $query->where(function ($q) use ($startOfToday, $endOfToday) {
+            $query->where(function ($q) use ($startOfToday, $endOfToday): void {
                 $q->whereNotIn('order_status', ['completed', 'cancelled'])
                     ->orWhereBetween('created_at', [$startOfToday, $endOfToday])
                     ->orWhereBetween('updated_at', [$startOfToday, $endOfToday]);
@@ -97,47 +108,10 @@ class OrderController extends Controller
         $readyOrders = $orders->where('order_status', 'ready');
 
         // Filter pesanan selesai khusus hari ini
-        $completedTodayOrders = $orders->where('order_status', 'completed')->filter(function ($o) use ($startOfToday) {
+        $completedTodayOrders = $orders->where('order_status', 'completed')->filter(function (Order $o) use ($startOfToday): bool {
             $updatedAt = Carbon::parse($o->updated_at ?? $o->created_at);
 
             return $updatedAt->gte($startOfToday);
-        });
-
-        // Ambil riwayat penolakan menu (History Penolakan)
-        $rejectionsQuery = OrderItem::with(['order.table', 'rejectedByUser', 'options'])
-            ->where('status', 'rejected');
-
-        if ($dateFilter === 'today') {
-            $rejectionsQuery->where(function ($q) use ($startOfToday, $endOfToday) {
-                $q->whereBetween('rejected_at', [$startOfToday, $endOfToday])
-                    ->orWhere(function ($sub) use ($startOfToday, $endOfToday) {
-                        $sub->whereNull('rejected_at')
-                            ->whereBetween('updated_at', [$startOfToday, $endOfToday]);
-                    });
-            });
-        }
-
-        $rejectedItemsRaw = $rejectionsQuery->latest('rejected_at')->limit(100)->get();
-
-        $rejections = $rejectedItemsRaw->map(function ($item) {
-            $optLabels = $item->options && $item->options->isNotEmpty()
-                ? ' ('.$item->options->pluck('option_name')->join(', ').')'
-                : '';
-
-            return [
-                'id' => $item->id,
-                'order_id' => $item->order_id,
-                'order_number' => $item->order ? $item->order->order_number : '-',
-                'table_number' => $item->order && $item->order->table ? $item->order->table->table_number : '00',
-                'customer_name' => $item->order ? $item->order->customer_name : 'Pelanggan',
-                'menu_name' => $item->menu_name.$optLabels,
-                'quantity' => $item->quantity,
-                'unit_price' => (float) $item->unit_price,
-                'total_price' => (float) $item->total_price,
-                'rejection_reason' => $item->rejection_reason ?? 'Stok bahan habis / Permintaan kasir',
-                'rejected_at' => $item->rejected_at ? $item->rejected_at->toIso8601String() : ($item->updated_at ? $item->updated_at->toIso8601String() : null),
-                'cashier_name' => $item->rejectedByUser ? $item->rejectedByUser->name : 'Kasir',
-            ];
         });
 
         // Hitung ringkasan badge antrean
@@ -147,7 +121,6 @@ class OrderController extends Controller
             'ready' => $readyOrders->count(),
             'completed_today' => $completedTodayOrders->count(),
             'active' => $pendingOrders->count() + $processingOrders->count() + $readyOrders->count(),
-            'rejections' => $rejections->count(),
             'all' => $orders->count(),
         ];
 
@@ -155,15 +128,31 @@ class OrderController extends Controller
             'processing_amount' => (float) $processingOrders->sum('total_amount'),
             'completed_amount' => (float) $completedTodayOrders->sum('total_amount'),
             'ready_tables' => $readyOrders->pluck('table.table_number')->filter()->unique()->values()->all(),
-            'active_tables_count' => CafeTable::where('is_active', true)->count(),
-            'rejected_items_count' => $rejections->count(),
+            'active_tables_count' => Cache::remember('active_tables_count', 60, fn (): int => CafeTable::where('is_active', true)->count()),
         ];
+
+        // Ambil data menu dan kategori terbaru dari Admin untuk referensi kasir
+        $menuCatalog = Category::query()->orderBy('sort_order', 'asc')->get(['id', 'name', 'slug']);
+
+        $allMenus = Menu::with([
+            'category:id,name',
+            'optionGroups.optionItems' => function ($iq): void {
+                $iq->orderBy('sort_order', 'asc');
+            },
+        ])->latest('updated_at')->get();
+
+        $counts['menus_total'] = $allMenus->count();
+        $counts['menus_active'] = $allMenus->filter(
+            fn (Menu $m): bool => (bool) $m->is_active && (! $m->is_limited_stock || (int) $m->stock_quantity > 0)
+        )->count();
+        $counts['menus_discounted'] = $allMenus->where('is_discount_active', true)->count();
 
         return [
             'orders' => $orders,
             'counts' => $counts,
             'stats' => $stats,
-            'rejections' => $rejections,
+            'menuCatalog' => $menuCatalog,
+            'allMenus' => $allMenus,
             'dateFilter' => $dateFilter,
             'timestamp' => microtime(true),
         ];
@@ -209,7 +198,8 @@ class OrderController extends Controller
      */
     public function confirmPayment(Request $request, Order $order): RedirectResponse|JsonResponse
     {
-        if (! $request->user() || (! $request->user()->isCashier() && ! $request->user()->isAdmin())) {
+        $user = $request->user();
+        if (! $user || (! $user->isCashier() && ! $user->isAdmin())) {
             abort(403, 'Konfirmasi pembayaran hanya dapat dilakukan melalui operasional Kasir.');
         }
 
@@ -245,7 +235,7 @@ class OrderController extends Controller
             'payment_reference' => ['nullable', 'string', 'max:100'],
         ]);
 
-        $paymentMethod = $validated['payment_method'] ?? 'cash';
+        $paymentMethod = strtolower((string) ($validated['payment_method'] ?? 'cash'));
         $amountDue = $order->getUnpaidBalance() > 0
             ? $order->getUnpaidBalance()
             : (float) $order->total_amount;
@@ -271,102 +261,23 @@ class OrderController extends Controller
             ])->with('error', 'Nominal uang tunai yang diterima kurang dari total tagihan.');
         }
 
-        $alreadyPaid = false;
+        try {
+            $result = $this->paymentService->confirmCashierPayment(
+                $order,
+                $user->id,
+                $user->name,
+                $validated,
+            );
+        } catch (PaymentGatewayException $e) {
+            return $this->respondCashierAction($request, 'error', $e->getMessage(), 422);
+        }
 
-        DB::transaction(function () use ($request, $order, $paymentMethod, $validated, &$alreadyPaid) {
-            /** @var Order $lockedOrder */
-            $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
-
-            if ($lockedOrder->payment_status === 'paid') {
-                if ($lockedOrder->order_status === 'pending') {
-                    $lockedOrder->update(['order_status' => 'processing']);
-                }
-                $alreadyPaid = true;
-
-                return;
-            }
-
-            $previouslySettled = $lockedOrder->getSettledAmount();
-            $expectedTotal = (float) $lockedOrder->total_amount;
-            $remainingDue = max(0.0, $expectedTotal - $previouslySettled);
-            $newOrderStatus = $lockedOrder->order_status === 'pending' ? 'processing' : $lockedOrder->order_status;
-
-            if ($previouslySettled > 0 && $remainingDue > 0) {
-                if ($paymentMethod === 'cash' && isset($validated['cash_received']) && (float) $validated['cash_received'] > 0) {
-                    $inputCash = (float) $validated['cash_received'];
-                    if ($inputCash < $expectedTotal) {
-                        $changeAmount = max(0.0, $inputCash - $remainingDue);
-                        $cashReceived = $previouslySettled + $inputCash;
-                    } else {
-                        $cashReceived = $inputCash;
-                        $changeAmount = max(0.0, $inputCash - $expectedTotal);
-                    }
-                } else {
-                    $cashReceived = $expectedTotal;
-                    $changeAmount = 0.0;
-                }
-            } else {
-                $cashReceived = $paymentMethod === 'cash' && isset($validated['cash_received']) && (float) $validated['cash_received'] > 0
-                    ? (float) $validated['cash_received']
-                    : $expectedTotal;
-                $changeAmount = $paymentMethod === 'cash'
-                    ? max(0.0, $cashReceived - $expectedTotal)
-                    : 0.0;
-            }
-
-            $lockedOrder->update([
-                'payment_status' => 'paid',
-                'payment_method' => $paymentMethod,
-                'paid_at' => $lockedOrder->paid_at ?? now('Asia/Jakarta'),
-                'payment_reference' => $validated['payment_reference'] ?? $lockedOrder->payment_reference ?? ('POS-'.$lockedOrder->order_number),
-                'cash_received' => $cashReceived,
-                'change_amount' => $changeAmount,
-                'confirmed_by' => $request->user()->id,
-                'order_status' => $newOrderStatus,
-            ]);
-
-            $methodLabel = match ($paymentMethod) {
-                'qris' => 'QRIS',
-                'transfer' => 'Transfer Bank',
-                'debit' => 'Kartu Debit',
-                default => 'Tunai',
-            };
-
-            if ($previouslySettled > 0 && $remainingDue > 0) {
-                $remainingFormatted = number_format($remainingDue, 0, ',', '.');
-                $totalFormatted = number_format($expectedTotal, 0, ',', '.');
-                $notes = "Pembayaran tagihan menu tambahan sebesar Rp {$remainingFormatted} via {$methodLabel} diterima & dikonfirmasi oleh staf {$request->user()->name}. Total lunas: Rp {$totalFormatted}.";
-            } else {
-                $notes = "Pembayaran via {$methodLabel} diterima & dikonfirmasi oleh staf {$request->user()->name}.";
-                if ($paymentMethod === 'cash' && isset($validated['cash_received']) && $validated['cash_received'] > 0) {
-                    $cashReceivedFormatted = number_format($cashReceived, 0, ',', '.');
-                    $changeFormatted = number_format($changeAmount, 0, ',', '.');
-                    $notes .= " (Uang: Rp {$cashReceivedFormatted}, Kembalian: Rp {$changeFormatted})";
-                }
-            }
-
-            OrderStatusHistory::create([
-                'order_id' => $lockedOrder->id,
-                'user_id' => $request->user()->id,
-                'status' => $lockedOrder->order_status,
-                'notes' => $notes,
-            ]);
-        });
-
-        if ($alreadyPaid) {
+        if ($result['already_paid']) {
             return $this->respondCashierAction(
                 $request,
                 'info',
                 "Pesanan #{$order->order_number} sudah dibayar sebelumnya."
             );
-        }
-
-        $order->refresh();
-
-        try {
-            event(new OrderStatusUpdated($order, 'pending', $order->order_status));
-        } catch (\Throwable $e) {
-            // Abaikan broadcaster error jika driver off
         }
 
         return $this->respondCashierAction(
@@ -377,20 +288,25 @@ class OrderController extends Controller
     }
 
     /**
-     * Memperbarui status operasional pesanan (processing -> ready -> completed / cancelled).
+     * Memperbarui status operasional pesanan (processing -> ready -> completed / cancelled untuk belum bayar).
      */
     public function updateStatus(Request $request, Order $order): RedirectResponse|JsonResponse
     {
+        $user = $request->user();
+        if (! $user) {
+            abort(403);
+        }
+
         $validated = $request->validate([
             'status' => ['required', 'string', 'in:processing,ready,completed,cancelled'],
             'notes' => ['nullable', 'string', 'max:500'],
         ]);
 
-        $newStatus = $validated['status'];
+        $newStatus = (string) $validated['status'];
         $previousStatus = $order->order_status;
         $blockedError = null;
 
-        DB::transaction(function () use ($request, $order, &$previousStatus, $newStatus, $validated, &$blockedError) {
+        DB::transaction(function () use ($user, $order, &$previousStatus, $newStatus, $validated, &$blockedError): void {
             /** @var Order $lockedOrder */
             $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
             $previousStatus = $lockedOrder->order_status;
@@ -407,6 +323,12 @@ class OrderController extends Controller
                 return;
             }
 
+            if ($newStatus === 'cancelled' && $lockedOrder->hasAnySettlement()) {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} sudah memiliki pembayaran lunas dan tidak dapat dibatalkan maupun di-refund.";
+
+                return;
+            }
+
             if ($newStatus === 'completed' && $lockedOrder->payment_status !== 'paid') {
                 $blockedError = "Pesanan #{$lockedOrder->order_number} belum lunas. Konfirmasi pembayaran terlebih dahulu sebelum menyelesaikan pesanan.";
 
@@ -417,6 +339,10 @@ class OrderController extends Controller
                 'order_status' => $newStatus,
             ]);
 
+            if ($newStatus === 'cancelled') {
+                $this->menuStockService->releaseUnsettledOrderStock($lockedOrder);
+            }
+
             $labels = [
                 'processing' => 'Sedang Diracik Barista',
                 'ready' => 'Siap Saji (Ready to Pickup)',
@@ -425,11 +351,11 @@ class OrderController extends Controller
             ];
 
             $label = $labels[$newStatus] ?? $newStatus;
-            $auditNote = $validated['notes'] ?? "Status pesanan diubah dari {$previousStatus} ke {$label} oleh staf {$request->user()->name}";
+            $auditNote = $validated['notes'] ?? "Status pesanan diubah dari {$previousStatus} ke {$label} oleh staf {$user->name}";
 
             OrderStatusHistory::create([
                 'order_id' => $lockedOrder->id,
-                'user_id' => $request->user()->id,
+                'user_id' => $user->id,
                 'status' => $newStatus,
                 'notes' => $auditNote,
             ]);
@@ -443,7 +369,7 @@ class OrderController extends Controller
 
         try {
             event(new OrderStatusUpdated($order, $previousStatus, $newStatus));
-        } catch (\Throwable $e) {
+        } catch (\Throwable) {
             // Abaikan broadcaster error
         }
 
@@ -459,101 +385,6 @@ class OrderController extends Controller
             $request,
             'success',
             "Pesanan #{$order->order_number} berhasil diubah ke: {$label}."
-        );
-    }
-
-    /**
-     * Menolak menu tertentu dalam pesanan kasir (Item-Level Rejection).
-     */
-    public function rejectItem(Request $request, Order $order, OrderItem $item): RedirectResponse|JsonResponse
-    {
-        if ($item->order_id !== $order->id) {
-            return $this->respondCashierAction($request, 'error', 'Item menu tidak sesuai dengan pesanan.', 422);
-        }
-
-        if ($order->order_status === 'completed' || $order->order_status === 'cancelled') {
-            return $this->respondCashierAction(
-                $request,
-                'error',
-                "Tidak dapat menolak menu pada pesanan yang sudah {$order->order_status}.",
-                422
-            );
-        }
-
-        if ($item->status === 'rejected') {
-            return $this->respondCashierAction(
-                $request,
-                'info',
-                "Menu {$item->menu_name} sudah berstatus ditolak sebelumnya."
-            );
-        }
-
-        $validated = $request->validate([
-            'reason' => ['required', 'string', 'max:500'],
-        ]);
-
-        DB::transaction(function () use ($request, $order, $item, $validated) {
-            /** @var Order $lockedOrder */
-            $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
-
-            // 1. Ubah status item menjadi rejected dan simpan audit
-            $item->update([
-                'status' => 'rejected',
-                'rejection_reason' => $validated['reason'],
-                'rejected_at' => now(),
-                'rejected_by' => $request->user()->id,
-            ]);
-
-            // 2. Hitung ulang total pesanan berdasarkan item yang masih aktif
-            $activeItems = $lockedOrder->items()->where('status', 'active')->get();
-            $newSubtotal = (float) $activeItems->sum('total_price');
-
-            // 3. Jika semua item ditolak, batalkan pesanan induk secara otomatis
-            if ($activeItems->isEmpty()) {
-                $lockedOrder->update([
-                    'order_status' => 'cancelled',
-                    'subtotal' => 0,
-                    'total_amount' => 0,
-                ]);
-
-                OrderStatusHistory::create([
-                    'order_id' => $lockedOrder->id,
-                    'user_id' => $request->user()->id,
-                    'status' => 'cancelled',
-                    'notes' => "Pesanan otomatis dibatalkan karena semua menu ditolak. Menu terakhir ditolak: {$item->menu_name} (x{$item->quantity}). Alasan: {$validated['reason']}",
-                ]);
-            } else {
-                $previouslySettled = $lockedOrder->getSettledAmount();
-                $updateOrderPayload = [
-                    'subtotal' => $newSubtotal,
-                    'total_amount' => $newSubtotal,
-                ];
-
-                if ($lockedOrder->paid_at !== null && $lockedOrder->payment_status === 'unpaid' && $previouslySettled >= $newSubtotal && $newSubtotal > 0) {
-                    $updateOrderPayload['payment_status'] = 'paid';
-                }
-
-                $lockedOrder->update($updateOrderPayload);
-
-                OrderStatusHistory::create([
-                    'order_id' => $lockedOrder->id,
-                    'user_id' => $request->user()->id,
-                    'status' => $lockedOrder->order_status,
-                    'notes' => "Menu '{$item->menu_name}' (x{$item->quantity}) ditolak oleh kasir {$request->user()->name}. Alasan: {$validated['reason']}. Total tagihan diperbarui menjadi Rp ".number_format($newSubtotal, 0, ',', '.'),
-                ]);
-            }
-        });
-
-        try {
-            event(new OrderItemRejected($order, $item));
-        } catch (\Throwable $e) {
-            // Abaikan broadcaster error
-        }
-
-        return $this->respondCashierAction(
-            $request,
-            'success',
-            "Menu {$item->menu_name} berhasil ditolak dan dicatat di Riwayat Penolakan."
         );
     }
 }

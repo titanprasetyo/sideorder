@@ -19,6 +19,8 @@ class OrderCreated implements ShouldBroadcastNow
 
     /**
      * Nama channel siaran real-time.
+     *
+     * @return array<int, Channel>
      */
     public function broadcastOn(): array
     {
@@ -37,6 +39,8 @@ class OrderCreated implements ShouldBroadcastNow
 
     /**
      * Payload data siaran real-time.
+     *
+     * @return array<string, mixed>
      */
     public function broadcastWith(): array
     {

@@ -114,4 +114,10 @@ return [
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
+    'default_admin' => [
+        'name' => env('ADMIN_DEFAULT_NAME', 'astaa'),
+        'email' => env('ADMIN_DEFAULT_EMAIL', 'astaa@gmail.com'),
+        'password' => env('ADMIN_DEFAULT_PASSWORD'),
+    ],
+
 ];

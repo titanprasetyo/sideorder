@@ -28,7 +28,11 @@ class CheckoutOrderRequest extends FormRequest
             'force_new_order' => ['nullable', 'boolean'],
             'customer_name' => ['required_without:order_number', 'nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:500'],
+            'payment_method' => ['nullable', 'string', 'in:cash,qris,transfer,debit'],
+            'payment_channel' => ['nullable', 'string', 'max:50'],
             'idempotency_key' => ['nullable', 'string', 'max:100'],
+            'customer_latitude' => ['nullable', 'numeric', 'between:-90,90'],
+            'customer_longitude' => ['nullable', 'numeric', 'between:-180,180'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.menu_id' => ['required', 'integer', 'exists:menus,id'],
             'items.*.quantity' => ['required', 'integer', 'min:1', 'max:50'],
@@ -40,6 +44,8 @@ class CheckoutOrderRequest extends FormRequest
 
     /**
      * Pesan kustom jika validasi gagal.
+     *
+     * @return array<string, string>
      */
     public function messages(): array
     {
@@ -47,6 +53,8 @@ class CheckoutOrderRequest extends FormRequest
             'customer_name.required' => 'Nama pemesan wajib diisi agar kasir dan barista dapat memanggil Anda.',
             'items.required' => 'Keranjang belanja Anda masih kosong.',
             'qr_token.exists' => 'Meja tidak valid atau tidak ditemukan.',
+            'customer_latitude.between' => 'Koordinat lokasi GPS tidak valid.',
+            'customer_longitude.between' => 'Koordinat lokasi GPS tidak valid.',
         ];
     }
 }

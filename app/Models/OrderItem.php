@@ -3,14 +3,52 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property int $order_id
+ * @property int|null $menu_id
+ * @property string $menu_name
+ * @property string $base_price
+ * @property int $quantity
+ * @property string $subtotal_options
+ * @property string $unit_price
+ * @property string $total_price
+ * @property string|null $customer_notes
+ * @property string $status
+ * @property int $stock_deducted_quantity
+ * @property string $stock_state
+ * @property Carbon|null $stock_deducted_at
+ * @property Carbon|null $stock_released_at
+ * @property string|null $rejection_reason
+ * @property Carbon|null $rejected_at
+ * @property int|null $rejected_by
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ * @property-read Order|null $order
+ * @property-read Menu|null $menu
+ * @property-read User|null $rejectedByUser
+ * @property-read Collection<int, OrderItemOption> $options
+ */
 class OrderItem extends Model
 {
+    /** @use HasFactory<Factory<self>> */
     use HasFactory;
+
+    public const string STOCK_STATE_NONE = 'none';
+
+    public const string STOCK_STATE_RESERVED = 'reserved';
+
+    public const string STOCK_STATE_CONFIRMED = 'confirmed';
+
+    public const string STOCK_STATE_RELEASED = 'released';
 
     protected $fillable = [
         'order_id',
@@ -18,6 +56,10 @@ class OrderItem extends Model
         'menu_name',
         'base_price',
         'quantity',
+        'stock_deducted_quantity',
+        'stock_state',
+        'stock_deducted_at',
+        'stock_released_at',
         'subtotal_options',
         'unit_price',
         'total_price',
@@ -28,20 +70,28 @@ class OrderItem extends Model
         'rejected_by',
     ];
 
+    /**
+     * @return array<string, string>
+     */
     protected function casts(): array
     {
         return [
             'base_price' => 'decimal:2',
             'quantity' => 'integer',
+            'stock_deducted_quantity' => 'integer',
             'subtotal_options' => 'decimal:2',
             'unit_price' => 'decimal:2',
             'total_price' => 'decimal:2',
+            'stock_deducted_at' => 'datetime',
+            'stock_released_at' => 'datetime',
             'rejected_at' => 'datetime',
         ];
     }
 
     /**
      * Relasi: Item milik satu pesanan induk
+     *
+     * @return BelongsTo<Order, $this>
      */
     public function order(): BelongsTo
     {
@@ -50,6 +100,8 @@ class OrderItem extends Model
 
     /**
      * Relasi: Referensi ke menu asal (bisa null jika menu dihapus)
+     *
+     * @return BelongsTo<Menu, $this>
      */
     public function menu(): BelongsTo
     {
@@ -58,6 +110,8 @@ class OrderItem extends Model
 
     /**
      * Relasi: Kasir/staf yang menolak menu ini
+     *
+     * @return BelongsTo<User, $this>
      */
     public function rejectedByUser(): BelongsTo
     {
@@ -66,6 +120,8 @@ class OrderItem extends Model
 
     /**
      * Relasi: Satu item pesanan memiliki banyak rincian opsi
+     *
+     * @return HasMany<OrderItemOption, $this>
      */
     public function options(): HasMany
     {
@@ -74,6 +130,9 @@ class OrderItem extends Model
 
     /**
      * Scope: Hanya item aktif (belum ditolak)
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
      */
     public function scopeActive(Builder $query): Builder
     {
@@ -82,6 +141,9 @@ class OrderItem extends Model
 
     /**
      * Scope: Hanya item yang ditolak
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
      */
     public function scopeRejected(Builder $query): Builder
     {

@@ -807,3 +807,177 @@ test('three friends scanning QR on separate phones or one person ordering again 
         ->and($orders[2]->order_number)->not->toBe($orders[1]->order_number)
         ->and((float) $orders[2]->total_amount)->toBe(20000.0);
 });
+
+test('admin can configure and update product size icons and customer order page receives the exact configured icons', function () {
+    $admin = User::factory()->create(['role' => 'admin']);
+
+    // 1. Admin creates Black Forest Coffee with Small (cup-small), Medium (cup-medium), Large (cup-large)
+    $this->actingAs($admin)
+        ->post(route('admin.menus.store'), [
+            'category_id' => $this->category->id,
+            'name' => 'Black Forest Coffee',
+            'description' => 'Kopi cokelat dengan susu creamy, whipped cream, dan taburan cokelat.',
+            'base_price' => 26000,
+            'is_active' => true,
+            'option_groups' => [
+                [
+                    'name' => 'Ukuran',
+                    'selection_type' => 'single',
+                    'is_required' => true,
+                    'min_selection' => 1,
+                    'max_selection' => 1,
+                    'items' => [
+                        [
+                            'name' => 'Small',
+                            'icon' => 'cup-small',
+                            'additional_price' => 0,
+                            'is_default' => true,
+                            'is_active' => true,
+                        ],
+                        [
+                            'name' => 'Medium',
+                            'icon' => 'cup-medium',
+                            'additional_price' => 4000,
+                            'is_default' => false,
+                            'is_active' => true,
+                        ],
+                        [
+                            'name' => 'Large',
+                            'icon' => 'cup-large',
+                            'additional_price' => 8000,
+                            'is_default' => false,
+                            'is_active' => true,
+                        ],
+                    ],
+                ],
+            ],
+        ])
+        ->assertSessionHas('success');
+
+    $bfMenu = Menu::where('name', 'Black Forest Coffee')->with('optionGroups.optionItems')->first();
+    expect($bfMenu)->not->toBeNull();
+
+    $items = $bfMenu->optionGroups->first()->optionItems;
+    expect($items)->toHaveCount(3)
+        ->and($items[0]->name)->toBe('Small')
+        ->and($items[0]->icon)->toBe('cup-small')
+        ->and($items[1]->name)->toBe('Medium')
+        ->and($items[1]->icon)->toBe('cup-medium')
+        ->and($items[2]->name)->toBe('Large')
+        ->and($items[2]->icon)->toBe('cup-large');
+
+    // 2. Admin updates size icons via the dedicated size-icons endpoint
+    $this->actingAs($admin)
+        ->post(route('admin.menus.size-icons'), [
+            'items' => [
+                ['id' => $items[0]->id, 'icon' => 'pint-small'],
+                ['id' => $items[1]->id, 'icon' => 'pint-medium'],
+                ['id' => $items[2]->id, 'icon' => 'pint-large'],
+            ],
+        ])
+        ->assertSessionHas('success');
+
+    // 3. Customer loads /order?table={qr_token} and receives the exact updated icons
+    $response = $this->get(route('order.index', ['table' => $this->table->qr_token]));
+    $response->assertOk();
+
+    $pageProps = $response->viewData('page')['props'];
+    $catPayload = collect($pageProps['categories'])->firstWhere('id', $this->category->id);
+    $menuPayload = collect($catPayload['menus'])->firstWhere('id', $bfMenu->id);
+    $optionItemsPayload = $menuPayload['option_groups'][0]['option_items'];
+
+    expect($optionItemsPayload[0]['icon'])->toBe('pint-small')
+        ->and($optionItemsPayload[1]['icon'])->toBe('pint-medium')
+        ->and($optionItemsPayload[2]['icon'])->toBe('pint-large');
+});
+
+test('simulate payment endpoint security prevents public access in production', function () {
+    $order = Order::create([
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Tamu Meja Publik',
+        'subtotal' => 25000,
+        'total_amount' => 25000,
+        'order_status' => 'pending',
+        'payment_status' => 'unpaid',
+    ]);
+
+    // Di testing/local environment, simulasi payment berhasil
+    $response = $this->post(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+        'status' => 'paid',
+    ]);
+    $response->assertSessionHas('success');
+
+    $order->refresh();
+    expect($order->payment_status)->toBe('paid');
+
+    // Reset status
+    $order->update(['payment_status' => 'unpaid', 'order_status' => 'pending']);
+
+    // Ubah environment ke production untuk menguji proteksi
+    app()->detectEnvironment(fn () => 'production');
+
+    // Customer publik tanpa login mencoba bypass simulasi pembayaran di production -> 403 Forbidden
+    $blocked = $this->withSession(['_token' => 'test-csrf-token'])
+        ->post(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+            'status' => 'paid',
+            '_token' => 'test-csrf-token',
+        ]);
+    $blocked->assertForbidden();
+
+    $order->refresh();
+    expect($order->payment_status)->toBe('unpaid');
+
+    // Staf kasir yang sedang login mencoba simulasi -> diizinkan
+    $cashier = User::factory()->create(['role' => 'cashier']);
+    $allowedStaff = $this->actingAs($cashier)
+        ->withSession(['_token' => 'test-csrf-token'])
+        ->post(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+            'status' => 'paid',
+            '_token' => 'test-csrf-token',
+        ]);
+    $allowedStaff->assertSessionHas('success');
+
+    $order->refresh();
+    expect($order->payment_status)->toBe('paid');
+
+    // Kembalikan environment ke testing
+    app()->detectEnvironment(fn () => 'testing');
+});
+
+test('tambah menu on order with failed payment status resets payment status to unpaid', function () {
+    $order = Order::create([
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Fahri Failed Order',
+        'subtotal' => 20000,
+        'total_amount' => 20000,
+        'order_status' => 'pending',
+        'payment_status' => 'failed',
+    ]);
+
+    $order->items()->create([
+        'menu_id' => $this->menu->id,
+        'menu_name' => $this->menu->name,
+        'base_price' => 20000,
+        'quantity' => 1,
+        'unit_price' => 20000,
+        'total_price' => 20000,
+        'status' => 'active',
+    ]);
+
+    $response = $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'order_number' => $order->order_number,
+        'customer_name' => 'Fahri Failed Order',
+        'items' => [
+            [
+                'menu_id' => $this->menu->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$this->optionLarge->id],
+            ],
+        ],
+    ]);
+
+    $response->assertRedirect();
+    $order->refresh();
+    expect($order->payment_status)->toBe('unpaid');
+});

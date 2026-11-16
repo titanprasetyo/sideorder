@@ -16,8 +16,8 @@ export function NavMain({ items }: { items: ExtendedNavItem[] }) {
     const { isCurrentUrl } = useCurrentUrl();
 
     return (
-        <SidebarGroup className="px-2.5 py-0">
-            <SidebarMenu className="gap-1.5">
+        <SidebarGroup className="px-2.5 py-0 font-sans">
+            <SidebarMenu className="gap-1">
                 {items.map((item) => {
                     const active = isCurrentUrl(item.href);
 
@@ -27,27 +27,33 @@ export function NavMain({ items }: { items: ExtendedNavItem[] }) {
                                 asChild
                                 isActive={active}
                                 tooltip={{ children: item.title }}
-                                className={`h-10 px-3 rounded-xl text-xs font-bold transition-all ${
+                                className={`h-10 rounded-xl px-3 text-xs font-bold transition-all ${
                                     active
-                                        ? '!bg-[#EBDDC1] !text-neutral-900 shadow-2xs border border-[#DFCFA9]'
-                                        : '!text-neutral-800 hover:!bg-[#EFE5CF] hover:!text-neutral-950'
+                                        ? 'border border-[#DFCFA9] !bg-[#EBDDC1] !text-[#18181B] shadow-2xs'
+                                        : '!text-[#3F2D1C] hover:!bg-[#EFE5CF] hover:!text-[#18181B]'
                                 }`}
                             >
-                                <Link href={item.href} prefetch className="flex items-center justify-between w-full">
-                                    <div className="flex items-center gap-3">
+                                <Link
+                                    href={item.href}
+                                    prefetch="hover"
+                                    className="flex w-full items-center justify-between"
+                                >
+                                    <div className="flex min-w-0 items-center gap-3">
                                         {item.icon && (
                                             <item.icon
-                                                className={`size-4.5 shrink-0 ${
-                                                    active ? 'text-[#C52828]' : 'text-neutral-800'
+                                                className={`size-4.5 shrink-0 transition-colors ${
+                                                    active
+                                                        ? 'text-[#C52828]'
+                                                        : 'text-[#5B4126]'
                                                 }`}
                                             />
                                         )}
-                                        <span className="font-bold tracking-tight !text-neutral-900">
+                                        <span className="truncate font-bold tracking-tight !text-[#18181B]">
                                             {item.title}
                                         </span>
                                     </div>
                                     {item.badge && (
-                                        <span className="bg-[#C52828] text-white text-[10px] font-black px-1.5 py-0.2 rounded-full shadow-2xs">
+                                        <span className="shrink-0 rounded-full bg-[#C52828] px-2 py-0.5 text-[10px] font-extrabold tracking-wide text-white shadow-2xs">
                                             {item.badge}
                                         </span>
                                     )}

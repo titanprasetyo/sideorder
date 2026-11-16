@@ -23,21 +23,30 @@ class FinancialReportFilterRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'preset' => ['nullable', 'string', 'in:today,yesterday,last_7_days,this_week,this_month,last_month,custom'],
+            'preset' => ['nullable', 'string', 'in:today,yesterday,last_7_days,last_14_days,last_30_days,last_90_days,this_week,last_week,this_month,last_month,last_3_months,last_6_months,this_year,last_year,all_time,custom'],
             'start_date' => ['nullable', 'date_format:Y-m-d'],
             'end_date' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:start_date'],
+            'compare_mode' => ['nullable', 'string', 'in:previous_period,previous_month,previous_year,custom_compare,none'],
+            'compare_start_date' => ['nullable', 'date_format:Y-m-d'],
+            'compare_end_date' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:compare_start_date'],
+            'filter_date' => ['nullable', 'date_format:Y-m-d'],
+            'menu_id' => ['nullable', 'integer'],
             'aggregation' => ['nullable', 'string', 'in:auto,daily,weekly,monthly'],
             'recap_view' => ['nullable', 'string', 'in:daily,weekly,monthly'],
             'search' => ['nullable', 'string', 'max:100'],
             'payment_status' => ['nullable', 'string', 'in:all,paid,unpaid,failed,refunded'],
             'order_status' => ['nullable', 'string', 'in:all,pending,processing,ready,completed,cancelled'],
             'payment_method' => ['nullable', 'string', 'in:all,cash,qris,transfer,debit'],
+            'payment_gateway' => ['nullable', 'string', 'in:all,xendit,midtrans,manual'],
             'sort_by' => ['nullable', 'string', 'in:transaction_date,total_amount,order_number,created_at'],
             'sort_dir' => ['nullable', 'string', 'in:asc,desc'],
             'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],
         ];
     }
 
+    /**
+     * @return array<string, string>
+     */
     public function messages(): array
     {
         return [

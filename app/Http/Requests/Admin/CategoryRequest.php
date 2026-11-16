@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests\Admin;
 
+use App\Models\Category;
+use App\Models\User;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -13,7 +15,9 @@ class CategoryRequest extends FormRequest
      */
     public function authorize(): bool
     {
-        return $this->user() && $this->user()->isAdmin();
+        $user = $this->user();
+
+        return $user instanceof User && $user->isAdmin();
     }
 
     /**
@@ -23,7 +27,8 @@ class CategoryRequest extends FormRequest
      */
     public function rules(): array
     {
-        $categoryId = $this->route('category')?->id;
+        $routeCategory = $this->route('category');
+        $categoryId = $routeCategory instanceof Category ? $routeCategory->id : null;
 
         return [
             'name' => ['required', 'string', 'max:100'],

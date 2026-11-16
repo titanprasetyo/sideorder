@@ -1,5 +1,6 @@
 import { Form, Head, usePage } from '@inertiajs/react';
 import { Link } from '@inertiajs/react';
+import { Store } from 'lucide-react';
 import ProfileController from '@/actions/App/Http/Controllers/Settings/ProfileController';
 import DeleteUser from '@/components/delete-user';
 import Heading from '@/components/heading';
@@ -18,9 +19,11 @@ type PageProps = {
 export default function Profile({
     mustVerifyEmail,
     status,
+    canDeleteAccount = true,
 }: {
     mustVerifyEmail: boolean;
     status?: string;
+    canDeleteAccount?: boolean;
 }) {
     const { auth } = usePage<PageProps>().props;
 
@@ -31,6 +34,31 @@ export default function Profile({
             <h1 className="sr-only">Profile settings</h1>
 
             <div className="space-y-6">
+                {/* Akses Kasir & KDS */}
+                <div className="flex flex-col gap-4 rounded-2xl border border-[#DFCFA9] bg-[#FFFDF9] p-4 shadow-2xs sm:flex-row sm:items-center sm:justify-between sm:p-5">
+                    <div className="flex items-center gap-3.5">
+                        <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-[#C52828] text-white shadow-2xs">
+                            <Store className="size-5" />
+                        </div>
+                        <div>
+                            <h3 className="text-sm leading-tight font-bold text-neutral-900">
+                                Akses Cepat Kasir &amp; KDS
+                            </h3>
+                            <p className="mt-0.5 text-xs font-medium text-neutral-500">
+                                Buka antarmuka Point of Sale (POS) &amp; Kitchen
+                                Display System untuk melayani pesanan kasir.
+                            </p>
+                        </div>
+                    </div>
+                    <Link
+                        href="/cashier/orders"
+                        className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-xl bg-[#C52828] px-4 text-xs font-bold tracking-tight text-white shadow-xs shadow-[#C52828]/20 transition-all hover:bg-[#A81E1E] active:scale-[0.98]"
+                    >
+                        <Store className="size-3.5" />
+                        <span>Buka Kasir / KDS</span>
+                    </Link>
+                </div>
+
                 <Heading
                     variant="small"
                     title="Profile"
@@ -123,7 +151,7 @@ export default function Profile({
                 </Form>
             </div>
 
-            <DeleteUser />
+            {canDeleteAccount && auth.user.role !== 'admin' && <DeleteUser />}
         </>
     );
 }

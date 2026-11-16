@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 
 class DatabaseSeeder extends Seeder
 {
@@ -13,15 +14,32 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // Buat akun Admin default
+        $configuredEmail = config('auth.default_admin.email');
+        $email = is_string($configuredEmail) && $configuredEmail !== '' ? $configuredEmail : 'astaa@gmail.com';
+
+        $configuredName = config('auth.default_admin.name');
+        $name = is_string($configuredName) && $configuredName !== '' ? $configuredName : 'astaa';
+
+        $rawPassword = config('auth.default_admin.password');
+        $generatedFallback = false;
+
+        if (! is_string($rawPassword) || trim($rawPassword) === '') {
+            $rawPassword = Str::password(16);
+            $generatedFallback = true;
+        }
+
         User::firstOrCreate(
-            ['email' => 'astaa@gmail.com'], // Ganti sesuai email admin Anda
+            ['email' => $email],
             [
-                'name' => 'astaa',
-                'password' => Hash::make('astaa@gmail.com'), // Ganti dengan password yang diinginkan
+                'name' => $name,
+                'password' => Hash::make($rawPassword),
                 'role' => 'admin',
                 'email_verified_at' => now(),
             ]
         );
+
+        if ($generatedFallback) {
+            $this->command->warn("ADMIN_DEFAULT_PASSWORD belum disetel di .env. Password acak sementara untuk {$email}: {$rawPassword}");
+        }
     }
 }

@@ -2,10 +2,10 @@ import { Link, router, usePage } from '@inertiajs/react';
 import {
     ClipboardList,
     Coffee,
-    FileSpreadsheet,
     Layers,
     LayoutGrid,
     LogOut,
+    MapPin,
     QrCode,
     UserCheck,
     Users,
@@ -30,7 +30,7 @@ interface RoleNavItem extends ExtendedNavItem {
 
 const allNavItems: RoleNavItem[] = [
     {
-        title: 'Ringkasan',
+        title: 'Ringkasan & Keuangan',
         href: dashboard(),
         icon: LayoutGrid,
         roles: ['admin'],
@@ -40,12 +40,6 @@ const allNavItems: RoleNavItem[] = [
         href: '/admin/orders',
         icon: ClipboardList,
         badge: '+Baru',
-        roles: ['admin'],
-    },
-    {
-        title: 'Laporan Keuangan',
-        href: '/admin/financial-reports',
-        icon: FileSpreadsheet,
         roles: ['admin'],
     },
     {
@@ -62,7 +56,7 @@ const allNavItems: RoleNavItem[] = [
         roles: ['admin'],
     },
     {
-        title: 'Menu',
+        title: 'Menu & Produk',
         href: '/admin/menus',
         icon: Coffee,
         roles: ['admin'],
@@ -79,6 +73,12 @@ const allNavItems: RoleNavItem[] = [
         icon: QrCode,
         roles: ['admin'],
     },
+    {
+        title: 'Lokasi & Radius Kafe',
+        href: '/admin/location-settings',
+        icon: MapPin,
+        roles: ['admin'],
+    },
 ];
 
 export function AppSidebar() {
@@ -87,7 +87,7 @@ export function AppSidebar() {
     const homeLink = userRole === 'cashier' ? '/cashier/orders' : dashboard();
 
     const filteredNavItems = allNavItems.filter(
-        (item) => !item.roles || item.roles.includes(userRole)
+        (item) => !item.roles || item.roles.includes(userRole),
     );
 
     const handleLogout = () => {
@@ -95,16 +95,22 @@ export function AppSidebar() {
     };
 
     return (
-        <Sidebar collapsible="icon" variant="sidebar" className="!bg-[#FAF6EC] border-r border-[#E8DFC8]">
+        <Sidebar
+            collapsible="icon"
+            variant="sidebar"
+            className="border-r border-[#E8DFC8] !bg-[#FAF6EC] font-sans"
+        >
             {/* Header: Logo SIDEORDER */}
-            <SidebarHeader className="p-3.5 border-b
-             border-[#E8DFC8] !bg-[#FAF6EC]">
+            <SidebarHeader className="border-b border-[#E8DFC8] !bg-[#FAF6EC] p-3.5">
                 <SidebarMenu>
                     <SidebarMenuItem>
-                        <SidebarMenuButton size="lg" asChild className="hover:!bg-[#EFE5CF]">
-                            <Link href={homeLink} prefetch>
+                        <SidebarMenuButton
+                            size="lg"
+                            asChild
+                            className="rounded-xl transition-colors hover:!bg-[#EFE5CF]"
+                        >
+                            <Link href={homeLink} prefetch="hover">
                                 <AppLogo />
-                                
                             </Link>
                         </SidebarMenuButton>
                     </SidebarMenuItem>
@@ -112,18 +118,30 @@ export function AppSidebar() {
             </SidebarHeader>
 
             {/* Menu Navigasi Utama */}
-            <SidebarContent className="py-2.5 !bg-[#FAF6EC]">
+            <SidebarContent className="!bg-[#FAF6EC] py-3">
+                <div className="px-4 pb-2 text-[10px] font-extrabold tracking-widest text-[#8C7A6B] uppercase group-data-[collapsible=icon]:hidden">
+                    Menu Operasional
+                </div>
                 <NavMain items={filteredNavItems} />
             </SidebarContent>
 
             {/* Footer Navigasi: Profil & Logout */}
-            <SidebarFooter className="p-3 border-t border-[#E8DFC8] space-y-1.5 !bg-[#FAF6EC]">
+            <SidebarFooter className="space-y-1.5 border-t border-[#E8DFC8] !bg-[#FAF6EC] p-3">
                 <SidebarMenu className="gap-1">
                     <SidebarMenuItem>
-                        <SidebarMenuButton asChild className="h-10 px-3 rounded-xl text-xs font-bold !text-neutral-900 hover:!bg-[#EFE5CF] transition-colors">
-                            <Link href="/settings/profile" prefetch className="flex items-center gap-3">
-                                <UserCheck className="size-4.5 shrink-0 text-neutral-800" />
-                                <span>Profil Admin</span>
+                        <SidebarMenuButton
+                            asChild
+                            className="h-10 rounded-xl px-3 text-xs font-bold !text-[#18181B] transition-colors hover:!bg-[#EFE5CF]"
+                        >
+                            <Link
+                                href="/settings/profile"
+                                prefetch="hover"
+                                className="flex items-center gap-3"
+                            >
+                                <UserCheck className="size-4.5 shrink-0 text-[#5B4126]" />
+                                <span className="tracking-tight">
+                                    Pengaturan Profil
+                                </span>
                             </Link>
                         </SidebarMenuButton>
                     </SidebarMenuItem>
@@ -131,11 +149,13 @@ export function AppSidebar() {
                     <SidebarMenuItem>
                         <SidebarMenuButton
                             onClick={handleLogout}
-                            className="h-10 px-3 rounded-xl text-xs font-bold !text-[#B91C1C] hover:!bg-[#FEE2E2] hover:!text-[#991B1B] transition-colors"
+                            className="h-10 cursor-pointer rounded-xl px-3 text-xs font-bold !text-[#B91C1C] transition-colors hover:!bg-[#FEE2E2] hover:!text-[#991B1B]"
                         >
                             <div className="flex items-center gap-3">
                                 <LogOut className="size-4.5 shrink-0 text-[#B91C1C]" />
-                                <span>Logout</span>
+                                <span className="tracking-tight">
+                                    Keluar / Logout
+                                </span>
                             </div>
                         </SidebarMenuButton>
                     </SidebarMenuItem>

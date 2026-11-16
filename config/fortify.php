@@ -161,7 +161,7 @@ return [
     */
 
     'features' => [
-        Features::registration(),
+        // Registrasi publik dinonaktifkan: hanya terdapat satu Admin utama yang mengelola akun Kasir via /admin/users
         Features::resetPasswords(),
         Features::emailVerification(),
         Features::twoFactorAuthentication([

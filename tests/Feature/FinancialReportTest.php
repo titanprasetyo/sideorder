@@ -75,11 +75,10 @@ test('role access control restricts financial reports and exports to admin only'
         ->get(route('admin.financial-reports.export.pdf'))
         ->assertForbidden();
 
-    // Admin diizinkan mengakses halaman laporan keuangan
+    // Admin diizinkan mengakses halaman laporan keuangan (dialihkan ke Dashboard terpadu)
     $this->actingAs($this->admin)
         ->get(route('admin.financial-reports.index'))
-        ->assertOk()
-        ->assertInertia(fn ($page) => $page->component('admin/financial-reports/index'));
+        ->assertRedirect(route('dashboard'));
 });
 
 test('admin cannot confirm payment via admin panel endpoint while cashier KDS endpoint confirms payment', function () {
@@ -562,4 +561,28 @@ test('cashier KDS JSON endpoints transition order sequentially from pending to p
         ->and($syncedAfterCompleted['order_status'])->toBe('completed')
         ->and($completedRes['counts']['ready'])->toBe(0)
         ->and($completedRes['counts']['completed_today'])->toBe(1);
+});
+
+test('csv export sanitizes formula injection characters', function () {
+    Order::create([
+        'order_number' => '=1+1',
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => '@malicious_user',
+        'subtotal' => 25000,
+        'total_amount' => 25000,
+        'order_status' => 'completed',
+        'payment_status' => 'paid',
+        'payment_method' => 'cash',
+        'created_at' => Carbon::create(2026, 10, 22, 10, 0, 0, 'Asia/Jakarta'),
+        'paid_at' => Carbon::create(2026, 10, 22, 10, 5, 0, 'Asia/Jakarta'),
+    ]);
+
+    $response = $this->actingAs($this->admin)
+        ->get(route('admin.financial-reports.export.csv', ['preset' => 'today']));
+
+    $response->assertOk();
+    $csvContent = $response->streamedContent();
+
+    expect($csvContent)->toContain("'=1+1")
+        ->and($csvContent)->toContain("'@malicious_user");
 });

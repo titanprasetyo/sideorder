@@ -22,6 +22,7 @@ class ProfileController extends Controller
         return Inertia::render('settings/profile', [
             'mustVerifyEmail' => $request->user() instanceof MustVerifyEmail,
             'status' => $request->session()->get('status'),
+            'canDeleteAccount' => ! ($request->user()?->isAdmin() ?? false),
         ]);
     }
 
@@ -49,6 +50,12 @@ class ProfileController extends Controller
     public function destroy(ProfileDeleteRequest $request): RedirectResponse
     {
         $user = $request->user();
+
+        if ($user && $user->isAdmin()) {
+            return back()->withErrors([
+                'password' => 'Akun Administrator utama tidak dapat dihapus.',
+            ]);
+        }
 
         Auth::logout();
 

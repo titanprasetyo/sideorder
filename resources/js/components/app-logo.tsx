@@ -1,17 +1,19 @@
-import { Coffee } from 'lucide-react';
-
 export default function AppLogo() {
     return (
-        <div className="flex items-center gap-2.5">
-            <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-[#C52828] text-white shadow-xs">
-                <Coffee className="size-5 text-white" />
+        <div className="flex items-center gap-3 font-sans">
+            <div className="flex aspect-square size-9 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[#F3080A] text-white shadow-sm ring-1 shadow-[#F3080A]/25 ring-black/5">
+                <img
+                    src="/images/sideline-icon.png"
+                    alt="SIDELINE"
+                    className="size-full object-cover"
+                />
             </div>
-            <div className="grid flex-1 text-left">
-                <span className="truncate leading-tight font-black tracking-wide text-neutral-900 text-sm">
-                    SIDEORDER
+            <div className="grid flex-1 text-left leading-tight">
+                <span className="truncate font-heading text-sm font-black tracking-tight text-[#18181B] uppercase">
+                    SIDELINE
                 </span>
-                <span className="truncate text-[10px] font-medium text-neutral-500">
-                    SIDE LINE Cafe Admin
+                <span className="truncate text-[10px] font-bold tracking-[0.14em] text-[#78716C] uppercase">
+                    Coffee &bull; Eatery
                 </span>
             </div>
         </div>

@@ -86,3 +86,20 @@ test('correct password must be provided to delete account', function () {
 
     expect($user->fresh())->not->toBeNull();
 });
+
+test('admin user cannot delete their own account', function () {
+    $admin = User::factory()->create(['role' => 'admin']);
+
+    $response = $this
+        ->actingAs($admin)
+        ->from(route('profile.edit'))
+        ->delete(route('profile.destroy'), [
+            'password' => 'password',
+        ]);
+
+    $response
+        ->assertSessionHasErrors('password')
+        ->assertRedirect(route('profile.edit'));
+
+    expect($admin->fresh())->not->toBeNull();
+});

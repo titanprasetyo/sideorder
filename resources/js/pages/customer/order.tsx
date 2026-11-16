@@ -1,45 +1,50 @@
 import { Head, Link, router } from '@inertiajs/react';
 import {
-    AlertCircle,
-    ArrowRight,
-    Bell,
+    ArrowClockwise,
+    ArrowRight as PhArrowRight,
     Check,
-    CheckCircle2,
-    Coffee,
-    Image as ImageIcon,
-    Minus,
-    Pencil,
-    Plus,
-    Search,
-    ShoppingBag,
-    SlidersHorizontal,
-    Store,
-    Trash2,
-    Utensils,
-    Wifi,
-    X,
-} from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+    Coffee as PhCoffee,
+    Flame,
+    MagnifyingGlass,
+    MapPin,
+    Minus as PhMinus,
+    Money,
+    NotePencil,
+    PencilSimpleLine,
+    Plus as PhPlus,
+    QrCode as PhQrCode,
+    ShoppingBagOpen,
+    ShoppingCart,
+    SlidersHorizontal as PhSlidersHorizontal,
+    Storefront,
+    Trash,
+    User as PhUser,
+    WarningCircle,
+    WifiHigh,
+    X as PhX,
+} from '@phosphor-icons/react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
+import {
+    CupHeaderPhosphorIcon,
+    SizeOptionIcon,
+} from '@/components/menu/size-icon';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
     Dialog,
     DialogContent,
     DialogDescription,
-    DialogFooter,
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 
 interface OptionItem {
     id: number;
     name: string;
+    icon?: string | null;
     additional_price: string;
     is_default: boolean;
     is_active: boolean;
@@ -61,8 +66,37 @@ interface Menu {
     description: string | null;
     image_path: string | null;
     base_price: string;
+    is_discount_active?: boolean;
+    discount_type?: 'percent' | 'fixed' | null;
+    discount_value?: string | number | null;
+    final_price?: number;
+    discount_amount?: number;
     is_active: boolean;
+    is_limited_stock?: boolean;
+    stock_quantity?: number;
     option_groups?: OptionGroup[];
+}
+
+interface StockSyncEntry {
+    id: number;
+    is_active: boolean;
+    is_limited_stock: boolean;
+    stock_quantity: number;
+}
+
+interface LocationAccessInfo {
+    required: boolean;
+    verified: boolean;
+    cafe_name: string;
+    address: string | null;
+    radius_meters: number;
+    distance_meters: number | null;
+    message: string | null;
+}
+
+interface VerifiedCoords {
+    latitude: number;
+    longitude: number;
 }
 
 interface Category {
@@ -128,6 +162,60 @@ interface Props {
         }[];
     } | null;
     lockedOrderNotice?: string | null;
+    locationAccess?: LocationAccessInfo;
+}
+
+const VERIFIED_COORDS_STORAGE_KEY = 'sideorder_verified_coords';
+
+function loadStoredCoords(): VerifiedCoords | null {
+    if (typeof window === 'undefined') return null;
+
+    try {
+        const raw = sessionStorage.getItem(VERIFIED_COORDS_STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (
+            typeof parsed?.latitude === 'number' &&
+            typeof parsed?.longitude === 'number' &&
+            Number.isFinite(parsed.latitude) &&
+            Number.isFinite(parsed.longitude)
+        ) {
+            return {
+                latitude: parsed.latitude,
+                longitude: parsed.longitude,
+            };
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+function saveStoredCoords(coords: VerifiedCoords): void {
+    if (typeof window === 'undefined') return;
+
+    try {
+        sessionStorage.setItem(
+            VERIFIED_COORDS_STORAGE_KEY,
+            JSON.stringify(coords),
+        );
+    } catch {
+        // Ignore storage quota errors
+    }
+}
+
+function clearStoredCoords(): void {
+    if (typeof window === 'undefined') return;
+
+    try {
+        sessionStorage.removeItem(VERIFIED_COORDS_STORAGE_KEY);
+    } catch {
+        // Ignore storage errors
+    }
+}
+
+function isMenuOutOfStock(menu: Menu): boolean {
+    return Boolean(menu.is_limited_stock && (menu.stock_quantity ?? 0) <= 0);
 }
 
 function isSingleSelectGroup(group: OptionGroup): boolean {
@@ -140,16 +228,25 @@ function isSingleSelectGroup(group: OptionGroup): boolean {
 function hasMenuVariants(menu: Menu): boolean {
     return Boolean(
         menu.option_groups &&
-            menu.option_groups.some((g) => g.option_items && g.option_items.length > 0),
+        menu.option_groups.some(
+            (g) => g.option_items && g.option_items.length > 0,
+        ),
     );
 }
 
-function buildCartId(menuId: number, optionIds: number[], notes: string): string {
+function buildCartId(
+    menuId: number,
+    optionIds: number[],
+    notes: string,
+): string {
     const sortedIds = [...optionIds].sort((a, b) => a - b);
     return `${menuId}-${sortedIds.join('_')}-${notes.trim()}`;
 }
 
-function hydrateCartFromStorage(qrToken: string, categories: Category[]): CartItem[] {
+function hydrateCartFromStorage(
+    qrToken: string,
+    categories: Category[],
+): CartItem[] {
     if (typeof window === 'undefined') {
         return [];
     }
@@ -164,23 +261,39 @@ function hydrateCartFromStorage(qrToken: string, categories: Category[]): CartIt
         const menuMap = new Map<number, Menu>();
         categories.forEach((cat) => {
             cat.menus.forEach((m) => {
-                if (m.is_active) {
+                if (m.is_active && !isMenuOutOfStock(m)) {
                     menuMap.set(m.id, m);
                 }
             });
         });
 
         const synced: CartItem[] = [];
+        const allocatedPerMenu = new Map<number, number>();
 
         parsed.forEach((rawItem: any) => {
             const menu = menuMap.get(Number(rawItem?.menu_id));
             if (!menu) return;
 
-            const qty = Math.max(1, Math.min(50, Number(rawItem?.quantity) || 1));
-            const notes = typeof rawItem?.customer_notes === 'string' ? rawItem.customer_notes.trim() : '';
+            const requestedQty = Math.max(
+                1,
+                Math.min(50, Number(rawItem?.quantity) || 1),
+            );
+            const alreadyAllocated = allocatedPerMenu.get(menu.id) ?? 0;
+            const remainingMenuStock = menu.is_limited_stock
+                ? Math.max(0, (menu.stock_quantity ?? 0) - alreadyAllocated)
+                : 50;
+            const qty = Math.min(requestedQty, remainingMenuStock);
+            if (qty <= 0) return;
+
+            const notes =
+                typeof rawItem?.customer_notes === 'string'
+                    ? rawItem.customer_notes.trim()
+                    : '';
 
             // Ambil ID opsi dari struktur baru (selected_options) maupun struktur lama (selected_option_ids)
-            const rawOptionIds: number[] = Array.isArray(rawItem?.selected_options)
+            const rawOptionIds: number[] = Array.isArray(
+                rawItem?.selected_options,
+            )
                 ? rawItem.selected_options
                       .map((o: any) => Number(o?.option_item_id ?? o?.id))
                       .filter((n: number) => !Number.isNaN(n) && n > 0)
@@ -211,8 +324,9 @@ function hydrateCartFromStorage(qrToken: string, categories: Category[]): CartIt
                         group.option_items.length > 0
                     ) {
                         const fallback =
-                            group.option_items.find((i) => i.is_default && i.is_active) ||
-                            group.option_items[0];
+                            group.option_items.find(
+                                (i) => i.is_default && i.is_active,
+                            ) || group.option_items[0];
                         if (fallback) {
                             chosenItems.push(fallback);
                         }
@@ -231,14 +345,20 @@ function hydrateCartFromStorage(qrToken: string, categories: Category[]): CartIt
                 });
             }
 
-            const basePrice = parseFloat(menu.base_price) || 0;
+            const basePrice =
+                parseFloat(String(menu.final_price ?? menu.base_price)) || 0;
             const unitPrice = basePrice + optionsPrice;
             const optionIds = validOptions.map((o) => o.option_item_id);
             const cartId = buildCartId(menu.id, optionIds, notes);
 
             const existingIdx = synced.findIndex((c) => c.cart_id === cartId);
             if (existingIdx > -1) {
-                synced[existingIdx].quantity = Math.min(50, synced[existingIdx].quantity + qty);
+                const addable = Math.min(
+                    50 - synced[existingIdx].quantity,
+                    qty,
+                );
+                synced[existingIdx].quantity += addable;
+                allocatedPerMenu.set(menu.id, alreadyAllocated + addable);
             } else {
                 synced.push({
                     cart_id: cartId,
@@ -250,6 +370,7 @@ function hydrateCartFromStorage(qrToken: string, categories: Category[]): CartIt
                     customer_notes: notes,
                     selected_options: validOptions,
                 });
+                allocatedPerMenu.set(menu.id, alreadyAllocated + qty);
             }
         });
 
@@ -266,44 +387,35 @@ function getMenuFallbackImage(name: string, categoryName: string): string {
     if (lower.includes('matcha') || lower.includes('green tea')) {
         return 'https://images.unsplash.com/photo-1536256263959-770b48d82b0a?q=80&w=400&auto=format&fit=crop';
     }
-    if (lower.includes('croissant') || lower.includes('pastry') || lower.includes('roti') || lower.includes('toast') || lower.includes('bakar')) {
+    if (
+        lower.includes('croissant') ||
+        lower.includes('pastry') ||
+        lower.includes('roti') ||
+        lower.includes('toast') ||
+        lower.includes('bakar')
+    ) {
         return 'https://images.unsplash.com/photo-1555507036-ab1f4038808a?q=80&w=400&auto=format&fit=crop';
     }
-    if (lower.includes('mie') || lower.includes('nasi') || lower.includes('makan') || lower.includes('tahu') || lower.includes('snack') || lower.includes('goreng')) {
+    if (
+        lower.includes('mie') ||
+        lower.includes('nasi') ||
+        lower.includes('makan') ||
+        lower.includes('tahu') ||
+        lower.includes('snack') ||
+        lower.includes('goreng')
+    ) {
         return 'https://images.unsplash.com/photo-1565299585323-38d6b0865b47?q=80&w=400&auto=format&fit=crop';
     }
-    if (lower.includes('juice') || lower.includes('jeruk') || lower.includes('tea') || lower.includes('segar')) {
+    if (
+        lower.includes('juice') ||
+        lower.includes('jeruk') ||
+        lower.includes('tea') ||
+        lower.includes('segar')
+    ) {
         return 'https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?q=80&w=400&auto=format&fit=crop';
     }
     // Default: Kopi Susu / Coffee
     return 'https://images.unsplash.com/photo-1541167760496-1628856ab772?q=80&w=400&auto=format&fit=crop';
-}
-
-// Penanda label estetis otomatis sesuai referensi mockup
-function getMenuBadge(menu: Menu, catName: string) {
-    const lower = `${menu.name} ${catName}`.toLowerCase();
-    if (lower.includes('aren') || lower.includes('kopi susu')) {
-        return { label: 'BESTSELLER', sub: 'Iced 16oz', bg: 'bg-[#FEF0C7]', text: 'text-[#B54708]' };
-    }
-    if (lower.includes('americano') || lower.includes('espresso')) {
-        return { label: 'Espresso Blend', sub: 'Single Origin', bg: 'bg-[#FEE4E2]', text: 'text-[#B42318]' };
-    }
-    if (lower.includes('matcha')) {
-        return { label: 'Ceremonial Grade', sub: 'Pure Japan', bg: 'bg-[#D1FADF]', text: 'text-[#027A48]' };
-    }
-    if (lower.includes('croissant')) {
-        return { label: 'Fresh Baked', sub: 'Artisan', bg: 'bg-[#FEF0C7]', text: 'text-[#B54708]' };
-    }
-    if (lower.includes('roti') || lower.includes('bakar')) {
-        return { label: 'FAVORIT', sub: 'Sweet Bite', bg: 'bg-[#FEF0C7]', text: 'text-[#B54708]' };
-    }
-    if (lower.includes('mie') || lower.includes('matah') || lower.includes('pedas')) {
-        return { label: 'Pedas Segar', sub: 'Main Dish', bg: 'bg-[#FEE4E2]', text: 'text-[#B42318]' };
-    }
-    if (lower.includes('tahu') || lower.includes('snack') || lower.includes('cemilan')) {
-        return { label: 'Stok Terbatas', sub: 'Cemilan', bg: 'bg-[#FEF0C7]', text: 'text-[#B54708]' };
-    }
-    return { label: catName, sub: 'Signature', bg: 'bg-[#FEF0C7]', text: 'text-[#B54708]' };
 }
 
 export default function CustomerOrder({
@@ -311,20 +423,224 @@ export default function CustomerOrder({
     categories,
     activeOrder = null,
     lockedOrderNotice = null,
+    locationAccess = {
+        required: false,
+        verified: true,
+        cafe_name: 'Café SIDE LINE',
+        address: null,
+        radius_meters: 100,
+        distance_meters: null,
+        message: null,
+    },
 }: Props) {
     const [searchQuery, setSearchQuery] = useState('');
-    const [selectedCategory, setSelectedCategory] = useState<number | 'all'>('all');
+    const [selectedCategory, setSelectedCategory] = useState<number | 'all'>(
+        'all',
+    );
 
-    // Peta seluruh menu aktif berdasarkan ID untuk lookup cepat & sinkronisasi harga
+    // State Geolocation / Verifikasi Akses Area Kafe
+    const [serverLocationVerified, setServerLocationVerified] =
+        useState<boolean>(
+            () => !locationAccess.required || locationAccess.verified,
+        );
+    const [locationGateStatus, setLocationGateStatus] = useState<
+        'idle' | 'checking' | 'blocked'
+    >(() =>
+        locationAccess.required && !locationAccess.verified
+            ? 'checking'
+            : 'idle',
+    );
+    const [verifiedCoords, setVerifiedCoords] = useState<VerifiedCoords | null>(
+        () => loadStoredCoords(),
+    );
+    const autoGeoTriggeredRef = useRef(false);
+
+    // State sinkronisasi stok real-time ringan dari /order/stock-sync
+    const [stockOverrides, setStockOverrides] = useState<
+        Record<number, StockSyncEntry>
+    >({});
+
+    useEffect(() => {
+        setServerLocationVerified(
+            !locationAccess.required || locationAccess.verified,
+        );
+    }, [locationAccess.required, locationAccess.verified]);
+
+    const isLocationBlocked =
+        locationAccess.required && !serverLocationVerified;
+
+    const verifyCoordinatesWithServer = useCallback(
+        async (coords: VerifiedCoords, accuracy?: number | null) => {
+            setLocationGateStatus('checking');
+            const normalizedAccuracy =
+                typeof accuracy === 'number' && Number.isFinite(accuracy)
+                    ? Math.round(accuracy)
+                    : null;
+
+            const csrfToken = document
+                .querySelector('meta[name="csrf-token"]')
+                ?.getAttribute('content');
+
+            try {
+                const res = await fetch('/order/verify-location', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Accept: 'application/json',
+                        'X-CSRF-TOKEN': csrfToken || '',
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({
+                        latitude: coords.latitude,
+                        longitude: coords.longitude,
+                        accuracy: normalizedAccuracy,
+                    }),
+                });
+
+                const data = await res.json().catch(() => null);
+
+                if (res.ok && data?.allowed) {
+                    saveStoredCoords(coords);
+                    setVerifiedCoords(coords);
+
+                    router.reload({
+                        only: [
+                            'categories',
+                            'activeOrder',
+                            'lockedOrderNotice',
+                            'locationAccess',
+                        ],
+                        onSuccess: () => {
+                            setServerLocationVerified(true);
+                            setLocationGateStatus('idle');
+                        },
+                        onError: () => {
+                            setServerLocationVerified(false);
+                            setLocationGateStatus('blocked');
+                        },
+                    });
+                    return;
+                }
+
+                clearStoredCoords();
+                setVerifiedCoords(null);
+                setServerLocationVerified(false);
+                setLocationGateStatus('blocked');
+            } catch {
+                setLocationGateStatus('blocked');
+            }
+        },
+        [],
+    );
+
+    const requestCustomerLocation = useCallback(() => {
+        if (
+            typeof window !== 'undefined' &&
+            (!window.isSecureContext ||
+                typeof navigator === 'undefined' ||
+                !navigator.geolocation)
+        ) {
+            setLocationGateStatus('blocked');
+            return;
+        }
+
+        setLocationGateStatus('checking');
+
+        const handleGeoError = (
+            err: GeolocationPositionError,
+            allowFallbackRetry: boolean,
+        ) => {
+            if (err.code === err.PERMISSION_DENIED) {
+                setLocationGateStatus('blocked');
+                return;
+            }
+
+            if (allowFallbackRetry) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        void verifyCoordinatesWithServer(
+                            {
+                                latitude: position.coords.latitude,
+                                longitude: position.coords.longitude,
+                            },
+                            position.coords.accuracy,
+                        );
+                    },
+                    (fallbackErr) => handleGeoError(fallbackErr, false),
+                    {
+                        enableHighAccuracy: false,
+                        timeout: 10000,
+                        maximumAge: 30000,
+                    },
+                );
+                return;
+            }
+
+            setLocationGateStatus('blocked');
+        };
+
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                void verifyCoordinatesWithServer(
+                    {
+                        latitude: position.coords.latitude,
+                        longitude: position.coords.longitude,
+                    },
+                    position.coords.accuracy,
+                );
+            },
+            (err) => handleGeoError(err, true),
+            {
+                enableHighAccuracy: true,
+                timeout: 12000,
+                maximumAge: 0,
+            },
+        );
+    }, [verifyCoordinatesWithServer]);
+
+    // Jalankan verifikasi lokasi otomatis ketika gerbang geofencing terkunci
+    useEffect(() => {
+        if (!isLocationBlocked) {
+            autoGeoTriggeredRef.current = false;
+            return;
+        }
+        if (autoGeoTriggeredRef.current) return;
+        autoGeoTriggeredRef.current = true;
+        requestCustomerLocation();
+    }, [isLocationBlocked, requestCustomerLocation]);
+
+    // Gabungkan data menu server dengan pembaruan stok real-time
+    const resolvedCategories = useMemo(() => {
+        return categories
+            .map((cat) => ({
+                ...cat,
+                menus: cat.menus
+                    .map((menu) => {
+                        const override = stockOverrides[menu.id];
+                        if (!override) return menu;
+                        return {
+                            ...menu,
+                            is_active: override.is_active,
+                            is_limited_stock: override.is_limited_stock,
+                            stock_quantity: override.stock_quantity,
+                        };
+                    })
+                    .filter((m) => m.is_active),
+            }))
+            .filter((cat) => cat.menus.length > 0);
+    }, [categories, stockOverrides]);
+
+    // Peta seluruh menu aktif berdasarkan ID untuk lookup cepat & sinkronisasi harga/stok
     const allMenusMap = useMemo(() => {
         const map = new Map<number, Menu>();
-        categories.forEach((cat) => {
+        resolvedCategories.forEach((cat) => {
             cat.menus.forEach((m) => {
                 map.set(m.id, m);
             });
         });
         return map;
-    }, [categories]);
+    }, [resolvedCategories]);
 
     // State Modal Kustomisasi / Edit Item
     const [isCustomizeOpen, setIsCustomizeOpen] = useState(false);
@@ -334,15 +650,18 @@ export default function CustomerOrder({
     const [customizeNotes, setCustomizeNotes] = useState('');
     const [selectedOptionIds, setSelectedOptionIds] = useState<number[]>([]);
 
-    // State Keranjang Belanja (lazy-initialized dari localStorage & disinkronkan dengan data menu server)
+    // State Keranjang Belanja (lazy-initialized hanya saat akses lokasi lolos)
     const [cart, setCart] = useState<CartItem[]>(() =>
-        hydrateCartFromStorage(table.qr_token, categories),
+        isLocationBlocked
+            ? []
+            : hydrateCartFromStorage(table.qr_token, categories),
     );
     const [isCartOpen, setIsCartOpen] = useState(false);
     const [customerName, setCustomerName] = useState(
         () => activeOrder?.customer_name || '',
     );
     const [orderNotes, setOrderNotes] = useState('');
+    const [paymentMethod, setPaymentMethod] = useState<'qris' | 'cash'>('qris');
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Ref guard untuk mencegah klik berulang (double-click / rapid tap)
@@ -360,25 +679,135 @@ export default function CustomerOrder({
 
     // Polling ringan status pesanan aktif agar halaman menu tahu secara real-time jika pesanan sudah selesai
     useEffect(() => {
-        if (!activeOrder) return;
+        if (!activeOrder || isLocationBlocked) return;
 
         const interval = setInterval(() => {
             router.reload({ only: ['activeOrder', 'lockedOrderNotice'] });
         }, 5000);
 
         return () => clearInterval(interval);
-    }, [activeOrder?.order_number]);
+    }, [activeOrder?.order_number, isLocationBlocked]);
 
-    // Sinkronkan ulang jika token meja berubah
+    const fetchStockSync = useCallback(async () => {
+        try {
+            const res = await fetch('/order/stock-sync', {
+                headers: { Accept: 'application/json' },
+                credentials: 'same-origin',
+            });
+
+            if (res.status === 403) {
+                const payload = await res.json().catch(() => null);
+                if (payload?.location_required) {
+                    clearStoredCoords();
+                    setVerifiedCoords(null);
+                    setServerLocationVerified(false);
+                    setLocationGateStatus('blocked');
+                }
+                return;
+            }
+
+            if (!res.ok) return;
+            const data = await res.json();
+            if (Array.isArray(data?.menus)) {
+                const nextMap: Record<number, StockSyncEntry> = {};
+                (data.menus as StockSyncEntry[]).forEach((entry) => {
+                    nextMap[entry.id] = entry;
+                });
+                setStockOverrides(nextMap);
+            }
+        } catch {
+            // Abaikan error jaringan sementara saat polling latar belakang
+        }
+    }, []);
+
+    // Polling stok terbatas setiap 10 detik + saat tab kembali aktif
     useEffect(() => {
+        if (isLocationBlocked) return;
+
+        const interval = setInterval(() => {
+            void fetchStockSync();
+        }, 10000);
+
+        const handleVisibility = () => {
+            if (document.visibilityState === 'visible') {
+                void fetchStockSync();
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibility);
+
+        return () => {
+            clearInterval(interval);
+            document.removeEventListener('visibilitychange', handleVisibility);
+        };
+    }, [isLocationBlocked, fetchStockSync]);
+
+    // Sinkronkan keranjang dari localStorage hanya ketika lokasi terverifikasi & katalog server siap
+    useEffect(() => {
+        if (isLocationBlocked || categories.length === 0) return;
         setCart(hydrateCartFromStorage(table.qr_token, categories));
-    }, [table.qr_token, categories]);
+    }, [table.qr_token, categories, isLocationBlocked]);
 
-    // Simpan otomatis ke localStorage setiap keranjang berubah & reset idempotency key
+    // Sesuaikan keranjang bila polling stok terbaru menunjukkan penurunan sisa stok
     useEffect(() => {
-        localStorage.setItem(`sideorder_cart_${table.qr_token}`, JSON.stringify(cart));
+        if (isLocationBlocked || Object.keys(stockOverrides).length === 0) {
+            return;
+        }
+
+        setCart((prev) => {
+            if (prev.length === 0) return prev;
+            let changed = false;
+            const allocated = new Map<number, number>();
+            const next: CartItem[] = [];
+
+            for (const item of prev) {
+                const menu = allMenusMap.get(item.menu_id);
+                if (!menu || !menu.is_active || isMenuOutOfStock(menu)) {
+                    changed = true;
+                    continue;
+                }
+
+                if (menu.is_limited_stock) {
+                    const used = allocated.get(menu.id) ?? 0;
+                    const available = Math.max(
+                        0,
+                        (menu.stock_quantity ?? 0) - used,
+                    );
+                    const keptQty = Math.min(item.quantity, available);
+                    if (keptQty <= 0) {
+                        changed = true;
+                        continue;
+                    }
+                    if (keptQty !== item.quantity) {
+                        changed = true;
+                        next.push({ ...item, quantity: keptQty });
+                    } else {
+                        next.push(item);
+                    }
+                    allocated.set(menu.id, used + keptQty);
+                } else {
+                    next.push(item);
+                }
+            }
+
+            if (changed) {
+                toast.warning(
+                    'Sebagian jumlah item di keranjang disesuaikan mengikuti sisa stok terkini.',
+                );
+                return next;
+            }
+            return prev;
+        });
+    }, [stockOverrides, allMenusMap, isLocationBlocked]);
+
+    // Simpan otomatis ke localStorage hanya saat halaman menu aktif & reset idempotency key
+    useEffect(() => {
+        if (isLocationBlocked) return;
+        localStorage.setItem(
+            `sideorder_cart_${table.qr_token}`,
+            JSON.stringify(cart),
+        );
         idempotencyKeyRef.current = '';
-    }, [cart, table.qr_token]);
+    }, [cart, table.qr_token, isLocationBlocked]);
 
     // Reset lock modal saat modal dibuka/ditutup
     useEffect(() => {
@@ -388,25 +817,67 @@ export default function CustomerOrder({
     }, [isCustomizeOpen]);
 
     const formatRupiah = (amount: number | string) => {
-        return new Intl.NumberFormat('id-ID', {
-            style: 'currency',
-            currency: 'IDR',
+        const numeric =
+            typeof amount === 'string' ? parseFloat(amount) || 0 : amount || 0;
+        return `Rp ${new Intl.NumberFormat('id-ID', {
             minimumFractionDigits: 0,
-        }).format(typeof amount === 'string' ? parseFloat(amount) : amount);
+            maximumFractionDigits: 0,
+        }).format(numeric)}`;
     };
+
+    // Hitung total kuantitas per menu_id di keranjang (opsional kecualikan item yang sedang diedit)
+    const getMenuCartQuantity = useCallback(
+        (menuId: number, excludeCartId: string | null = null): number => {
+            return cart
+                .filter(
+                    (item) =>
+                        item.menu_id === menuId &&
+                        item.cart_id !== excludeCartId,
+                )
+                .reduce((sum, item) => sum + item.quantity, 0);
+        },
+        [cart],
+    );
+
+    const getRemainingStockForMenu = useCallback(
+        (menu: Menu, excludeCartId: string | null = null): number => {
+            const usedInCart = getMenuCartQuantity(menu.id, excludeCartId);
+            if (!menu.is_limited_stock) {
+                return Math.max(0, 50 - usedInCart);
+            }
+            return Math.max(0, (menu.stock_quantity ?? 0) - usedInCart);
+        },
+        [getMenuCartQuantity],
+    );
 
     // Buka Modal Pemilihan Ukuran/Varian untuk tambah item baru
     const openCustomize = (menu: Menu) => {
+        const latestMenu = allMenusMap.get(menu.id) ?? menu;
+        if (isMenuOutOfStock(latestMenu)) {
+            toast.error(`Maaf, stok menu ${latestMenu.name} sedang habis.`);
+            return;
+        }
+
+        const remaining = getRemainingStockForMenu(latestMenu);
+        if (remaining <= 0) {
+            toast.error(
+                `Stok tersisa untuk ${latestMenu.name} (${latestMenu.stock_quantity} porsi) sudah semuanya di keranjang Anda.`,
+            );
+            return;
+        }
+
         setEditingCartId(null);
-        setActiveMenu(menu);
+        setActiveMenu(latestMenu);
         setCustomizeQty(1);
         setCustomizeNotes('');
 
         // Pre-select default options dari database (hanya 1 untuk grup single-select)
         const defaults: number[] = [];
-        if (menu.option_groups) {
-            menu.option_groups.forEach((group) => {
-                const activeItems = group.option_items.filter((i) => i.is_active);
+        if (latestMenu.option_groups) {
+            latestMenu.option_groups.forEach((group) => {
+                const activeItems = group.option_items.filter(
+                    (i) => i.is_active,
+                );
                 if (activeItems.length === 0) return;
 
                 if (isSingleSelectGroup(group)) {
@@ -431,8 +902,8 @@ export default function CustomerOrder({
     // Buka Modal Edit untuk item yang sudah ada di keranjang
     const openEditCartItem = (cartItem: CartItem) => {
         const menu = allMenusMap.get(cartItem.menu_id);
-        if (!menu) {
-            toast.error('Menu sudah tidak tersedia.');
+        if (!menu || isMenuOutOfStock(menu)) {
+            toast.error('Menu sudah tidak tersedia atau stoknya habis.');
             return;
         }
 
@@ -440,28 +911,49 @@ export default function CustomerOrder({
         setActiveMenu(menu);
         setCustomizeQty(cartItem.quantity);
         setCustomizeNotes(cartItem.customer_notes || '');
-        setSelectedOptionIds(cartItem.selected_options.map((o) => o.option_item_id));
+        setSelectedOptionIds(
+            cartItem.selected_options.map((o) => o.option_item_id),
+        );
         setIsCustomizeOpen(true);
     };
 
     // Handler Tombol +Tambah pada kartu menu homepage
     const handleQuickAdd = (menu: Menu) => {
+        const latestMenu = allMenusMap.get(menu.id) ?? menu;
+        if (isMenuOutOfStock(latestMenu)) {
+            toast.error(`Maaf, stok menu ${latestMenu.name} sedang habis.`);
+            return;
+        }
+
         // Jika produk memiliki varian ukuran/opsi, selalu buka modal pemilihan ukuran terlebih dahulu
-        if (hasMenuVariants(menu)) {
-            openCustomize(menu);
+        if (hasMenuVariants(latestMenu)) {
+            openCustomize(latestMenu);
+            return;
+        }
+
+        const remaining = getRemainingStockForMenu(latestMenu);
+        if (remaining <= 0) {
+            toast.error(
+                latestMenu.is_limited_stock
+                    ? `Stok ${latestMenu.name} hanya tersisa ${latestMenu.stock_quantity} porsi.`
+                    : 'Batas maksimal per menu di keranjang sudah tercapai.',
+            );
             return;
         }
 
         // Proteksi klik berulang (rapid double click) untuk produk tanpa varian
         const now = Date.now();
-        const lastClick = quickAddLockRef.current[menu.id] ?? 0;
+        const lastClick = quickAddLockRef.current[latestMenu.id] ?? 0;
         if (now - lastClick < 320) {
             return;
         }
-        quickAddLockRef.current[menu.id] = now;
+        quickAddLockRef.current[latestMenu.id] = now;
 
-        const cartId = buildCartId(menu.id, [], '');
-        const basePrice = parseFloat(menu.base_price) || 0;
+        const cartId = buildCartId(latestMenu.id, [], '');
+        const basePrice =
+            parseFloat(
+                String(latestMenu.final_price ?? latestMenu.base_price),
+            ) || 0;
 
         setCart((prevCart) => {
             const existingIdx = prevCart.findIndex((c) => c.cart_id === cartId);
@@ -469,7 +961,7 @@ export default function CustomerOrder({
                 const updated = [...prevCart];
                 updated[existingIdx] = {
                     ...updated[existingIdx],
-                    quantity: Math.min(50, updated[existingIdx].quantity + 1),
+                    quantity: updated[existingIdx].quantity + 1,
                 };
                 return updated;
             }
@@ -478,8 +970,8 @@ export default function CustomerOrder({
                 ...prevCart,
                 {
                     cart_id: cartId,
-                    menu_id: menu.id,
-                    menu_name: menu.name,
+                    menu_id: latestMenu.id,
+                    menu_name: latestMenu.name,
                     base_price: basePrice,
                     unit_price: basePrice,
                     quantity: 1,
@@ -489,7 +981,7 @@ export default function CustomerOrder({
             ];
         });
 
-        toast.success(`Ditambahkan: ${menu.name}`);
+        toast.success(`Ditambahkan: ${latestMenu.name}`);
     };
 
     // Handler Toggle Opsi di dalam Modal
@@ -497,7 +989,9 @@ export default function CustomerOrder({
         if (isSingleSelectGroup(group)) {
             const groupItemIds = group.option_items.map((i) => i.id);
             setSelectedOptionIds((prev) => {
-                const filtered = prev.filter((id) => !groupItemIds.includes(id));
+                const filtered = prev.filter(
+                    (id) => !groupItemIds.includes(id),
+                );
                 // Jika tidak wajib, mengklik opsi yang sedang terpilih dapat membatalkan pilihan
                 if (!group.is_required && prev.includes(item.id)) {
                     return filtered;
@@ -516,7 +1010,10 @@ export default function CustomerOrder({
     // Hitung harga satuan item kustom berdasarkan harga dasar + varian terpilih
     const calculateCustomUnitPrice = (): number => {
         if (!activeMenu) return 0;
-        let price = parseFloat(activeMenu.base_price) || 0;
+        let price =
+            parseFloat(
+                String(activeMenu.final_price ?? activeMenu.base_price),
+            ) || 0;
 
         if (activeMenu.option_groups) {
             activeMenu.option_groups.forEach((group) => {
@@ -534,10 +1031,18 @@ export default function CustomerOrder({
     const handleSaveFromModal = () => {
         if (!activeMenu || modalSubmitLockRef.current) return;
 
+        const latestMenu = allMenusMap.get(activeMenu.id) ?? activeMenu;
+        if (isMenuOutOfStock(latestMenu)) {
+            toast.error(`Maaf, stok menu ${latestMenu.name} sudah habis.`);
+            return;
+        }
+
         // Validasi grup opsi yang wajib dipilih (is_required)
-        if (activeMenu.option_groups) {
-            for (const group of activeMenu.option_groups) {
-                const activeItems = group.option_items.filter((i) => i.is_active);
+        if (latestMenu.option_groups) {
+            for (const group of latestMenu.option_groups) {
+                const activeItems = group.option_items.filter(
+                    (i) => i.is_active,
+                );
                 if (activeItems.length === 0) continue;
 
                 const selectedInGroup = activeItems.filter((i) =>
@@ -556,34 +1061,69 @@ export default function CustomerOrder({
             }
         }
 
+        const maxAllowedForThisEntry = getRemainingStockForMenu(
+            latestMenu,
+            editingCartId,
+        );
+        if (maxAllowedForThisEntry <= 0) {
+            toast.error(
+                `Stok ${latestMenu.name} sudah habis atau batas stok di keranjang sudah tercapai.`,
+            );
+            return;
+        }
+
+        const qtyToSave = Math.max(
+            1,
+            Math.min(50, maxAllowedForThisEntry, customizeQty),
+        );
+        if (customizeQty > maxAllowedForThisEntry) {
+            toast.error(
+                `Jumlah pesanan melebihi sisa stok ${latestMenu.name} (${maxAllowedForThisEntry} porsi tersisa).`,
+            );
+            return;
+        }
+
         modalSubmitLockRef.current = true;
 
         const optionsToStore: CartOption[] = [];
-        if (activeMenu.option_groups) {
-            activeMenu.option_groups.forEach((group) => {
+        if (latestMenu.option_groups) {
+            latestMenu.option_groups.forEach((group) => {
                 const matched = group.option_items.filter(
-                    (item) => item.is_active && selectedOptionIds.includes(item.id),
+                    (item) =>
+                        item.is_active && selectedOptionIds.includes(item.id),
                 );
-                const itemsToKeep = isSingleSelectGroup(group) ? matched.slice(0, 1) : matched;
+                const itemsToKeep = isSingleSelectGroup(group)
+                    ? matched.slice(0, 1)
+                    : matched;
 
                 itemsToKeep.forEach((item) => {
                     optionsToStore.push({
                         group_name: group.name,
                         option_name: item.name,
-                        additional_price: parseFloat(item.additional_price) || 0,
+                        additional_price:
+                            parseFloat(item.additional_price) || 0,
                         option_item_id: item.id,
                     });
                 });
             });
         }
 
-        const basePrice = parseFloat(activeMenu.base_price) || 0;
-        const optionsSum = optionsToStore.reduce((s, o) => s + o.additional_price, 0);
+        const basePrice =
+            parseFloat(
+                String(latestMenu.final_price ?? latestMenu.base_price),
+            ) || 0;
+        const optionsSum = optionsToStore.reduce(
+            (s, o) => s + o.additional_price,
+            0,
+        );
         const unitPrice = basePrice + optionsSum;
         const normalizedNotes = customizeNotes.trim();
         const optionIds = optionsToStore.map((o) => o.option_item_id);
-        const newCartId = buildCartId(activeMenu.id, optionIds, normalizedNotes);
-        const qtyToSave = Math.max(1, Math.min(50, customizeQty));
+        const newCartId = buildCartId(
+            latestMenu.id,
+            optionIds,
+            normalizedNotes,
+        );
         const optionLabelText =
             optionsToStore.length > 0
                 ? ` (${optionsToStore.map((o) => o.option_name).join(', ')})`
@@ -592,7 +1132,9 @@ export default function CustomerOrder({
         if (editingCartId !== null) {
             // MODE EDIT ITEM DI KERANJANG
             setCart((prevCart) => {
-                const editIdx = prevCart.findIndex((c) => c.cart_id === editingCartId);
+                const editIdx = prevCart.findIndex(
+                    (c) => c.cart_id === editingCartId,
+                );
                 if (editIdx === -1) return prevCart;
 
                 // Cek apakah setelah ukuran/catatan diubah, item menjadi identik dengan item lain di keranjang
@@ -601,7 +1143,6 @@ export default function CustomerOrder({
                 );
 
                 if (duplicateIdx > -1) {
-                    // Gabungkan kuantitas karena produk, ukuran/varian, dan catatan sama persis
                     return prevCart
                         .map((item, idx) => {
                             if (idx === duplicateIdx) {
@@ -609,7 +1150,10 @@ export default function CustomerOrder({
                                     ...item,
                                     base_price: basePrice,
                                     unit_price: unitPrice,
-                                    quantity: Math.min(50, item.quantity + qtyToSave),
+                                    quantity: Math.min(
+                                        50,
+                                        item.quantity + qtyToSave,
+                                    ),
                                     customer_notes: normalizedNotes,
                                     selected_options: optionsToStore,
                                 };
@@ -623,8 +1167,8 @@ export default function CustomerOrder({
                 const updated = [...prevCart];
                 updated[editIdx] = {
                     cart_id: newCartId,
-                    menu_id: activeMenu.id,
-                    menu_name: activeMenu.name,
+                    menu_id: latestMenu.id,
+                    menu_name: latestMenu.name,
                     base_price: basePrice,
                     unit_price: unitPrice,
                     quantity: qtyToSave,
@@ -636,18 +1180,23 @@ export default function CustomerOrder({
 
             setEditingCartId(null);
             setIsCustomizeOpen(false);
-            toast.success(`Diperbarui: ${activeMenu.name}${optionLabelText}`);
+            toast.success(`Diperbarui: ${latestMenu.name}${optionLabelText}`);
         } else {
             // MODE TAMBAH BARU KE KERANJANG
             setCart((prevCart) => {
-                const existingIdx = prevCart.findIndex((c) => c.cart_id === newCartId);
+                const existingIdx = prevCart.findIndex(
+                    (c) => c.cart_id === newCartId,
+                );
                 if (existingIdx > -1) {
                     const updated = [...prevCart];
                     updated[existingIdx] = {
                         ...updated[existingIdx],
                         base_price: basePrice,
                         unit_price: unitPrice,
-                        quantity: Math.min(50, updated[existingIdx].quantity + qtyToSave),
+                        quantity: Math.min(
+                            50,
+                            updated[existingIdx].quantity + qtyToSave,
+                        ),
                         selected_options: optionsToStore,
                     };
                     return updated;
@@ -657,8 +1206,8 @@ export default function CustomerOrder({
                     ...prevCart,
                     {
                         cart_id: newCartId,
-                        menu_id: activeMenu.id,
-                        menu_name: activeMenu.name,
+                        menu_id: latestMenu.id,
+                        menu_name: latestMenu.name,
                         base_price: basePrice,
                         unit_price: unitPrice,
                         quantity: qtyToSave,
@@ -669,74 +1218,65 @@ export default function CustomerOrder({
             });
 
             setIsCustomizeOpen(false);
-            toast.success(`Ditambahkan: ${activeMenu.name}${optionLabelText}`);
+            toast.success(`Ditambahkan: ${latestMenu.name}${optionLabelText}`);
         }
     };
 
-    // Ubah kuantitas item tertentu di keranjang
+    // Ubah kuantitas item tertentu di keranjang dengan validasi sisa stok menu
     const updateCartQty = (cartId: string, delta: number) => {
-        setCart((prevCart) =>
-            prevCart
-                .map((item) => {
-                    if (item.cart_id === cartId) {
-                        const newQty = Math.min(50, item.quantity + delta);
-                        return newQty > 0 ? { ...item, quantity: newQty } : null;
+        if (delta > 0) {
+            const target = cart.find((c) => c.cart_id === cartId);
+            if (target) {
+                const menu = allMenusMap.get(target.menu_id);
+                if (menu && menu.is_limited_stock) {
+                    const totalInCart = getMenuCartQuantity(menu.id);
+                    const maxStock = menu.stock_quantity ?? 0;
+                    if (totalInCart >= maxStock) {
+                        toast.error(
+                            `Stok ${menu.name} hanya tersisa ${maxStock} porsi.`,
+                        );
+                        return;
                     }
-                    return item;
-                })
-                .filter(Boolean) as CartItem[],
+                }
+            }
+        }
+
+        setCart(
+            (prevCart) =>
+                prevCart
+                    .map((item) => {
+                        if (item.cart_id === cartId) {
+                            const menu = allMenusMap.get(item.menu_id);
+                            const maxByStock = menu?.is_limited_stock
+                                ? getRemainingStockForMenu(menu, item.cart_id)
+                                : 50;
+                            const newQty = Math.min(
+                                50,
+                                maxByStock,
+                                item.quantity + delta,
+                            );
+                            return newQty > 0
+                                ? { ...item, quantity: newQty }
+                                : null;
+                        }
+                        return item;
+                    })
+                    .filter(Boolean) as CartItem[],
         );
     };
 
     // Hapus item tertentu dari keranjang
     const removeCartItem = (cartId: string) => {
-        setCart((prevCart) => prevCart.filter((item) => item.cart_id !== cartId));
-    };
-
-    // Hitung total kuantitas per menu_id di keranjang
-    const getMenuCartQuantity = (menuId: number): number => {
-        return cart
-            .filter((item) => item.menu_id === menuId)
-            .reduce((sum, item) => sum + item.quantity, 0);
-    };
-
-    // Tambah / Kurang kuantitas untuk produk tanpa varian pada kartu menu
-    const handleCardQtyChange = (menu: Menu, delta: number) => {
-        // Jika produk memiliki varian, tombol + wajib membuka modal pemilihan ukuran
-        if (hasMenuVariants(menu)) {
-            if (delta > 0) {
-                openCustomize(menu);
-            } else {
-                const matchingItems = cart.filter((item) => item.menu_id === menu.id);
-                if (matchingItems.length === 1) {
-                    updateCartQty(matchingItems[0].cart_id, -1);
-                } else if (matchingItems.length > 1) {
-                    setIsCartOpen(true);
-                }
-            }
-            return;
-        }
-
-        const now = Date.now();
-        const lastClick = quickAddLockRef.current[menu.id] ?? 0;
-        if (delta > 0 && now - lastClick < 250) {
-            return;
-        }
-        quickAddLockRef.current[menu.id] = now;
-
-        const matchingItems = cart.filter((item) => item.menu_id === menu.id);
-        if (matchingItems.length === 0 && delta > 0) {
-            handleQuickAdd(menu);
-            return;
-        }
-
-        if (matchingItems.length > 0) {
-            updateCartQty(matchingItems[0].cart_id, delta);
-        }
+        setCart((prevCart) =>
+            prevCart.filter((item) => item.cart_id !== cartId),
+        );
     };
 
     const totalCartItems = cart.reduce((sum, item) => sum + item.quantity, 0);
-    const totalCartPrice = cart.reduce((sum, item) => sum + item.unit_price * item.quantity, 0);
+    const totalCartPrice = cart.reduce(
+        (sum, item) => sum + item.unit_price * item.quantity,
+        0,
+    );
 
     // Kirim Checkout ke Backend
     const handleCheckout = (e: React.FormEvent) => {
@@ -763,19 +1303,30 @@ export default function CustomerOrder({
             idempotencyKeyRef.current = `${table.id}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         }
 
+        const latestCoords = verifiedCoords ?? loadStoredCoords();
+
         router.post(
             '/order/checkout',
             {
                 qr_token: table.qr_token,
                 order_number: activeOrder?.order_number ?? null,
-                customer_name: (customerName.trim() || activeOrder?.customer_name || '').trim(),
+                customer_name: (
+                    customerName.trim() ||
+                    activeOrder?.customer_name ||
+                    ''
+                ).trim(),
+                payment_method: paymentMethod,
                 notes: orderNotes.trim() || null,
                 idempotency_key: idempotencyKeyRef.current,
+                customer_latitude: latestCoords?.latitude ?? null,
+                customer_longitude: latestCoords?.longitude ?? null,
                 items: cart.map((item) => ({
                     menu_id: item.menu_id,
                     quantity: item.quantity,
                     customer_notes: item.customer_notes.trim() || null,
-                    selected_option_ids: item.selected_options.map((opt) => opt.option_item_id),
+                    selected_option_ids: item.selected_options.map(
+                        (opt) => opt.option_item_id,
+                    ),
                 })),
             },
             {
@@ -783,7 +1334,30 @@ export default function CustomerOrder({
                     checkoutLockRef.current = false;
                     setIsSubmitting(false);
                     idempotencyKeyRef.current = '';
-                    toast.error(Object.values(errors)[0] || 'Terjadi kesalahan saat memproses pesanan.');
+
+                    const locationErr =
+                        errors.location || errors.customer_location;
+                    if (locationErr) {
+                        setIsCartOpen(false);
+                        setServerLocationVerified(false);
+                        setLocationGateStatus('blocked');
+                        toast.error(locationErr);
+                        return;
+                    }
+
+                    if (
+                        Object.keys(errors).some(
+                            (key) =>
+                                key === 'items' || key.startsWith('items.'),
+                        )
+                    ) {
+                        void fetchStockSync();
+                    }
+
+                    toast.error(
+                        Object.values(errors)[0] ||
+                            'Terjadi kesalahan saat memproses pesanan.',
+                    );
                 },
                 onSuccess: () => {
                     localStorage.removeItem(`sideorder_cart_${table.qr_token}`);
@@ -797,446 +1371,716 @@ export default function CustomerOrder({
 
     // Filter menu berdasarkan tab dan pencarian
     const displayedCategories = useMemo(() => {
-        return categories
-            .filter((cat) => selectedCategory === 'all' || cat.id === selectedCategory)
+        return resolvedCategories
+            .filter(
+                (cat) =>
+                    selectedCategory === 'all' || cat.id === selectedCategory,
+            )
             .map((cat) => ({
                 ...cat,
                 menus: cat.menus.filter(
                     (m) =>
-                        m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                        (m.description && m.description.toLowerCase().includes(searchQuery.toLowerCase()))
+                        m.name
+                            .toLowerCase()
+                            .includes(searchQuery.toLowerCase()) ||
+                        (m.description &&
+                            m.description
+                                .toLowerCase()
+                                .includes(searchQuery.toLowerCase())),
                 ),
             }))
             .filter((cat) => cat.menus.length > 0);
-    }, [categories, selectedCategory, searchQuery]);
+    }, [resolvedCategories, selectedCategory, searchQuery]);
 
-    const totalAvailableMenus = useMemo(() => {
-        return displayedCategories.reduce((sum, cat) => sum + cat.menus.length, 0);
-    }, [displayedCategories]);
+    const activeRemainingStock = activeMenu
+        ? getRemainingStockForMenu(activeMenu, editingCartId)
+        : 50;
 
-    // Panggil Pelayan Toast
-    const handleCallWaiter = () => {
-        toast.success(`🔔 Permintaan Terkirim!`, {
-            description: `Pelayan kafe segera menuju ke Meja ${table.table_number}.`,
-            duration: 5000,
-        });
-    };
+    if (isLocationBlocked) {
+        const isChecking = locationGateStatus === 'checking';
+
+        const handleRetryLocation = () => {
+            if (
+                typeof window !== 'undefined' &&
+                window.location.protocol === 'http:' &&
+                !['localhost', '127.0.0.1', '[::1]'].includes(
+                    window.location.hostname,
+                )
+            ) {
+                window.location.href = `https://${window.location.host}${window.location.pathname}${window.location.search}`;
+                return;
+            }
+
+            requestCustomerLocation();
+        };
+
+        return (
+            <>
+                <Head
+                    title={`Pesan Menu - Meja ${table.table_number} • SIDE LINE`}
+                />
+                <div className="flex min-h-dvh items-center justify-center bg-[#141413] p-0 font-sans selection:bg-[#C52828] selection:text-white md:py-4">
+                    <div className="relative flex min-h-dvh w-full max-w-md flex-col items-center justify-center overflow-hidden bg-[#FAF8F4] px-6 py-8 shadow-2xl sm:max-w-lg md:min-h-[88dvh] md:rounded-2xl md:border-[8px] md:border-[#242321]">
+                        {isChecking ? (
+                            <div className="flex flex-col items-center justify-center text-center">
+                                <div className="size-10 animate-spin rounded-full border-[3px] border-[#E8E2D9] border-t-[#C52828]" />
+                                <p className="mt-4 text-sm font-medium text-[#6E6A64]">
+                                    Memuat halaman...
+                                </p>
+                            </div>
+                        ) : (
+                            <div className="w-full max-w-sm rounded-2xl border border-[#E8E2D9] bg-[#FFFDFB] p-7 text-center shadow-[0_8px_24px_rgba(26,26,26,0.04)]">
+                                <div className="mx-auto mb-5 flex size-16 items-center justify-center rounded-2xl bg-[#FDECEB] text-[#C52828]">
+                                    <MapPin
+                                        weight="duotone"
+                                        className="size-8"
+                                    />
+                                </div>
+
+                                <h1 className="text-lg font-extrabold tracking-tight text-[#1A1A1A]">
+                                    Lokasi Di Luar Jangkauan
+                                </h1>
+                                <p className="mt-2 text-xs leading-relaxed text-[#6E6A64] sm:text-sm">
+                                    Layanan pemesanan hanya tersedia di area{' '}
+                                    {locationAccess.cafe_name}. Silakan muat
+                                    ulang halaman.
+                                </p>
+
+                                <button
+                                    type="button"
+                                    onClick={handleRetryLocation}
+                                    className="mt-6 flex h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-4 text-sm font-bold text-white shadow-[0_6px_16px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99]"
+                                >
+                                    <ArrowClockwise
+                                        weight="bold"
+                                        className="size-4"
+                                    />
+                                    <span>Muat Ulang</span>
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </>
+        );
+    }
 
     return (
         <>
-            <Head title={`Pesan Menu - Meja ${table.table_number} • SIDE LINE`} />
+            <Head
+                title={`Pesan Menu - Meja ${table.table_number} • SIDE LINE`}
+            />
 
             {/* WRAPPER DESKTOP FRAME:
-                Di layar Desktop/Laptop: Tampilan terpusat di tengah menyerupai layar HP/Tablet (max-w-md / max-w-lg)
-                Di layar HP/Tablet: Tampilan penuh responsif natural
+                Header & Navbar sticky diam di atas, hanya area daftar menu yang bisa di-scroll,
+                dan bar keranjang sticky diam di bawah.
             */}
-            <div className="min-h-screen bg-neutral-900 md:py-6 flex justify-center items-start selection:bg-[#FF0000] selection:text-white font-sans">
-                <div className="w-full max-w-md sm:max-w-lg min-h-screen md:min-h-[92vh] md:rounded-[36px] bg-[#FBF1CB] shadow-2xl relative overflow-x-hidden flex flex-col md:border-[8px] md:border-neutral-800">
-                    
-                    {/* 1. TOP BRAND HEADER */}
-                    <header className="px-4 pt-4 pb-2 flex items-center justify-between">
-                        <div className="flex items-center gap-2.5">
-                            {/* Icon Logo Kafe */}
-                            <div className="size-10 rounded-2xl bg-[#F5E6B4] border border-[#E9D79F] flex items-center justify-center shadow-2xs">
-                                <Coffee className="size-5 text-neutral-800" />
-                            </div>
-
-                            <div>
-                                <div className="flex items-center gap-1.5">
-                                    <span className="font-heading font-extrabold text-base tracking-tight text-neutral-900 uppercase">
-                                        SIDE LINE
-                                    </span>
-                                    {/* Pill Merah SIDEORDER */}
-                                    <span className="bg-[#FF0000] text-white text-[9px] font-black px-1.5 py-0.5 rounded-full tracking-wider uppercase shadow-2xs">
-                                        SIDEORDER
-                                    </span>
-                                </div>
-                                <p className="text-[11px] text-neutral-600 font-medium">Cafe & Roastery</p>
-                            </div>
-                        </div>
-
-                        {/* Bell Icon Button */}
-                        <button
-                            type="button"
-                            onClick={handleCallWaiter}
-                            className="size-9 rounded-xl bg-white/70 border border-[#E8DCB2] flex items-center justify-center text-neutral-800 shadow-2xs hover:bg-white active:scale-95 transition cursor-pointer"
-                            title="Panggil Pelayan"
-                        >
-                            <Bell className="size-4" />
-                        </button>
-                    </header>
-
-                    {/* 2. CARD INFO MEJA & WIFI (WHITE FLOATING CARD) */}
-                    <div className="px-4 pt-2 pb-3">
-                        <div className="bg-white rounded-2xl p-3.5 shadow-xs border border-[#E8DCB2] space-y-2.5">
-                            {/* Baris Atas Info Meja */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-1.5">
-                                    {/* Pill Hitam Nomor Meja */}
-                                    <span className="bg-neutral-950 text-white font-black text-xs px-3 py-1 rounded-full shadow-2xs">
-                                        MEJA {table.table_number}
-                                    </span>
-
-                                    {/* Token Meja */}
-                                    <span className="bg-emerald-50 text-emerald-700 border border-emerald-200/70 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                                        <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                        QR-{table.qr_token.substring(0, 8).toUpperCase()}
-                                    </span>
+            <div className="flex h-dvh items-center justify-center overflow-hidden bg-[#141413] font-sans selection:bg-[#C52828] selection:text-white md:py-4">
+                <div className="relative flex h-dvh w-full max-w-md flex-col overflow-hidden bg-[#FAF8F4] shadow-2xl sm:max-w-lg md:h-[94dvh] md:rounded-2xl md:border-[8px] md:border-[#242321]">
+                    {/* BAGIAN ATAS STICKY (HEADER + INFO MEJA + SEARCH + KATEGORI NAVBAR DIAM) */}
+                    <div className="sticky top-0 z-20 shrink-0 border-b border-[#EBE5DC] bg-[#FAF8F4]/95 backdrop-blur-xs">
+                        {/* 1. TOP BRAND HEADER */}
+                        <header className="animate-sideline-header flex items-center justify-between px-4 pt-3.5 pb-2">
+                            <div className="flex items-center gap-2.5">
+                                {/* Icon Logo Kafe SIDELINE */}
+                                <div className="flex size-10 items-center justify-center overflow-hidden rounded-lg bg-[#C52828] shadow-sm ring-1 shadow-[#C52828]/20 ring-black/5">
+                                    <img
+                                        src="/images/sideline-icon.png"
+                                        alt="SIDELINE"
+                                        className="size-full object-cover"
+                                    />
                                 </div>
 
-                                {/* Tombol Panggil Pelayan */}
-                                <button
-                                    type="button"
-                                    onClick={handleCallWaiter}
-                                    className="bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200/80 text-[11px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1 active:scale-95 transition cursor-pointer"
-                                >
-                                    <Bell className="size-3" /> Panggil Pelayan
-                                </button>
-                            </div>
-
-                            {/* Baris Bawah Lokasi & WiFi */}
-                            <div className="flex items-center justify-between text-xs text-neutral-600 pt-0.5 border-t border-neutral-100">
-                                <div className="flex items-center gap-1 text-[11px] font-medium text-neutral-700">
-                                    <Store className="size-3.5 text-neutral-500" />
-                                    <span>{table.name || 'Area Indoor Lantai 1'}</span>
-                                </div>
-
-                                <div className="bg-[#FEF6D8] border border-[#F5E59F] text-amber-900 text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1">
-                                    <Wifi className="size-3 text-amber-700" />
-                                    <span>WIFI: SIDELINE-GUEST</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Banner Pesanan Aktif (Mode Tambah Menu ke Pesanan yang Sedang Berjalan) */}
-                        {activeOrder && (
-                            <div className="mt-2.5 bg-neutral-950 text-white rounded-2xl p-3.5 shadow-sm border border-neutral-800 space-y-2">
-                                <div className="flex items-center justify-between gap-2">
-                                    <div className="flex items-center gap-2">
-                                        <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
-                                        <span className="text-xs font-extrabold tracking-tight">
-                                            Tambah Menu ke #{activeOrder.order_number}
+                                <div>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="text-[15px] leading-tight font-bold tracking-tight text-[#1A1A1A] uppercase">
+                                            SIDE LINE
                                         </span>
                                     </div>
-                                    <Link
-                                        href={`/order/status/${activeOrder.order_number}`}
-                                        className="text-[11px] font-bold bg-white/15 hover:bg-white/25 text-white px-2.5 py-1 rounded-full transition"
-                                    >
-                                        Lihat Status
-                                    </Link>
+                                    <p className="text-[9px] font-semibold tracking-[0.14em] text-[#6E6A64] uppercase">
+                                        Coffee &bull; Eatery
+                                    </p>
                                 </div>
-                                <p className="text-[11px] text-neutral-300 leading-relaxed">
-                                    Pesanan atas nama{' '}
-                                    <strong className="text-white">
-                                        {activeOrder.customer_name}
-                                    </strong>{' '}
-                                    sedang{' '}
-                                    <strong className="text-amber-300">
-                                        {activeOrder.order_status === 'processing'
-                                            ? 'diracik barista'
-                                            : 'menunggu konfirmasi'}
-                                    </strong>{' '}
-                                    ({activeOrder.active_items_count} item •{' '}
-                                    <span className="font-mono font-bold text-white">
-                                        {formatRupiah(activeOrder.total_amount)}
+                            </div>
+
+                            <span className="inline-flex items-center rounded-[4px] bg-[#1A1A1A] px-2.5 py-1.5 text-[10px] leading-none font-bold text-white">
+                                MEJA {table.table_number}
+                            </span>
+                        </header>
+
+                        {/* 2. CARD INFO MEJA & WIFI */}
+                        <div className="px-4 pt-1.5 pb-2.5">
+                            <div className="space-y-2 rounded-lg border border-[#E8E2D9] bg-[#FFFDFB] px-3 py-2.5 shadow-[0_2px_10px_rgba(26,26,26,0.03)]">
+                                {/* Baris Atas Info Meja */}
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="flex min-w-0 items-center gap-1.5">
+                                        {/* Pill Hitam Nomor Meja */}
+                                        <span className="shrink-0 rounded-[4px] bg-[#1A1A1A] px-2.5 py-1.5 text-[10px] leading-none font-bold whitespace-nowrap text-white">
+                                            MEJA {table.table_number}
+                                        </span>
+
+                                        {/* Token Meja */}
+                                        <span className="flex min-w-0 items-center gap-1 rounded-[4px] border border-emerald-200/80 bg-emerald-50 px-2 py-1 text-[9.5px] leading-none font-semibold whitespace-nowrap text-emerald-700">
+                                            <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" />
+                                            <span className="truncate">
+                                                QR-
+                                                {table.qr_token
+                                                    .substring(0, 8)
+                                                    .toUpperCase()}
+                                            </span>
+                                        </span>
+                                    </div>
+                                </div>
+
+                                {/* Baris Bawah Lokasi & WiFi */}
+                                <div className="flex items-center justify-between gap-2 border-t border-[#F0EAE1] pt-2">
+                                    <div className="flex min-w-0 items-center gap-1.5 text-[10.5px] font-medium text-[#3F3A34]">
+                                        <Storefront
+                                            weight="duotone"
+                                            className="size-3.5 shrink-0 text-[#4A2C18]"
+                                        />
+                                        <span className="truncate">
+                                            {table.name ||
+                                                'Area Indoor Lantai 1'}
+                                        </span>
+                                    </div>
+
+                                    <div className="flex shrink-0 items-center gap-1 rounded-[4px] border border-[#E8E2D9] bg-[#F5F1E9] px-2 py-1 text-[9.5px] leading-none font-semibold whitespace-nowrap text-[#4A2C18]">
+                                        <WifiHigh
+                                            weight="bold"
+                                            className="size-3 text-[#C52828]"
+                                        />
+                                        <span>WIFI: SIDELINE-GUEST</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Banner Pesanan Aktif (Mode Tambah Menu ke Pesanan yang Sedang Berjalan) */}
+                            {activeOrder && (
+                                <div className="mt-2 space-y-1.5 rounded-lg border border-[#2E2C29] bg-[#1A1A1A] px-3.5 py-3 text-white shadow-sm">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="flex min-w-0 items-center gap-1.5">
+                                            <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" />
+                                            <span className="truncate text-[11px] font-semibold tracking-tight">
+                                                Tambah Menu ke #
+                                                {activeOrder.order_number}
+                                            </span>
+                                        </div>
+                                        <Link
+                                            href={`/order/status/${activeOrder.order_number}`}
+                                            className="shrink-0 rounded-[4px] bg-white/15 px-2.5 py-1.5 text-[10px] leading-none font-semibold whitespace-nowrap text-white transition hover:bg-white/25"
+                                        >
+                                            Lihat Status
+                                        </Link>
+                                    </div>
+                                    <p className="text-[10.5px] leading-relaxed text-neutral-300">
+                                        Pesanan atas nama{' '}
+                                        <strong className="font-semibold text-white">
+                                            {activeOrder.customer_name}
+                                        </strong>{' '}
+                                        sedang{' '}
+                                        <strong className="font-semibold text-amber-300">
+                                            {activeOrder.order_status ===
+                                            'processing'
+                                                ? 'diracik barista'
+                                                : 'menunggu konfirmasi'}
+                                        </strong>{' '}
+                                        ({activeOrder.active_items_count} item •{' '}
+                                        <span className="font-semibold text-white tabular-nums">
+                                            {formatRupiah(
+                                                activeOrder.total_amount,
+                                            )}
+                                        </span>
+                                        ). Menu baru akan digabungkan ke pesanan
+                                        ini.
+                                    </p>
+                                </div>
+                            )}
+
+                            {!activeOrder && lockedOrderNotice && (
+                                <div className="mt-2 flex items-start gap-2 rounded-lg border border-[#F2DEC0] bg-[#FFF8EB] p-2.5 text-[10.5px] text-[#5C4318]">
+                                    <WarningCircle
+                                        weight="fill"
+                                        className="mt-0.5 size-3.5 shrink-0 text-[#C52828]"
+                                    />
+                                    <span className="leading-relaxed">
+                                        {lockedOrderNotice}
                                     </span>
-                                    ). Menu baru akan digabungkan ke pesanan ini.
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 3. INPUT PENCARIAN */}
+                        <div className="px-4 pb-2.5">
+                            <div className="flex items-center gap-2.5 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-3.5 py-2 transition focus-within:border-[#C52828] focus-within:bg-[#FFFDFB]">
+                                <MagnifyingGlass
+                                    weight="bold"
+                                    className="size-4 shrink-0 text-[#6E6A64]"
+                                />
+                                <input
+                                    type="text"
+                                    value={searchQuery}
+                                    onChange={(e) =>
+                                        setSearchQuery(e.target.value)
+                                    }
+                                    placeholder="Cari kopi, pastry, atau cemilan..."
+                                    className="flex-1 bg-transparent text-xs font-medium text-[#1A1A1A] outline-none placeholder:text-[#8C857B]"
+                                />
+                                {searchQuery ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => setSearchQuery('')}
+                                        className="cursor-pointer text-[#6E6A64] hover:text-[#1A1A1A]"
+                                    >
+                                        <PhX
+                                            weight="bold"
+                                            className="size-3.5"
+                                        />
+                                    </button>
+                                ) : (
+                                    <PhSlidersHorizontal
+                                        weight="bold"
+                                        className="size-4 shrink-0 text-[#8C857B]"
+                                    />
+                                )}
+                            </div>
+                        </div>
+
+                        {/* 4. HORIZONTAL CATEGORY PILLS NAVBAR */}
+                        <div className="px-4 pb-2.5">
+                            <div className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5">
+                                {/* Tombol Semua */}
+                                <button
+                                    type="button"
+                                    onClick={() => setSelectedCategory('all')}
+                                    className={`shrink-0 cursor-pointer rounded-lg px-3.5 py-2 text-[11px] leading-none font-semibold whitespace-nowrap transition-all ${
+                                        selectedCategory === 'all'
+                                            ? 'flex items-center gap-1.5 bg-[#1A1A1A] text-white shadow-2xs'
+                                            : 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#3F3A34] hover:bg-[#EAE3D5]'
+                                    }`}
+                                >
+                                    {selectedCategory === 'all' && (
+                                        <span className="size-1.5 rounded-full bg-[#C52828]" />
+                                    )}
+                                    <span>Semua</span>
+                                </button>
+
+                                {/* Tombol per Kategori */}
+                                {categories.map((cat) => {
+                                    const isSelected =
+                                        selectedCategory === cat.id;
+                                    return (
+                                        <button
+                                            key={cat.id}
+                                            type="button"
+                                            onClick={() =>
+                                                setSelectedCategory(cat.id)
+                                            }
+                                            className={`shrink-0 cursor-pointer rounded-lg px-3.5 py-2 text-[11px] leading-none font-semibold whitespace-nowrap transition-all ${
+                                                isSelected
+                                                    ? 'flex items-center gap-1.5 bg-[#1A1A1A] text-white shadow-2xs'
+                                                    : 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#3F3A34] hover:bg-[#EAE3D5]'
+                                            }`}
+                                        >
+                                            {isSelected && (
+                                                <span className="size-1.5 rounded-full bg-[#C52828]" />
+                                            )}
+                                            <span>{cat.name}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 5. AREA DAFTAR MENU (HANYA BAGIAN INI YANG BISA DI-SCROLL) */}
+                    <main className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 pt-3.5 pb-6">
+                        {displayedCategories.length === 0 ? (
+                            <div className="space-y-2 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-7 text-center text-[#6E6A64]">
+                                <PhCoffee
+                                    weight="duotone"
+                                    className="mx-auto size-9 text-[#8C857B]"
+                                />
+                                <p className="text-sm font-bold text-[#1A1A1A]">
+                                    Menu tidak ditemukan
+                                </p>
+                                <p className="text-xs text-[#6E6A64]">
+                                    Coba cari dengan kata kunci lain.
                                 </p>
                             </div>
-                        )}
-
-                        {!activeOrder && lockedOrderNotice && (
-                            <div className="mt-2.5 bg-amber-50 border border-amber-300 text-amber-950 rounded-2xl p-3 text-xs flex items-start gap-2">
-                                <AlertCircle className="size-4 text-amber-700 shrink-0 mt-0.5" />
-                                <span>{lockedOrderNotice}</span>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* 3. INPUT PENCARIAN (ROUNDED WHITE PILL) */}
-                    <div className="px-4 pb-3">
-                        <div className="bg-white border border-[#E8DCB2] rounded-xl px-3 py-2 flex items-center gap-2 shadow-2xs">
-                            <Search className="size-4 text-neutral-400 shrink-0" />
-                            <input
-                                type="text"
-                                value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
-                                placeholder="Cari kopi, pastry, atau cemilan..."
-                                className="bg-transparent text-xs text-neutral-800 placeholder:text-neutral-400 outline-none flex-1 font-medium"
-                            />
-                            <SlidersHorizontal className="size-4 text-neutral-400 shrink-0" />
-                        </div>
-                    </div>
-
-                    {/* 4. HORIZONTAL CATEGORY PILLS */}
-                    <div className="px-4 pb-3">
-                        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
-                            {/* Tombol Semua */}
-                            <button
-                                type="button"
-                                onClick={() => setSelectedCategory('all')}
-                                className={`font-heading text-xs font-bold px-4 py-1.5 rounded-full transition-all shrink-0 cursor-pointer shadow-2xs ${
-                                    selectedCategory === 'all'
-                                        ? 'bg-[#1E1E1E] text-white flex items-center gap-1.5'
-                                        : 'bg-white text-neutral-700 border border-[#E8DCB2] hover:bg-white/90'
-                                }`}
-                            >
-                                {selectedCategory === 'all' && (
-                                    <span className="size-1.5 rounded-full bg-[#FF0000]" />
-                                )}
-                                <span>Semua</span>
-                            </button>
-
-                            {/* Tombol per Kategori */}
-                            {categories.map((cat) => {
-                                const isSelected = selectedCategory === cat.id;
-                                return (
-                                    <button
-                                        key={cat.id}
-                                        type="button"
-                                        onClick={() => setSelectedCategory(cat.id)}
-                                        className={`font-heading text-xs font-bold px-4 py-1.5 rounded-full transition-all shrink-0 cursor-pointer shadow-2xs ${
-                                            isSelected
-                                                ? 'bg-[#1E1E1E] text-white flex items-center gap-1.5'
-                                                : 'bg-white text-neutral-700 border border-[#E8DCB2] hover:bg-white/90'
-                                        }`}
-                                    >
-                                        {isSelected && (
-                                            <span className="size-1.5 rounded-full bg-[#FF0000]" />
-                                        )}
-                                        <span>{cat.name}</span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    {/* 5. DAFTAR MENU UTAMA */}
-                    <main className="px-4 flex-1 pb-32 space-y-5">
-                        {/* Judul Bagian */}
-                        <div className="flex items-baseline justify-between pt-1">
-                            <h2 className="font-heading text-base font-extrabold tracking-tight text-neutral-900">
-                                {selectedCategory === 'all'
-                                    ? 'Pilihan Populer & Khas'
-                                    : categories.find((c) => c.id === selectedCategory)?.name || 'Daftar Menu'}
-                            </h2>
-                            <span className="text-[11px] text-neutral-600 font-medium">
-                                {totalAvailableMenus} Menu Tersedia
-                            </span>
-                        </div>
-
-                        {displayedCategories.length === 0 ? (
-                            <div className="bg-white rounded-2xl p-8 text-center text-neutral-500 border border-[#E8DCB2] space-y-2">
-                                <Coffee className="size-10 mx-auto stroke-1 opacity-50 text-neutral-400" />
-                                <p className="font-heading text-xs font-bold text-neutral-700">Menu tidak ditemukan</p>
-                                <p className="text-[11px]">Coba cari dengan kata kunci lain.</p>
-                            </div>
                         ) : (
-                            displayedCategories.map((cat) => (
-                                <div key={cat.id} className="space-y-3">
-                                    {selectedCategory === 'all' && (
-                                        <div className="flex items-center gap-2 pt-2">
-                                            <span className="size-1.5 rounded-full bg-[#FF0000]" />
-                                            <h3 className="font-heading font-extrabold text-xs text-neutral-700 tracking-wider uppercase">
-                                                {cat.name}
-                                            </h3>
+                            <div className="space-y-5">
+                                {displayedCategories.map((cat, catIdx) => (
+                                    <section
+                                        key={cat.id}
+                                        className="space-y-2.5"
+                                    >
+                                        {/* Penanda / Pembatas Antar Kategori Menu */}
+                                        <div
+                                            className={cn(
+                                                'flex items-center gap-2.5 px-0.5',
+                                                catIdx > 0 && 'pt-1.5',
+                                            )}
+                                        >
+                                            <div className="flex shrink-0 items-center gap-1.5">
+                                                <span className="size-2 rounded-full bg-[#C52828]" />
+                                                <h3 className="text-xs font-bold tracking-wider text-[#1A1A1A] uppercase">
+                                                    {cat.name}
+                                                </h3>
+                                            </div>
+                                            <div className="h-px flex-1 bg-[#E8E2D8]" />
+                                            <span className="shrink-0 rounded-[4px] border border-[#E6DFD3] bg-[#F3EFE6] px-2.5 py-0.5 text-[10px] font-semibold text-[#4A2C18]">
+                                                {cat.menus.length} Menu
+                                            </span>
                                         </div>
-                                    )}
 
-                                    <div className="space-y-3">
-                                        {cat.menus.map((menu) => {
-                                            const badgeInfo = getMenuBadge(menu, cat.name);
-                                            const menuCartItems = cart.filter((item) => item.menu_id === menu.id);
-                                            const cartQty = menuCartItems.reduce((sum, item) => sum + item.quantity, 0);
-                                            const menuHasVariants = hasMenuVariants(menu);
-                                            const imageSrc = menu.image_path
-                                                ? `/storage/${menu.image_path}`
-                                                : getMenuFallbackImage(menu.name, cat.name);
+                                        {/* Daftar Card Menu dalam Kategori Ini */}
+                                        <div className="space-y-2.5">
+                                            {cat.menus.map((menu) => {
+                                                const menuCartItems =
+                                                    cart.filter(
+                                                        (item) =>
+                                                            item.menu_id ===
+                                                            menu.id,
+                                                    );
+                                                const cartQty =
+                                                    menuCartItems.reduce(
+                                                        (sum, item) =>
+                                                            sum + item.quantity,
+                                                        0,
+                                                    );
+                                                const menuHasVariants =
+                                                    hasMenuVariants(menu);
+                                                const outOfStock =
+                                                    isMenuOutOfStock(menu);
+                                                const remainingForMenu =
+                                                    getRemainingStockForMenu(
+                                                        menu,
+                                                    );
+                                                const stockReachedLimit =
+                                                    !outOfStock &&
+                                                    Boolean(
+                                                        menu.is_limited_stock,
+                                                    ) &&
+                                                    remainingForMenu <= 0;
+                                                const stockQty =
+                                                    menu.stock_quantity ?? 0;
+                                                const imageSrc = menu.image_path
+                                                    ? `/storage/${menu.image_path}`
+                                                    : getMenuFallbackImage(
+                                                          menu.name,
+                                                          cat.name,
+                                                      );
 
-                                            return (
-                                                <div
-                                                    key={menu.id}
-                                                    className="bg-white rounded-2xl p-3.5 shadow-xs border border-[#E8DCB2] flex gap-3.5 items-center justify-between transition hover:shadow-md"
-                                                >
-                                                    {/* Kiri: Teks & Harga & Tombol */}
-                                                    <div className="flex-1 pr-1 space-y-1">
-                                                        {/* Badges */}
-                                                        <div className="flex items-center gap-1.5 flex-wrap">
-                                                            <span
-                                                                className={`text-[9px] font-black px-1.5 py-0.5 rounded font-mono uppercase tracking-wider ${badgeInfo.bg} ${badgeInfo.text}`}
-                                                            >
-                                                                {badgeInfo.label}
-                                                            </span>
-                                                            <span className="text-[10px] text-neutral-400 font-medium">
-                                                                {badgeInfo.sub}
-                                                            </span>
-                                                            {menuHasVariants && (
-                                                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 border border-neutral-200">
-                                                                    Pilih Ukuran
+                                                return (
+                                                    <div
+                                                        key={menu.id}
+                                                        className={cn(
+                                                            'group relative flex items-center gap-3 rounded-xl border p-3 transition-all duration-200',
+                                                            outOfStock
+                                                                ? 'border-[#E8E2D9] bg-[#F7F4EE]/80 opacity-85'
+                                                                : cartQty > 0
+                                                                  ? 'border-[#C52828]/50 bg-[#FFFDFB] shadow-[0_2px_10px_rgba(197,40,40,0.05)]'
+                                                                  : 'border-[#E8E2D9] bg-[#FFFDFB] shadow-[0_2px_8px_rgba(26,26,26,0.02)] hover:border-[#DCD4C6]',
+                                                        )}
+                                                    >
+                                                        {/* Kiri: Foto Produk Persegi Compact */}
+                                                        <div
+                                                            className={cn(
+                                                                'relative size-[78px] shrink-0 overflow-hidden rounded-lg bg-[#EFECE6] sm:size-[84px]',
+                                                                outOfStock
+                                                                    ? 'cursor-not-allowed'
+                                                                    : 'cursor-pointer',
+                                                            )}
+                                                            onClick={() => {
+                                                                if (
+                                                                    !outOfStock
+                                                                ) {
+                                                                    openCustomize(
+                                                                        menu,
+                                                                    );
+                                                                }
+                                                            }}
+                                                            title={
+                                                                outOfStock
+                                                                    ? 'Stok menu ini sedang habis'
+                                                                    : 'Klik untuk lihat detail & kustomisasi'
+                                                            }
+                                                        >
+                                                            <img
+                                                                src={imageSrc}
+                                                                alt={menu.name}
+                                                                className={cn(
+                                                                    'size-full object-cover transition-transform duration-300',
+                                                                    outOfStock
+                                                                        ? 'opacity-65 grayscale'
+                                                                        : 'group-hover:scale-105',
+                                                                )}
+                                                                loading="lazy"
+                                                            />
+
+                                                            {outOfStock && (
+                                                                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-[#1A1A1A]/40">
+                                                                    <span className="rounded-[4px] bg-[#1A1A1A]/90 px-2 py-0.5 text-[10px] font-extrabold tracking-wider text-white uppercase shadow-xs">
+                                                                        Habis
+                                                                    </span>
+                                                                </div>
+                                                            )}
+
+                                                            {/* Label Diskon Promo di Kiri Atas Foto */}
+                                                            {!outOfStock &&
+                                                                menu.is_discount_active &&
+                                                                (menu.discount_amount ||
+                                                                    0) > 0 && (
+                                                                    <span className="pointer-events-none absolute top-1.5 left-1.5 z-10 inline-flex items-center gap-0.5 rounded-[4px] bg-[#C52828] px-1.5 py-0.5 text-[9px] leading-none font-extrabold text-white shadow-xs">
+                                                                        <Flame
+                                                                            weight="fill"
+                                                                            className="size-2.5 shrink-0 text-white"
+                                                                        />
+                                                                        {menu.discount_type ===
+                                                                        'percent'
+                                                                            ? `${parseFloat(String(menu.discount_value))}% OFF`
+                                                                            : `HEMAT ${formatRupiah(menu.discount_value || 0)}`}
+                                                                    </span>
+                                                                )}
+
+                                                            {/* Badge Jumlah di Pesanan pada Kanan Atas Foto */}
+                                                            {cartQty > 0 && (
+                                                                <span className="absolute top-1.5 right-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-[4px] bg-[#C52828] px-1.5 text-[10px] font-bold text-white tabular-nums shadow-xs">
+                                                                    {cartQty}x
                                                                 </span>
                                                             )}
+
+                                                            {/* Label Varian di Kanan Bawah Foto */}
+                                                            {!outOfStock &&
+                                                                menuHasVariants && (
+                                                                    <span className="pointer-events-none absolute right-1.5 bottom-1.5 z-10 rounded-[4px] bg-[#1A1A1A]/85 px-2 py-0.5 text-[9px] leading-none font-semibold text-white backdrop-blur-xs">
+                                                                        Ukuran
+                                                                    </span>
+                                                                )}
                                                         </div>
 
-                                                        {/* Judul Menu */}
-                                                        <h4 className="font-heading font-bold text-sm text-neutral-900 leading-snug tracking-tight">
-                                                            {menu.name}
-                                                        </h4>
-
-                                                        {/* Deskripsi */}
-                                                        {menu.description && (
-                                                            <p className="text-[11px] text-neutral-500 line-clamp-2 leading-relaxed">
-                                                                {menu.description}
-                                                            </p>
-                                                        )}
-
-                                                        {/* Ringkasan Varian yang Sudah Ada di Keranjang (Klik untuk Edit Ukuran) */}
-                                                        {menuCartItems.length > 0 && menuHasVariants && (
-                                                            <div className="flex flex-wrap items-center gap-1 pt-1">
-                                                                {menuCartItems.map((ci) => {
-                                                                    const optLabel =
-                                                                        ci.selected_options.length > 0
-                                                                            ? ci.selected_options
-                                                                                  .map((o) => o.option_name)
-                                                                                  .join(', ')
-                                                                            : 'Standar';
-                                                                    return (
-                                                                        <button
-                                                                            key={ci.cart_id}
-                                                                            type="button"
-                                                                            onClick={() => openEditCartItem(ci)}
-                                                                            className="inline-flex items-center gap-1 rounded-md border border-[#E8DCB2] bg-[#FEF6D8] px-2 py-0.5 text-[10px] font-bold text-amber-950 hover:border-[#FF0000] transition cursor-pointer"
-                                                                            title="Klik untuk ubah ukuran atau jumlah"
-                                                                        >
-                                                                            <span>
-                                                                                {optLabel} ×{ci.quantity}
-                                                                            </span>
-                                                                            <Pencil className="size-2.5 text-neutral-500" />
-                                                                        </button>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                        )}
-
-                                                        {/* Harga & Tombol Tambah */}
-                                                        <div className="pt-1.5 flex items-center justify-between gap-2">
+                                                        {/* Kanan: Judul + Badge di Pesanan, Deskripsi, Harga & Tombol + Tambah */}
+                                                        <div className="flex min-w-0 flex-1 flex-col justify-between">
                                                             <div>
-                                                                <span className="font-extrabold text-sm text-neutral-900">
-                                                                    {formatRupiah(menu.base_price)}
-                                                                </span>
-                                                                {menuHasVariants && (
-                                                                    <span className="block text-[9px] text-neutral-400 font-medium">
-                                                                        Harga mulai dari
-                                                                    </span>
+                                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                                    <h4
+                                                                        onClick={() => {
+                                                                            if (
+                                                                                !outOfStock
+                                                                            ) {
+                                                                                openCustomize(
+                                                                                    menu,
+                                                                                );
+                                                                            }
+                                                                        }}
+                                                                        className={cn(
+                                                                            'text-[14px] leading-snug font-bold tracking-tight transition-colors sm:text-[15px]',
+                                                                            outOfStock
+                                                                                ? 'cursor-not-allowed text-[#6E6A64]'
+                                                                                : 'cursor-pointer text-[#1A1A1A] hover:text-[#C52828]',
+                                                                        )}
+                                                                    >
+                                                                        {
+                                                                            menu.name
+                                                                        }
+                                                                    </h4>
+
+                                                                    {menu.is_discount_active &&
+                                                                        (menu.discount_amount ||
+                                                                            0) >
+                                                                            0 && (
+                                                                            <span className="inline-flex items-center gap-0.5 rounded-[4px] border border-[#F5C2C0] bg-[#FDECEB] px-1.5 py-0.5 text-[9.5px] leading-none font-extrabold text-[#C52828]">
+                                                                                <Flame
+                                                                                    weight="fill"
+                                                                                    className="size-2.5 shrink-0 text-[#C52828]"
+                                                                                />
+                                                                                PROMO
+                                                                            </span>
+                                                                        )}
+
+                                                                    {outOfStock ? (
+                                                                        <span className="inline-flex items-center rounded-[4px] border border-[#DFD8CD] bg-[#EFECE6] px-1.5 py-0.5 text-[9.5px] leading-none font-bold text-[#6E6A64]">
+                                                                            Habis
+                                                                        </span>
+                                                                    ) : menu.is_limited_stock ? (
+                                                                        <span
+                                                                            className={cn(
+                                                                                'inline-flex items-center rounded-[4px] border px-1.5 py-0.5 text-[9.5px] leading-none font-bold tabular-nums',
+                                                                                stockQty <=
+                                                                                    5
+                                                                                    ? 'border-amber-300 bg-amber-50 text-amber-800'
+                                                                                    : 'border-[#E6DFD3] bg-[#F5EFE6] text-[#5C544B]',
+                                                                            )}
+                                                                        >
+                                                                            {stockQty <=
+                                                                            5
+                                                                                ? `Stok Terbatas • Sisa ${stockQty}`
+                                                                                : `Sisa ${stockQty}`}
+                                                                        </span>
+                                                                    ) : null}
+
+                                                                    {cartQty >
+                                                                        0 && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => {
+                                                                                if (
+                                                                                    menuCartItems.length ===
+                                                                                    1
+                                                                                ) {
+                                                                                    openEditCartItem(
+                                                                                        menuCartItems[0],
+                                                                                    );
+                                                                                } else {
+                                                                                    setIsCartOpen(
+                                                                                        true,
+                                                                                    );
+                                                                                }
+                                                                            }}
+                                                                            className="inline-flex cursor-pointer items-center rounded-[4px] bg-[#FDECEB] px-2 py-0.5 text-[10px] leading-none font-semibold text-[#C52828] transition hover:bg-[#FADCD9]"
+                                                                            title="Klik untuk ubah pesanan ini"
+                                                                        >
+                                                                            {
+                                                                                cartQty
+                                                                            }
+                                                                            x di
+                                                                            Keranjang
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+
+                                                                {menu.description && (
+                                                                    <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-[#6E6A64]">
+                                                                        {
+                                                                            menu.description
+                                                                        }
+                                                                    </p>
                                                                 )}
                                                             </div>
 
-                                                            {/* Tombol Aksi:
-                                                                - Untuk menu DENGAN varian ukuran: tombol +Tambah selalu membuka modal pemilihan ukuran agar bisa tambah berbagai ukuran (misal Large & XL)
-                                                                - Untuk menu TANPA varian: tampilkan stepper [- qty +] jika sudah ada di keranjang
-                                                            */}
-                                                            {menuHasVariants ? (
-                                                                <div className="flex items-center gap-1.5">
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => openCustomize(menu)}
-                                                                        className="bg-[#FF0000] hover:bg-[#e00000] active:scale-95 text-white text-xs font-extrabold px-3.5 py-1.5 rounded-lg flex items-center gap-1 shadow-xs transition-all cursor-pointer"
-                                                                    >
-                                                                        <Plus className="size-3.5 stroke-[3]" />
-                                                                        <span>Tambah</span>
-                                                                        {cartQty > 0 && (
-                                                                            <span className="ml-0.5 bg-white text-[#FF0000] text-[10px] font-black px-1.5 py-0.2 rounded-full">
-                                                                                {cartQty}
-                                                                            </span>
-                                                                        )}
-                                                                    </button>
-                                                                </div>
-                                                            ) : cartQty > 0 ? (
-                                                                <div className="flex items-center border border-neutral-300 rounded-lg px-1.5 py-0.5 bg-white text-neutral-800 text-xs font-bold gap-2 shadow-2xs">
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => handleCardQtyChange(menu, -1)}
-                                                                        className="size-5 flex items-center justify-center hover:bg-neutral-100 rounded text-neutral-600 cursor-pointer"
-                                                                    >
-                                                                        <Minus className="size-3" />
-                                                                    </button>
-                                                                    <span className="font-mono text-xs font-black min-w-[14px] text-center">
-                                                                        {cartQty}
+                                                            {/* Baris Bawah: MULAI DARI + Harga di Kiri, Tombol + Tambah / + Tambah Lagi di Kanan */}
+                                                            <div className="mt-2.5 flex items-end justify-between gap-2">
+                                                                <div>
+                                                                    <span className="block text-[9px] leading-none font-semibold tracking-wider text-[#8C857B] uppercase">
+                                                                        MULAI
+                                                                        DARI
                                                                     </span>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => handleCardQtyChange(menu, 1)}
-                                                                        className="size-5 flex items-center justify-center hover:bg-neutral-100 rounded text-neutral-600 cursor-pointer"
-                                                                    >
-                                                                        <Plus className="size-3" />
-                                                                    </button>
+                                                                    {menu.is_discount_active &&
+                                                                    (menu.discount_amount ||
+                                                                        0) >
+                                                                        0 ? (
+                                                                        <div className="mt-0.5 flex flex-wrap items-baseline gap-1.5">
+                                                                            <span className="text-[14px] leading-tight font-extrabold text-[#C52828] tabular-nums sm:text-[15px]">
+                                                                                {formatRupiah(
+                                                                                    menu.final_price ??
+                                                                                        menu.base_price,
+                                                                                )}
+                                                                            </span>
+                                                                            <s className="text-[11px] leading-none font-medium text-[#8C857B]">
+                                                                                {formatRupiah(
+                                                                                    menu.base_price,
+                                                                                )}
+                                                                            </s>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <span className="mt-0.5 block text-[14px] leading-tight font-bold text-[#C52828] tabular-nums sm:text-[15px]">
+                                                                            {formatRupiah(
+                                                                                menu.base_price,
+                                                                            )}
+                                                                        </span>
+                                                                    )}
                                                                 </div>
-                                                            ) : (
+
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => handleQuickAdd(menu)}
-                                                                    className="bg-[#FF0000] hover:bg-[#e00000] active:scale-95 text-white text-xs font-extrabold px-3.5 py-1.5 rounded-lg flex items-center gap-1 shadow-xs transition-all cursor-pointer"
+                                                                    disabled={
+                                                                        outOfStock ||
+                                                                        stockReachedLimit
+                                                                    }
+                                                                    onClick={() =>
+                                                                        handleQuickAdd(
+                                                                            menu,
+                                                                        )
+                                                                    }
+                                                                    className={cn(
+                                                                        'inline-flex shrink-0 items-center justify-center rounded-lg px-3.5 py-1.5 text-[11.5px] font-bold transition',
+                                                                        outOfStock
+                                                                            ? 'cursor-not-allowed bg-[#E5DFD5] text-[#7D766D] shadow-none'
+                                                                            : stockReachedLimit
+                                                                              ? 'cursor-not-allowed border border-[#DCD4C6] bg-[#EFECE6] text-[#6E6A64] shadow-none'
+                                                                              : 'cursor-pointer bg-[#C52828] text-white shadow-[0_3px_10px_rgba(197,40,40,0.22)] hover:bg-[#B02222] active:scale-95',
+                                                                    )}
                                                                 >
-                                                                    <Plus className="size-3.5 stroke-[3]" /> Tambah
+                                                                    <span>
+                                                                        {outOfStock
+                                                                            ? 'Stok Habis'
+                                                                            : stockReachedLimit
+                                                                              ? 'Maks. di Keranjang'
+                                                                              : cartQty >
+                                                                                  0
+                                                                                ? '+ Tambah Lagi'
+                                                                                : '+ Tambah'}
+                                                                    </span>
                                                                 </button>
-                                                            )}
+                                                            </div>
                                                         </div>
                                                     </div>
-
-                                                    {/* Kanan: Foto Menu Rounded */}
-                                                    <div
-                                                        className="size-20 sm:size-22 rounded-xl bg-neutral-100 overflow-hidden shrink-0 border border-neutral-100 shadow-2xs cursor-pointer relative"
-                                                        onClick={() => openCustomize(menu)}
-                                                        title="Klik untuk lihat detail & kustomisasi"
-                                                    >
-                                                        <img
-                                                            src={imageSrc}
-                                                            alt={menu.name}
-                                                            className="size-full object-cover transition-transform duration-300 hover:scale-105"
-                                                            loading="lazy"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-                            ))
+                                                );
+                                            })}
+                                        </div>
+                                    </section>
+                                ))}
+                            </div>
                         )}
 
                         {/* 6. BANNER ALERGI & CATATAN KHUSUS */}
-                        <div className="bg-[#FDF8E2] border border-[#ECDFA8] text-amber-950 text-xs rounded-xl p-3 flex gap-2.5 items-start shadow-2xs mt-4">
-                            <div className="size-5 rounded-full bg-rose-500/10 text-[#FF0000] flex items-center justify-center shrink-0 mt-0.5">
-                                <AlertCircle className="size-3.5 text-[#FF0000]" />
+                        <div className="mt-2 flex items-start gap-2.5 rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] p-3.5 text-xs text-[#3F3A34]">
+                            <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-[#FDECEB] text-[#C52828]">
+                                <PencilSimpleLine
+                                    weight="bold"
+                                    className="size-3.5"
+                                />
                             </div>
-                            <p className="text-[11px] leading-relaxed">
-                                Ada alergi atau catatan khusus? Kamu bisa menambahkan catatan di halaman checkout sebelum
-                                pesanan diteruskan ke barista & dapur.
+                            <p className="text-[11.5px] leading-relaxed text-[#5E5850]">
+                                Ada permintaan takaran gula, es, atau alergi
+                                tertentu? Kamu bisa menambahkan{' '}
+                                <strong className="font-semibold text-[#1A1A1A]">
+                                    Catatan Khusus
+                                </strong>{' '}
+                                pada setiap menu atau saat checkout.
                             </p>
                         </div>
                     </main>
 
-                    {/* 7. FLOATING STICKY BOTTOM CHECKOUT BAR */}
+                    {/* 7. STICKY BOTTOM CHECKOUT BAR (DIAM DI BAWAH) */}
                     {cart.length > 0 && (
-                        <div className="sticky bottom-3 left-0 right-0 px-3 z-30">
-                            {/* Bar Hitam dengan Tombol Merah #FF0000 */}
-                            <div className="bg-neutral-950 text-white p-3 rounded-2xl shadow-2xl flex items-center justify-between border border-neutral-800">
+                        <div className="sticky right-0 bottom-0 left-0 z-30 shrink-0 bg-gradient-to-t from-[#FAF8F4] via-[#FAF8F4]/95 to-transparent px-3.5 pt-2 pb-3.5">
+                            <div className="flex items-center justify-between rounded-xl border border-[#2E2C29] bg-[#1A1A1A] p-3 pl-4 text-white shadow-2xl">
                                 <div>
-                                    <span className="text-[9px] text-neutral-400 font-bold tracking-wider uppercase block">
-                                        PESANAN SEMENTARA
+                                    <span className="block text-[10px] font-semibold tracking-wider text-[#A39E95] uppercase">
+                                        RINGKASAN KERANJANG
                                     </span>
-                                    <div className="font-extrabold text-xs sm:text-sm text-white">
-                                        {totalCartItems} item dipesan • {formatRupiah(totalCartPrice)}
+                                    <div className="text-[13px] font-bold text-white tabular-nums sm:text-sm">
+                                        {totalCartItems} Item &bull;{' '}
+                                        {formatRupiah(totalCartPrice)}
                                     </div>
                                 </div>
 
-                                {/* TOMBOL LIHAT KERANJANG RED #FF0000 */}
                                 <button
                                     type="button"
                                     onClick={() => setIsCartOpen(true)}
-                                    className="bg-[#FF0000] hover:bg-[#e00000] active:scale-95 text-white font-extrabold text-xs sm:text-sm px-4 py-2.5 rounded-xl flex items-center gap-1.5 shadow-md transition cursor-pointer"
+                                    className="flex cursor-pointer items-center gap-2 rounded-xl bg-[#C52828] px-4 py-2.5 text-xs font-bold text-white shadow-[0_4px_14px_rgba(197,40,40,0.35)] transition hover:bg-[#B02222] active:scale-95 sm:text-[13px]"
                                 >
-                                    <span>Lihat Keranjang ({totalCartItems})</span>
-                                    <ArrowRight className="size-3.5 stroke-[3]" />
+                                    <ShoppingCart
+                                        weight="fill"
+                                        className="size-4"
+                                    />
+                                    <span>Keranjang ({totalCartItems})</span>
+                                    <PhArrowRight
+                                        weight="bold"
+                                        className="size-3.5"
+                                    />
                                 </button>
                             </div>
                         </div>
@@ -1254,193 +2098,509 @@ export default function CustomerOrder({
                             }
                         }}
                     >
-                        <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto p-0 gap-0 rounded-3xl bg-white border font-sans">
+                        <DialogContent className="flex max-h-[88dvh] w-[calc(100%-1.5rem)] max-w-[390px] flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-[420px] [&>button:last-child]:hidden">
                             {activeMenu && (
-                                <div>
-                                    {/* Foto Menu Header Modal */}
-                                    <div className="h-44 w-full bg-neutral-100 overflow-hidden relative">
-                                        <img
-                                            src={
-                                                activeMenu.image_path
-                                                    ? `/storage/${activeMenu.image_path}`
-                                                    : getMenuFallbackImage(activeMenu.name, '')
-                                            }
-                                            alt={activeMenu.name}
-                                            className="size-full object-cover"
-                                        />
-                                        {editingCartId !== null && (
-                                            <div className="absolute top-3 left-3">
-                                                <span className="rounded-full bg-neutral-900/90 text-white text-[10px] font-extrabold px-3 py-1 shadow-xs uppercase tracking-wider">
-                                                    Ubah Item Keranjang
-                                                </span>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="p-5 space-y-4">
-                                        <DialogHeader className="text-left space-y-1">
-                                            <div className="flex items-start justify-between gap-2">
-                                                <DialogTitle className="font-heading text-lg font-extrabold text-neutral-900 tracking-tight">
-                                                    {activeMenu.name}
-                                                </DialogTitle>
-                                                <span className="font-sans tabular-nums text-base font-extrabold text-neutral-900">
-                                                    {formatRupiah(calculateCustomUnitPrice())}
-                                                </span>
-                                            </div>
-                                            {activeMenu.description && (
-                                                <DialogDescription className="text-xs text-neutral-500 pt-0.5">
-                                                    {activeMenu.description}
-                                                </DialogDescription>
-                                            )}
-                                        </DialogHeader>
-
-                                        {/* Grup Opsi Kustomisasi (Ukuran, Topping, dll) */}
-                                        {activeMenu.option_groups && activeMenu.option_groups.length > 0 && (
-                                            <div className="space-y-4 divide-y divide-neutral-100 pt-1">
-                                                {activeMenu.option_groups.map((group) => {
-                                                    const isSingle = isSingleSelectGroup(group);
-                                                    const baseMenuPrice = parseFloat(activeMenu.base_price) || 0;
-
-                                                    return (
-                                                        <div key={group.id} className="pt-3 space-y-2">
-                                                            <div className="flex items-center justify-between text-xs">
-                                                                <span className="font-extrabold uppercase tracking-wider text-neutral-800">
-                                                                    Pilih {group.name}
-                                                                </span>
-                                                                <span className="text-[11px] font-semibold text-neutral-500">
-                                                                    {isSingle ? 'Pilih 1' : 'Bisa Banyak'}
-                                                                    {group.is_required && ' • Wajib'}
-                                                                </span>
-                                                            </div>
-
-                                                            <div className="space-y-1.5">
-                                                                {group.option_items
-                                                                    .filter((item) => item.is_active)
-                                                                    .map((item) => {
-                                                                        const isChecked = selectedOptionIds.includes(
-                                                                            item.id,
-                                                                        );
-                                                                        const addPrice =
-                                                                            parseFloat(item.additional_price) || 0;
-                                                                        const fullSizePrice = baseMenuPrice + addPrice;
-
-                                                                        return (
-                                                                            <div
-                                                                                key={item.id}
-                                                                                onClick={() =>
-                                                                                    handleToggleOption(group, item)
-                                                                                }
-                                                                                className={`flex items-center justify-between p-2.5 rounded-xl border text-xs cursor-pointer transition ${
-                                                                                    isChecked
-                                                                                        ? 'bg-rose-50 border-[#FF0000] text-[#FF0000] font-bold shadow-2xs'
-                                                                                        : 'bg-card hover:bg-neutral-50 border-neutral-200 text-neutral-800'
-                                                                                }`}
-                                                                            >
-                                                                                <div className="flex items-center gap-2.5">
-                                                                                    <Checkbox
-                                                                                        checked={isChecked}
-                                                                                        className="rounded-full pointer-events-none"
-                                                                                    />
-                                                                                    <span className="text-xs font-bold">
-                                                                                        {item.name}
-                                                                                    </span>
-                                                                                </div>
-                                                                                <div className="text-right font-mono">
-                                                                                    {isSingle ? (
-                                                                                        <div className="flex items-center gap-1.5">
-                                                                                            <span className="font-black text-neutral-900">
-                                                                                                {formatRupiah(
-                                                                                                    fullSizePrice,
-                                                                                                )}
-                                                                                            </span>
-                                                                                            {addPrice > 0 && (
-                                                                                                <span className="text-[10px] text-neutral-500 font-normal">
-                                                                                                    (+
-                                                                                                    {formatRupiah(
-                                                                                                        addPrice,
-                                                                                                    )}
-                                                                                                    )
-                                                                                                </span>
-                                                                                            )}
-                                                                                        </div>
-                                                                                    ) : (
-                                                                                        <span className="text-neutral-600">
-                                                                                            {addPrice > 0
-                                                                                                ? `+${formatRupiah(addPrice)}`
-                                                                                                : 'Gratis'}
-                                                                                        </span>
-                                                                                    )}
-                                                                                </div>
-                                                                            </div>
-                                                                        );
-                                                                    })}
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
-
-                                        {/* Catatan Khusus */}
-                                        <div className="space-y-1.5 pt-1">
-                                            <Label htmlFor="cust_notes" className="text-xs font-bold text-neutral-700">
-                                                Catatan Khusus (Opsional)
-                                            </Label>
-                                            <Input
-                                                id="cust_notes"
-                                                value={customizeNotes}
-                                                onChange={(e) => setCustomizeNotes(e.target.value)}
-                                                placeholder="Misal: Less ice, jangan terlalu manis..."
-                                                className="text-xs h-9 bg-neutral-50"
+                                <div className="flex h-full max-h-[88dvh] flex-col overflow-hidden">
+                                    {/* Scrollable Body: Image + Title + Options + Notes */}
+                                    <div className="flex-1 overflow-x-hidden overflow-y-auto">
+                                        {/* Image Header with proportional height */}
+                                        <div className="relative h-40 w-full shrink-0 overflow-hidden bg-[#EFECE6] sm:h-44">
+                                            <img
+                                                src={
+                                                    activeMenu.image_path
+                                                        ? `/storage/${activeMenu.image_path}`
+                                                        : getMenuFallbackImage(
+                                                              activeMenu.name,
+                                                              '',
+                                                          )
+                                                }
+                                                alt={activeMenu.name}
+                                                className="size-full object-cover"
                                             />
+
+                                            {/* Close Button Top-Right */}
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setIsCustomizeOpen(false);
+                                                    setEditingCartId(null);
+                                                }}
+                                                aria-label="Tutup detail produk"
+                                                className="absolute top-2.5 right-2.5 z-10 flex size-8 cursor-pointer items-center justify-center rounded-full bg-black/45 text-white shadow-sm backdrop-blur-md transition hover:bg-black/65 active:scale-95"
+                                            >
+                                                <PhX
+                                                    weight="bold"
+                                                    className="size-3.5"
+                                                />
+                                            </button>
+
+                                            {editingCartId !== null && (
+                                                <div className="absolute top-2.5 left-2.5 z-10">
+                                                    <span className="rounded-full bg-[#1A1A1A]/90 px-2.5 py-0.5 text-[10px] font-bold tracking-wide text-white shadow-xs backdrop-blur-md">
+                                                        Ubah Item Keranjang
+                                                    </span>
+                                                </div>
+                                            )}
                                         </div>
 
-                                        {/* Kuantitas & Tombol Tambahkan ke Keranjang / Simpan Perubahan */}
-                                        <div className="pt-3 flex items-center justify-between gap-2.5 border-t">
+                                        {/* Clean Warm Cream Content Area */}
+                                        <div className="space-y-3.5 bg-[#FAF8F4] p-4 sm:p-5">
+                                            {/* Product Name & Price in One Row + Short Description */}
+                                            <DialogHeader className="space-y-1 text-left">
+                                                <div className="flex items-baseline justify-between gap-2">
+                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                        <DialogTitle className="text-[17px] leading-snug font-bold tracking-tight text-[#1A1A1A] sm:text-lg">
+                                                            {activeMenu.name}
+                                                        </DialogTitle>
+                                                        {activeMenu.is_discount_active &&
+                                                            (activeMenu.discount_amount ||
+                                                                0) > 0 && (
+                                                                <span className="inline-flex items-center gap-0.5 rounded-[4px] border border-[#F5C2C0] bg-[#FDECEB] px-1.5 py-0.5 text-[9.5px] leading-none font-extrabold text-[#C52828]">
+                                                                    <Flame
+                                                                        weight="fill"
+                                                                        className="size-2.5 shrink-0 text-[#C52828]"
+                                                                    />
+                                                                    {activeMenu.discount_type ===
+                                                                    'percent'
+                                                                        ? `Diskon ${parseFloat(String(activeMenu.discount_value))}%`
+                                                                        : `Diskon ${formatRupiah(activeMenu.discount_value || 0)}`}
+                                                                </span>
+                                                            )}
+                                                        {activeMenu.is_limited_stock && (
+                                                            <span
+                                                                className={cn(
+                                                                    'inline-flex items-center rounded-[4px] border px-1.5 py-0.5 text-[9.5px] leading-none font-bold tabular-nums',
+                                                                    activeRemainingStock <=
+                                                                        0
+                                                                        ? 'border-[#DFD8CD] bg-[#EFECE6] text-[#6E6A64]'
+                                                                        : (activeMenu.stock_quantity ??
+                                                                                0) <=
+                                                                            5
+                                                                          ? 'border-amber-300 bg-amber-50 text-amber-800'
+                                                                          : 'border-[#E6DFD3] bg-[#F5EFE6] text-[#5C544B]',
+                                                                )}
+                                                            >
+                                                                {activeRemainingStock <=
+                                                                0
+                                                                    ? 'Batas stok tercapai'
+                                                                    : `Tersisa ${activeMenu.stock_quantity ?? 0} porsi • Maks. ${activeRemainingStock}`}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex shrink-0 flex-col items-end">
+                                                        <span className="text-[15px] leading-snug font-extrabold text-[#C52828] tabular-nums sm:text-base">
+                                                            {formatRupiah(
+                                                                calculateCustomUnitPrice(),
+                                                            )}
+                                                        </span>
+                                                        {activeMenu.is_discount_active &&
+                                                            (activeMenu.discount_amount ||
+                                                                0) > 0 && (
+                                                                <s className="text-[10.5px] leading-none text-[#8C857B]">
+                                                                    {formatRupiah(
+                                                                        (parseFloat(
+                                                                            activeMenu.base_price,
+                                                                        ) ||
+                                                                            0) +
+                                                                            (calculateCustomUnitPrice() -
+                                                                                (parseFloat(
+                                                                                    String(
+                                                                                        activeMenu.final_price ??
+                                                                                            activeMenu.base_price,
+                                                                                    ),
+                                                                                ) ||
+                                                                                    0)),
+                                                                    )}
+                                                                </s>
+                                                            )}
+                                                    </div>
+                                                </div>
+                                                {activeMenu.description && (
+                                                    <DialogDescription className="text-xs leading-relaxed text-[#6E6A64]">
+                                                        {activeMenu.description}
+                                                    </DialogDescription>
+                                                )}
+                                            </DialogHeader>
+
+                                            <div className="h-px w-full bg-[#EBE5DC]" />
+
+                                            {/* Grup Opsi Kustomisasi (Ukuran Horizontal + Opsi Tambahan) */}
+                                            {activeMenu.option_groups &&
+                                                activeMenu.option_groups
+                                                    .length > 0 && (
+                                                    <div className="space-y-3.5">
+                                                        {activeMenu.option_groups.map(
+                                                            (group) => {
+                                                                const isSingle =
+                                                                    isSingleSelectGroup(
+                                                                        group,
+                                                                    );
+                                                                const baseMenuPrice =
+                                                                    parseFloat(
+                                                                        String(
+                                                                            activeMenu.final_price ??
+                                                                                activeMenu.base_price,
+                                                                        ),
+                                                                    ) || 0;
+                                                                const activeItems =
+                                                                    group.option_items.filter(
+                                                                        (
+                                                                            item,
+                                                                        ) =>
+                                                                            item.is_active,
+                                                                    );
+                                                                const cleanGroupTitle =
+                                                                    group.name
+                                                                        .trim()
+                                                                        .toLowerCase()
+                                                                        .startsWith(
+                                                                            'pilih',
+                                                                        )
+                                                                        ? group.name.trim()
+                                                                        : `Pilih ${group.name.trim()}`;
+
+                                                                return (
+                                                                    <div
+                                                                        key={
+                                                                            group.id
+                                                                        }
+                                                                        className="space-y-2"
+                                                                    >
+                                                                        <div className="flex items-center justify-between gap-2">
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <CupHeaderPhosphorIcon className="size-4 text-[#4A2C18]" />
+                                                                                <span className="text-xs font-bold text-[#1A1A1A]">
+                                                                                    {
+                                                                                        cleanGroupTitle
+                                                                                    }
+                                                                                </span>
+                                                                            </div>
+
+                                                                            {isSingle ? (
+                                                                                <span className="inline-flex items-center gap-1 rounded-md bg-[#FDECEB] px-2 py-0.5 text-[10px] font-semibold text-[#C52828]">
+                                                                                    <Flame
+                                                                                        weight="fill"
+                                                                                        className="size-3 text-[#C52828]"
+                                                                                    />
+                                                                                    <span>
+                                                                                        Paling
+                                                                                        Favorit
+                                                                                    </span>
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="rounded-md bg-[#EFEADF] px-2 py-0.5 text-[10px] font-medium text-[#5E5850]">
+                                                                                    Bisa
+                                                                                    Banyak
+                                                                                    {group.is_required &&
+                                                                                        ' • Wajib'}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+
+                                                                        {isSingle ? (
+                                                                            <div
+                                                                                className={cn(
+                                                                                    'grid gap-2',
+                                                                                    activeItems.length ===
+                                                                                        1
+                                                                                        ? 'grid-cols-1'
+                                                                                        : activeItems.length ===
+                                                                                            2
+                                                                                          ? 'grid-cols-2'
+                                                                                          : 'grid-cols-3',
+                                                                                )}
+                                                                            >
+                                                                                {activeItems.map(
+                                                                                    (
+                                                                                        item,
+                                                                                        itemIdx,
+                                                                                    ) => {
+                                                                                        const isChecked =
+                                                                                            selectedOptionIds.includes(
+                                                                                                item.id,
+                                                                                            );
+                                                                                        const addPrice =
+                                                                                            parseFloat(
+                                                                                                item.additional_price,
+                                                                                            ) ||
+                                                                                            0;
+                                                                                        const fullSizePrice =
+                                                                                            baseMenuPrice +
+                                                                                            addPrice;
+
+                                                                                        return (
+                                                                                            <button
+                                                                                                key={
+                                                                                                    item.id
+                                                                                                }
+                                                                                                type="button"
+                                                                                                onClick={() =>
+                                                                                                    handleToggleOption(
+                                                                                                        group,
+                                                                                                        item,
+                                                                                                    )
+                                                                                                }
+                                                                                                className={cn(
+                                                                                                    'relative flex cursor-pointer items-center gap-2 rounded-xl p-2.5 text-left transition-all',
+                                                                                                    isChecked
+                                                                                                        ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
+                                                                                                        : 'border border-[#E8E2D9] bg-[#F5F1E9]/85 hover:bg-[#EFEADF]',
+                                                                                                )}
+                                                                                            >
+                                                                                                {isChecked && (
+                                                                                                    <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
+                                                                                                        <Check
+                                                                                                            weight="bold"
+                                                                                                            className="size-2"
+                                                                                                        />
+                                                                                                    </span>
+                                                                                                )}
+
+                                                                                                <SizeOptionIcon
+                                                                                                    icon={
+                                                                                                        item.icon
+                                                                                                    }
+                                                                                                    name={
+                                                                                                        item.name
+                                                                                                    }
+                                                                                                    index={
+                                                                                                        itemIdx
+                                                                                                    }
+                                                                                                />
+
+                                                                                                <div className="min-w-0 flex-1 pr-1">
+                                                                                                    <span className="block truncate text-[11px] leading-tight font-medium text-[#3F3A34]">
+                                                                                                        {
+                                                                                                            item.name
+                                                                                                        }
+                                                                                                    </span>
+                                                                                                    <span className="mt-0.5 block text-xs leading-tight font-bold text-[#1A1A1A] tabular-nums">
+                                                                                                        {formatRupiah(
+                                                                                                            fullSizePrice,
+                                                                                                        )}
+                                                                                                    </span>
+                                                                                                </div>
+                                                                                            </button>
+                                                                                        );
+                                                                                    },
+                                                                                )}
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                                                                {activeItems.map(
+                                                                                    (
+                                                                                        item,
+                                                                                        itemIdx,
+                                                                                    ) => {
+                                                                                        const isChecked =
+                                                                                            selectedOptionIds.includes(
+                                                                                                item.id,
+                                                                                            );
+                                                                                        const addPrice =
+                                                                                            parseFloat(
+                                                                                                item.additional_price,
+                                                                                            ) ||
+                                                                                            0;
+
+                                                                                        return (
+                                                                                            <button
+                                                                                                key={
+                                                                                                    item.id
+                                                                                                }
+                                                                                                type="button"
+                                                                                                onClick={() =>
+                                                                                                    handleToggleOption(
+                                                                                                        group,
+                                                                                                        item,
+                                                                                                    )
+                                                                                                }
+                                                                                                className={cn(
+                                                                                                    'relative flex cursor-pointer items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left transition-all',
+                                                                                                    isChecked
+                                                                                                        ? 'border-[1.5px] border-[#C52828] bg-white'
+                                                                                                        : 'border border-[#E8E2D9] bg-[#F5F1E9]/85 hover:bg-[#EFEADF]',
+                                                                                                )}
+                                                                                            >
+                                                                                                <div className="flex min-w-0 items-center gap-2">
+                                                                                                    {item.icon ? (
+                                                                                                        <SizeOptionIcon
+                                                                                                            icon={
+                                                                                                                item.icon
+                                                                                                            }
+                                                                                                            name={
+                                                                                                                item.name
+                                                                                                            }
+                                                                                                            index={
+                                                                                                                itemIdx
+                                                                                                            }
+                                                                                                            containerClassName="size-5 items-center"
+                                                                                                            className="size-4"
+                                                                                                        />
+                                                                                                    ) : (
+                                                                                                        <Checkbox
+                                                                                                            checked={
+                                                                                                                isChecked
+                                                                                                            }
+                                                                                                            className="pointer-events-none rounded-md"
+                                                                                                        />
+                                                                                                    )}
+                                                                                                    <span className="truncate text-[11px] font-semibold text-[#1A1A1A]">
+                                                                                                        {
+                                                                                                            item.name
+                                                                                                        }
+                                                                                                    </span>
+                                                                                                </div>
+                                                                                                <span className="shrink-0 text-[11px] font-bold text-[#C52828] tabular-nums">
+                                                                                                    {addPrice >
+                                                                                                    0
+                                                                                                        ? `+${formatRupiah(addPrice)}`
+                                                                                                        : 'Gratis'}
+                                                                                                </span>
+                                                                                            </button>
+                                                                                        );
+                                                                                    },
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            },
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                            {/* Catatan Khusus (Opsional) */}
+                                            <div className="space-y-1.5">
+                                                <div className="flex items-center gap-1.5">
+                                                    <PencilSimpleLine
+                                                        weight="regular"
+                                                        className="size-4 text-[#4A2C18]"
+                                                    />
+                                                    <Label
+                                                        htmlFor="cust_notes"
+                                                        className="cursor-pointer text-xs font-bold text-[#1A1A1A]"
+                                                    >
+                                                        Catatan Khusus
+                                                        (Opsional)
+                                                    </Label>
+                                                </div>
+                                                <input
+                                                    id="cust_notes"
+                                                    type="text"
+                                                    value={customizeNotes}
+                                                    onChange={(e) =>
+                                                        setCustomizeNotes(
+                                                            e.target.value,
+                                                        )
+                                                    }
+                                                    placeholder="Misal: Less ice, jangan terlalu manis..."
+                                                    className="h-10 w-full rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-3.5 text-xs font-normal text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Sticky Footer Action Bar: never cut off, never overlapping */}
+                                    <div className="sticky bottom-0 z-20 shrink-0 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 p-3 backdrop-blur-md sm:p-3.5">
+                                        <div className="flex items-center gap-2">
                                             {editingCartId !== null && (
                                                 <button
                                                     type="button"
                                                     onClick={() => {
-                                                        removeCartItem(editingCartId);
+                                                        removeCartItem(
+                                                            editingCartId,
+                                                        );
                                                         setEditingCartId(null);
-                                                        setIsCustomizeOpen(false);
-                                                        toast.success('Item dihapus dari keranjang.');
+                                                        setIsCustomizeOpen(
+                                                            false,
+                                                        );
+                                                        toast.success(
+                                                            'Item dihapus dari keranjang.',
+                                                        );
                                                     }}
-                                                    className="h-11 px-3 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs flex items-center justify-center cursor-pointer transition"
+                                                    className="flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 active:scale-95"
                                                     title="Hapus item dari keranjang"
                                                 >
-                                                    <Trash2 className="size-4" />
+                                                    <Trash
+                                                        weight="bold"
+                                                        className="size-4"
+                                                    />
                                                 </button>
                                             )}
 
-                                            <div className="flex items-center border border-neutral-300 rounded-xl p-1 bg-neutral-50">
+                                            {/* Compact Stepper */}
+                                            <div className="flex h-10 shrink-0 items-center rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-1">
                                                 <button
                                                     type="button"
-                                                    onClick={() => setCustomizeQty(Math.max(1, customizeQty - 1))}
-                                                    className="size-7 rounded-lg flex items-center justify-center hover:bg-neutral-200 text-neutral-700 cursor-pointer"
+                                                    onClick={() =>
+                                                        setCustomizeQty(
+                                                            Math.max(
+                                                                1,
+                                                                customizeQty -
+                                                                    1,
+                                                            ),
+                                                        )
+                                                    }
+                                                    aria-label="Kurangi jumlah"
+                                                    className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-[#3F3A34] transition hover:bg-[#E7E0D3] active:scale-90"
                                                 >
-                                                    <Minus className="size-3.5" />
+                                                    <PhMinus
+                                                        weight="bold"
+                                                        className="size-3"
+                                                    />
                                                 </button>
-                                                <span className="w-8 text-center font-mono font-black text-sm text-neutral-900">
+                                                <span className="w-6 text-center text-xs font-bold text-[#1A1A1A] tabular-nums sm:text-sm">
                                                     {customizeQty}
                                                 </span>
                                                 <button
                                                     type="button"
-                                                    onClick={() => setCustomizeQty(Math.min(50, customizeQty + 1))}
-                                                    className="size-7 rounded-lg flex items-center justify-center hover:bg-neutral-200 text-neutral-700 cursor-pointer"
+                                                    disabled={
+                                                        customizeQty >=
+                                                        Math.min(
+                                                            50,
+                                                            activeRemainingStock,
+                                                        )
+                                                    }
+                                                    onClick={() =>
+                                                        setCustomizeQty(
+                                                            Math.min(
+                                                                50,
+                                                                activeRemainingStock,
+                                                                customizeQty +
+                                                                    1,
+                                                            ),
+                                                        )
+                                                    }
+                                                    aria-label="Tambah jumlah"
+                                                    className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-[#3F3A34] transition hover:bg-[#E7E0D3] active:scale-90 disabled:cursor-not-allowed disabled:opacity-40"
                                                 >
-                                                    <Plus className="size-3.5" />
+                                                    <PhPlus
+                                                        weight="bold"
+                                                        className="size-3"
+                                                    />
                                                 </button>
                                             </div>
 
+                                            {/* Tombol Simpan / Tambah */}
                                             <button
                                                 type="button"
+                                                disabled={
+                                                    activeRemainingStock <= 0
+                                                }
                                                 onClick={handleSaveFromModal}
-                                                className="flex-1 rounded-xl h-11 bg-[#FF0000] hover:bg-[#e00000] text-white font-extrabold text-xs sm:text-sm shadow-md active:scale-95 transition cursor-pointer px-3"
+                                                className="flex h-10 min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-xl bg-[#C52828] px-3.5 font-semibold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
                                             >
-                                                {editingCartId !== null
-                                                    ? `Simpan Perubahan — ${formatRupiah(calculateCustomUnitPrice() * customizeQty)}`
-                                                    : `Tambahkan ke Keranjang — ${formatRupiah(calculateCustomUnitPrice() * customizeQty)}`}
+                                                <span className="truncate text-xs font-bold">
+                                                    {editingCartId !== null
+                                                        ? 'Simpan Perubahan'
+                                                        : 'Tambah ke Keranjang'}
+                                                </span>
+                                                <span className="shrink-0 text-xs font-extrabold tabular-nums">
+                                                    {formatRupiah(
+                                                        calculateCustomUnitPrice() *
+                                                            customizeQty,
+                                                    )}
+                                                </span>
                                             </button>
                                         </div>
                                     </div>
@@ -1453,188 +2613,546 @@ export default function CustomerOrder({
                     {/* MODAL 2: KERANJANG BELANJA & CHECKOUT PESANAN                             */}
                     {/* ========================================================================= */}
                     <Dialog open={isCartOpen} onOpenChange={setIsCartOpen}>
-                        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto rounded-3xl bg-white border font-sans">
-                            <form onSubmit={handleCheckout} className="space-y-4">
-                                <DialogHeader className="space-y-1">
-                                    <div className="flex items-center justify-between">
-                                        <DialogTitle className="font-heading text-lg font-extrabold text-neutral-900 tracking-tight">
-                                            Rincian Pesanan
-                                        </DialogTitle>
-                                        <Badge className="bg-neutral-900 text-white font-black text-xs px-2.5 py-0.5">
-                                            MEJA {table.table_number}
-                                        </Badge>
-                                    </div>
-                                    <DialogDescription className="text-xs text-neutral-500">
-                                        Periksa kembali ukuran, kuantitas, dan catatan sebelum dikirim ke barista & kasir.
-                                    </DialogDescription>
-                                </DialogHeader>
-
-                                {/* Daftar Item di Keranjang */}
-                                <div className="space-y-3 divide-y divide-neutral-100 max-h-64 overflow-y-auto pr-1">
-                                    {cart.map((item) => {
-                                        const variantNames = item.selected_options
-                                            .map((o) => o.option_name)
-                                            .join(', ');
-
-                                        return (
-                                            <div key={item.cart_id} className="pt-3 first:pt-0 space-y-1.5">
-                                                <div className="flex items-start justify-between gap-2">
-                                                    <div>
-                                                        <h4 className="font-heading font-bold text-sm text-neutral-900 leading-snug tracking-tight">
-                                                            {item.menu_name}
-                                                            {variantNames ? ` — ${variantNames}` : ''}
-                                                        </h4>
-                                                        <span className="font-mono text-xs text-neutral-500">
-                                                            {item.quantity} × {formatRupiah(item.unit_price)}
-                                                        </span>
-                                                    </div>
-                                                    <span className="font-mono font-bold text-sm text-neutral-900 shrink-0">
-                                                        {formatRupiah(item.unit_price * item.quantity)}
-                                                    </span>
-                                                </div>
-
-                                                {item.selected_options.length > 0 && (
-                                                    <div className="flex flex-wrap gap-1">
-                                                        {item.selected_options.map((o) => (
-                                                            <span
-                                                                key={o.option_item_id}
-                                                                className="inline-flex items-center rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-semibold text-neutral-700"
-                                                            >
-                                                                {o.group_name}: {o.option_name}
-                                                                {o.additional_price > 0
-                                                                    ? ` (+${formatRupiah(o.additional_price)})`
-                                                                    : ''}
-                                                            </span>
-                                                        ))}
-                                                    </div>
-                                                )}
-
-                                                {item.customer_notes && (
-                                                    <p className="text-[11px] text-amber-700 italic">
-                                                        Catatan: &ldquo;{item.customer_notes}&rdquo;
-                                                    </p>
-                                                )}
-
-                                                <div className="flex items-center justify-between pt-1">
-                                                    <div className="flex items-center gap-3">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => openEditCartItem(item)}
-                                                            className="text-[11px] font-bold text-neutral-700 hover:text-[#FF0000] flex items-center gap-1 cursor-pointer transition"
-                                                        >
-                                                            <Pencil className="size-3" />
-                                                            <span>
-                                                                {item.selected_options.length > 0
-                                                                    ? 'Ubah Ukuran'
-                                                                    : 'Ubah Catatan'}
-                                                            </span>
-                                                        </button>
-
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => removeCartItem(item.cart_id)}
-                                                            className="text-[11px] font-semibold text-rose-600 hover:underline flex items-center gap-0.5 cursor-pointer"
-                                                        >
-                                                            <Trash2 className="size-3" /> Hapus
-                                                        </button>
-                                                    </div>
-
-                                                    <div className="flex items-center border border-neutral-300 rounded-lg bg-neutral-50 px-1 py-0.5">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => updateCartQty(item.cart_id, -1)}
-                                                            className="size-5 flex items-center justify-center text-neutral-600 hover:bg-neutral-200 rounded cursor-pointer"
-                                                        >
-                                                            <Minus className="size-3" />
-                                                        </button>
-                                                        <span className="w-6 text-center font-mono text-xs font-black">
-                                                            {item.quantity}
-                                                        </span>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => updateCartQty(item.cart_id, 1)}
-                                                            className="size-5 flex items-center justify-center text-neutral-600 hover:bg-neutral-200 rounded cursor-pointer"
-                                                        >
-                                                            <Plus className="size-3" />
-                                                        </button>
-                                                    </div>
-                                                </div>
+                        <DialogContent className="flex max-h-[88dvh] w-[calc(100%-1.5rem)] max-w-[390px] flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-[430px] [&>button:last-child]:hidden">
+                            <form
+                                onSubmit={handleCheckout}
+                                className="flex h-full max-h-[88dvh] flex-col overflow-hidden"
+                            >
+                                {/* Header Modal Keranjang (Sticky Top) */}
+                                <div className="z-20 flex shrink-0 items-start justify-between gap-3 border-b border-[#EBE5DC] bg-[#FAF8F4] px-4 pt-4 pb-3 sm:px-5">
+                                    <DialogHeader className="space-y-1 text-left">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <div className="flex size-7 items-center justify-center rounded-lg bg-[#FDECEB] text-[#C52828]">
+                                                <ShoppingBagOpen
+                                                    weight="duotone"
+                                                    className="size-4"
+                                                />
                                             </div>
-                                        );
-                                    })}
+                                            <DialogTitle className="text-[17px] font-bold tracking-tight text-[#1A1A1A] sm:text-lg">
+                                                Rincian Pesanan
+                                            </DialogTitle>
+                                            <span className="rounded-md bg-[#1A1A1A] px-2 py-0.5 text-[10px] font-bold text-white">
+                                                MEJA {table.table_number}
+                                            </span>
+                                        </div>
+                                        <DialogDescription className="text-xs leading-relaxed font-normal text-[#6E6A64]">
+                                            Periksa kembali ukuran, jumlah, dan
+                                            catatan sebelum pesanan diteruskan
+                                            ke barista.
+                                        </DialogDescription>
+                                    </DialogHeader>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsCartOpen(false)}
+                                        aria-label="Tutup keranjang"
+                                        className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-lg bg-[#EFECE6] text-[#1A1A1A] transition hover:bg-[#E5E0D6] active:scale-95"
+                                    >
+                                        <PhX
+                                            weight="bold"
+                                            className="size-3.5"
+                                        />
+                                    </button>
                                 </div>
 
-                                {/* Form Identitas Pemesan */}
-                                <div className="space-y-3 pt-2 border-t">
-                                    <div className="space-y-1">
-                                        <Label htmlFor="cust_name" className="text-xs font-bold text-neutral-800">
-                                            Nama Pemesan <span className="text-[#FF0000]">*</span>
-                                        </Label>
-                                        <Input
-                                            id="cust_name"
-                                            value={customerName}
-                                            onChange={(e) => setCustomerName(e.target.value)}
-                                            placeholder="Contoh: Budi, Titan, dsb."
-                                            required
-                                            className="h-10 text-sm bg-neutral-50"
-                                            autoFocus
-                                        />
-                                        <p className="text-[10px] text-neutral-500">
-                                            Nama ini akan dipanggil oleh kasir saat pesanan siap diambil/diantar.
-                                        </p>
+                                {/* Body Konten Keranjang & Checkout (Scrollable) */}
+                                <div className="flex-1 space-y-3.5 overflow-x-hidden overflow-y-auto p-4 sm:p-5">
+                                    {/* Daftar Item di Keranjang */}
+                                    <div className="space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-1.5">
+                                                <CupHeaderPhosphorIcon className="size-4 text-[#4A2C18]" />
+                                                <span className="text-xs font-bold text-[#1A1A1A]">
+                                                    Daftar Menu Dipesan
+                                                </span>
+                                            </div>
+                                            <span className="rounded-full bg-[#FDECEB] px-2 py-0.5 text-[10px] font-semibold text-[#C52828]">
+                                                {totalCartItems} Item
+                                            </span>
+                                        </div>
+
+                                        <div className="space-y-2">
+                                            {cart.map((item) => {
+                                                const variantNames =
+                                                    item.selected_options
+                                                        .map(
+                                                            (o) =>
+                                                                o.option_name,
+                                                        )
+                                                        .join(', ');
+                                                const menuForCart =
+                                                    allMenusMap.get(
+                                                        item.menu_id,
+                                                    );
+                                                const remainingExtraForCart =
+                                                    menuForCart
+                                                        ? getRemainingStockForMenu(
+                                                              menuForCart,
+                                                          )
+                                                        : 50;
+
+                                                return (
+                                                    <div
+                                                        key={item.cart_id}
+                                                        className="space-y-2 rounded-xl border border-[#E8E2D9] bg-white p-3 shadow-xs transition hover:border-[#DECFC0]"
+                                                    >
+                                                        <div className="flex items-start justify-between gap-2">
+                                                            <div className="min-w-0 flex-1">
+                                                                <h4 className="text-[13px] leading-snug font-bold tracking-tight text-[#1A1A1A]">
+                                                                    {
+                                                                        item.menu_name
+                                                                    }
+                                                                    {variantNames
+                                                                        ? ` — ${variantNames}`
+                                                                        : ''}
+                                                                </h4>
+                                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                                    <span className="text-[11px] font-medium text-[#7C756B] tabular-nums">
+                                                                        {
+                                                                            item.quantity
+                                                                        }{' '}
+                                                                        &times;{' '}
+                                                                        {formatRupiah(
+                                                                            item.unit_price,
+                                                                        )}
+                                                                    </span>
+                                                                    {menuForCart?.is_limited_stock && (
+                                                                        <span className="rounded-[4px] border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[9.5px] leading-none font-bold text-amber-800 tabular-nums">
+                                                                            Sisa{' '}
+                                                                            {menuForCart.stock_quantity ??
+                                                                                0}{' '}
+                                                                            porsi
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                            <span className="shrink-0 text-[13.5px] font-bold text-[#C52828] tabular-nums">
+                                                                {formatRupiah(
+                                                                    item.unit_price *
+                                                                        item.quantity,
+                                                                )}
+                                                            </span>
+                                                        </div>
+
+                                                        {item.selected_options
+                                                            .length > 0 && (
+                                                            <div className="flex flex-wrap gap-1">
+                                                                {item.selected_options.map(
+                                                                    (o) => (
+                                                                        <span
+                                                                            key={
+                                                                                o.option_item_id
+                                                                            }
+                                                                            className="inline-flex items-center rounded-md border border-[#E8E2D9] bg-[#F8F5EE] px-2 py-0.5 text-[9.5px] font-medium text-[#4A4036]"
+                                                                        >
+                                                                            {
+                                                                                o.group_name
+                                                                            }
+                                                                            :{' '}
+                                                                            {
+                                                                                o.option_name
+                                                                            }
+                                                                            {o.additional_price >
+                                                                            0
+                                                                                ? ` (+${formatRupiah(o.additional_price)})`
+                                                                                : ''}
+                                                                        </span>
+                                                                    ),
+                                                                )}
+                                                            </div>
+                                                        )}
+
+                                                        {item.customer_notes && (
+                                                            <div className="flex items-start gap-1.5 rounded-lg border border-[#EBE3D6] bg-[#F8F5EE] px-2.5 py-1 text-[10.5px] text-[#5E5850]">
+                                                                <PencilSimpleLine
+                                                                    weight="regular"
+                                                                    className="mt-0.5 size-3 shrink-0 text-[#4A2C18]"
+                                                                />
+                                                                <span className="leading-tight italic">
+                                                                    &ldquo;
+                                                                    {
+                                                                        item.customer_notes
+                                                                    }
+                                                                    &rdquo;
+                                                                </span>
+                                                            </div>
+                                                        )}
+
+                                                        <div className="flex items-center justify-between border-t border-[#F2ECE3] pt-2">
+                                                            <div className="flex items-center gap-1.5">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                        openEditCartItem(
+                                                                            item,
+                                                                        )
+                                                                    }
+                                                                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#F5EFE6] px-2.5 py-1 text-[11px] font-semibold text-[#3F3A34] transition hover:bg-[#EBE2D4] active:scale-95"
+                                                                >
+                                                                    <NotePencil
+                                                                        weight="bold"
+                                                                        className="size-3 text-[#4A2C18]"
+                                                                    />
+                                                                    <span>
+                                                                        {item
+                                                                            .selected_options
+                                                                            .length >
+                                                                        0
+                                                                            ? 'Ubah Ukuran'
+                                                                            : 'Ubah Catatan'}
+                                                                    </span>
+                                                                </button>
+
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                        removeCartItem(
+                                                                            item.cart_id,
+                                                                        )
+                                                                    }
+                                                                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-[#C52828] transition hover:bg-red-50 active:scale-95"
+                                                                >
+                                                                    <Trash
+                                                                        weight="bold"
+                                                                        className="size-3"
+                                                                    />
+                                                                    <span>
+                                                                        Hapus
+                                                                    </span>
+                                                                </button>
+                                                            </div>
+
+                                                            {/* Compact Stepper */}
+                                                            <div className="flex h-7 items-center rounded-lg border border-[#E4DCD0] bg-[#F7F4EE] px-1">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                        updateCartQty(
+                                                                            item.cart_id,
+                                                                            -1,
+                                                                        )
+                                                                    }
+                                                                    className="flex size-5 cursor-pointer items-center justify-center rounded text-[#3F3A34] transition hover:bg-[#EAE2D4] active:scale-90"
+                                                                >
+                                                                    <PhMinus
+                                                                        weight="bold"
+                                                                        className="size-2.5"
+                                                                    />
+                                                                </button>
+                                                                <span className="w-5 text-center text-xs font-bold text-[#1A1A1A] tabular-nums">
+                                                                    {
+                                                                        item.quantity
+                                                                    }
+                                                                </span>
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={
+                                                                        remainingExtraForCart <=
+                                                                        0
+                                                                    }
+                                                                    onClick={() =>
+                                                                        updateCartQty(
+                                                                            item.cart_id,
+                                                                            1,
+                                                                        )
+                                                                    }
+                                                                    className="flex size-5 cursor-pointer items-center justify-center rounded text-[#3F3A34] transition hover:bg-[#EAE2D4] active:scale-90 disabled:cursor-not-allowed disabled:opacity-40"
+                                                                >
+                                                                    <PhPlus
+                                                                        weight="bold"
+                                                                        className="size-2.5"
+                                                                    />
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
                                     </div>
 
-                                    <div className="space-y-1">
-                                        <Label htmlFor="order_notes" className="text-xs font-bold text-neutral-800">
-                                            Catatan Tambahan Meja (Opsional)
-                                        </Label>
-                                        <Input
-                                            id="order_notes"
-                                            value={orderNotes}
-                                            onChange={(e) => setOrderNotes(e.target.value)}
-                                            placeholder="Misal: Sendok garpu dipisah, sedotan kertas..."
-                                            className="h-9 text-xs bg-neutral-50"
-                                        />
-                                    </div>
-                                </div>
+                                    <div className="h-px w-full bg-[#EBE5DC]" />
 
-                                {/* Ringkasan Total & Tombol Kirim Pesanan Merah #FF0000 */}
-                                <div className="border-t pt-3 space-y-3">
-                                    {activeOrder ? (
-                                        <div className="rounded-2xl bg-neutral-50 border border-neutral-200 p-3 space-y-1.5 text-xs">
-                                            <div className="flex items-center justify-between text-neutral-600">
+                                    {/* Form Identitas Pemesan & Catatan Meja */}
+                                    <div className="space-y-3">
+                                        <div className="space-y-1.5">
+                                            <label
+                                                htmlFor="cust_name"
+                                                className="flex items-center gap-1.5 text-xs font-bold text-[#1A1A1A]"
+                                            >
+                                                <PhUser
+                                                    weight="bold"
+                                                    className="size-3.5 text-[#4A2C18]"
+                                                />
                                                 <span>
-                                                    Tagihan Saat Ini (#{activeOrder.order_number}):
+                                                    Nama Pemesan{' '}
+                                                    <span className="text-[#C52828]">
+                                                        *
+                                                    </span>
                                                 </span>
-                                                <span className="font-mono font-semibold">
-                                                    {formatRupiah(activeOrder.total_amount)}
+                                            </label>
+                                            <input
+                                                id="cust_name"
+                                                type="text"
+                                                value={customerName}
+                                                onChange={(e) =>
+                                                    setCustomerName(
+                                                        e.target.value,
+                                                    )
+                                                }
+                                                placeholder="Contoh: Budi, Titan, dsb."
+                                                required
+                                                autoFocus
+                                                className="h-10 w-full rounded-xl border border-[#E4DCD0] bg-[#F7F4EE] px-3.5 text-xs font-medium text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
+                                            />
+                                            <p className="pl-1 text-[10.5px] text-[#7C756B]">
+                                                Nama ini akan dipanggil saat
+                                                pesanan siap disajikan.
+                                            </p>
+                                        </div>
+
+                                        <div className="space-y-1.5">
+                                            <label
+                                                htmlFor="order_notes"
+                                                className="flex items-center gap-1.5 text-xs font-bold text-[#1A1A1A]"
+                                            >
+                                                <PencilSimpleLine
+                                                    weight="regular"
+                                                    className="size-3.5 text-[#4A2C18]"
+                                                />
+                                                <span>
+                                                    Catatan Tambahan Meja
+                                                    (Opsional)
                                                 </span>
+                                            </label>
+                                            <input
+                                                id="order_notes"
+                                                type="text"
+                                                value={orderNotes}
+                                                onChange={(e) =>
+                                                    setOrderNotes(
+                                                        e.target.value,
+                                                    )
+                                                }
+                                                placeholder="Misal: Sendok garpu dipisah, sedotan kertas..."
+                                                className="h-10 w-full rounded-xl border border-[#E4DCD0] bg-[#F7F4EE] px-3.5 text-xs font-normal text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="h-px w-full bg-[#EBE5DC]" />
+
+                                    {/* PILIHAN METODE PEMBAYARAN */}
+                                    <div className="space-y-2.5">
+                                        <div className="flex items-center justify-between">
+                                            <Label className="text-xs font-bold text-[#1A1A1A]">
+                                                Pilih Metode Pembayaran
+                                            </Label>
+                                            <span className="rounded-md bg-[#FDECEB] px-2 py-0.5 text-[10px] font-semibold text-[#C52828]">
+                                                Pilih 1 Metode
+                                            </span>
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {/* Opsi 1: QRIS */}
+                                            <button
+                                                type="button"
+                                                onClick={() =>
+                                                    setPaymentMethod('qris')
+                                                }
+                                                className={cn(
+                                                    'relative flex cursor-pointer flex-col justify-between rounded-xl p-3 text-left transition-all',
+                                                    paymentMethod === 'qris'
+                                                        ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
+                                                        : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
+                                                )}
+                                            >
+                                                {paymentMethod === 'qris' && (
+                                                    <span className="absolute top-2 right-2 flex size-4 items-center justify-center rounded-full bg-[#C52828] text-white">
+                                                        <Check
+                                                            weight="bold"
+                                                            className="size-2.5"
+                                                        />
+                                                    </span>
+                                                )}
+
+                                                <div className="flex items-center gap-2 pr-4">
+                                                    <div
+                                                        className={cn(
+                                                            'flex size-7.5 shrink-0 items-center justify-center rounded-lg transition-colors',
+                                                            paymentMethod ===
+                                                                'qris'
+                                                                ? 'bg-[#C52828] text-white'
+                                                                : 'bg-[#E8E2D8] text-[#4A2C18]',
+                                                        )}
+                                                    >
+                                                        <PhQrCode
+                                                            weight="bold"
+                                                            className="size-4"
+                                                        />
+                                                    </div>
+                                                    <div className="min-w-0">
+                                                        <div className="text-xs leading-tight font-bold text-[#1A1A1A]">
+                                                            QRIS
+                                                        </div>
+                                                        <div className="mt-0.5 text-[10px] font-medium text-[#7C756B]">
+                                                            Via Xendit Gateway
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <p className="mt-2 text-[10px] leading-tight text-[#7C756B]">
+                                                    GoPay, OVO, Dana, BCA,
+                                                    Mandiri dsb.
+                                                </p>
+                                            </button>
+
+                                            {/* Opsi 2: Tunai Kasir */}
+                                            <button
+                                                type="button"
+                                                onClick={() =>
+                                                    setPaymentMethod('cash')
+                                                }
+                                                className={cn(
+                                                    'relative flex cursor-pointer flex-col justify-between rounded-xl p-3 text-left transition-all',
+                                                    paymentMethod === 'cash'
+                                                        ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
+                                                        : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
+                                                )}
+                                            >
+                                                {paymentMethod === 'cash' && (
+                                                    <span className="absolute top-2 right-2 flex size-4 items-center justify-center rounded-full bg-[#C52828] text-white">
+                                                        <Check
+                                                            weight="bold"
+                                                            className="size-2.5"
+                                                        />
+                                                    </span>
+                                                )}
+
+                                                <div className="flex items-center gap-2 pr-4">
+                                                    <div
+                                                        className={cn(
+                                                            'flex size-7.5 shrink-0 items-center justify-center rounded-lg transition-colors',
+                                                            paymentMethod ===
+                                                                'cash'
+                                                                ? 'bg-[#C52828] text-white'
+                                                                : 'bg-[#E8E2D8] text-[#4A2C18]',
+                                                        )}
+                                                    >
+                                                        <Money
+                                                            weight="bold"
+                                                            className="size-4"
+                                                        />
+                                                    </div>
+                                                    <div className="min-w-0">
+                                                        <div className="text-xs leading-tight font-bold text-[#1A1A1A]">
+                                                            Tunai
+                                                        </div>
+                                                        <div className="mt-0.5 text-[10px] font-medium text-[#7C756B]">
+                                                            Bayar di Kasir
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <p className="mt-2 text-[10px] leading-tight text-[#7C756B]">
+                                                    Kirim sekarang, bayar cash
+                                                    di kasir.
+                                                </p>
+                                            </button>
+                                        </div>
+
+                                        {/* Info Box */}
+                                        <div className="rounded-xl border border-[#E6DFD3] bg-[#F7F4EE] p-2.5 text-[11px] text-[#3F3A34]">
+                                            <div className="flex items-center gap-1.5 font-bold text-[#1A1A1A]">
+                                                {paymentMethod === 'qris' ? (
+                                                    <>
+                                                        <PhQrCode
+                                                            weight="bold"
+                                                            className="size-3.5 text-[#C52828]"
+                                                        />
+                                                        <span>
+                                                            {activeOrder
+                                                                ? `Digabung ke Pesanan #${activeOrder.order_number} (QRIS)`
+                                                                : 'Pembayaran QRIS Instan'}
+                                                        </span>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Money
+                                                            weight="bold"
+                                                            className="size-3.5 text-[#4A2C18]"
+                                                        />
+                                                        <span>
+                                                            {activeOrder
+                                                                ? `Digabung ke Pesanan #${activeOrder.order_number} (Tunai)`
+                                                                : 'Pembayaran Tunai di Meja Kasir'}
+                                                        </span>
+                                                    </>
+                                                )}
                                             </div>
-                                            <div className="flex items-center justify-between text-neutral-700 font-semibold">
-                                                <span>Menu Tambahan Baru ({totalCartItems} item):</span>
-                                                <span className="font-mono text-[#FF0000]">
-                                                    +{formatRupiah(totalCartPrice)}
+                                            <p className="mt-0.5 text-[10.5px] leading-snug text-[#7C756B]">
+                                                {paymentMethod === 'qris'
+                                                    ? 'Setelah kirim, kode QRIS otomatis tampil di layar HP untuk di-scan.'
+                                                    : 'Setelah kirim, silakan sebutkan nama pemesan di meja kasir untuk membayar.'}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Sticky Footer Checkout Action Bar */}
+                                <div className="z-20 shrink-0 space-y-2 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 p-3 shadow-[0_-4px_16px_rgba(0,0,0,0.04)] backdrop-blur-md sm:p-3.5">
+                                    {activeOrder && (
+                                        <div className="space-y-1 rounded-xl border border-[#E8E2D9] bg-white p-2.5 text-xs">
+                                            <div className="flex items-center justify-between text-[#7C756B]">
+                                                <span>
+                                                    Tagihan Sebelumnya (#
+                                                    {activeOrder.order_number})
                                                 </span>
-                                            </div>
-                                            <div className="flex items-center justify-between pt-1.5 border-t border-neutral-200 font-black text-sm text-neutral-900">
-                                                <span>Total Tagihan Gabungan:</span>
-                                                <span className="font-mono text-base">
+                                                <span className="font-semibold text-[#1A1A1A] tabular-nums">
                                                     {formatRupiah(
-                                                        activeOrder.total_amount + totalCartPrice,
+                                                        activeOrder.total_amount,
+                                                    )}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center justify-between font-semibold text-[#3F3A34]">
+                                                <span>
+                                                    Menu Baru ({totalCartItems}{' '}
+                                                    item)
+                                                </span>
+                                                <span className="font-bold text-[#C52828] tabular-nums">
+                                                    +
+                                                    {formatRupiah(
+                                                        totalCartPrice,
+                                                    )}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center justify-between border-t border-[#EBE5DC] pt-1 text-xs font-bold text-[#1A1A1A]">
+                                                <span>Total Gabungan</span>
+                                                <span className="text-sm font-bold text-[#C52828] tabular-nums">
+                                                    {formatRupiah(
+                                                        activeOrder.total_amount +
+                                                            totalCartPrice,
                                                     )}
                                                 </span>
                                             </div>
                                             {activeOrder.settled_amount > 0 && (
-                                                <div className="pt-1 border-t border-dashed border-neutral-200 space-y-1 text-[11px]">
-                                                    <div className="flex items-center justify-between text-emerald-700 font-semibold">
-                                                        <span>Sudah Dibayar Sebelumnya:</span>
-                                                        <span className="font-mono">
-                                                            {formatRupiah(activeOrder.settled_amount)}
+                                                <div className="space-y-0.5 border-t border-dashed border-[#E6DFD3] pt-1 text-[11px]">
+                                                    <div className="flex items-center justify-between font-semibold text-emerald-700">
+                                                        <span>
+                                                            Sudah Dibayar
+                                                        </span>
+                                                        <span className="tabular-nums">
+                                                            {formatRupiah(
+                                                                activeOrder.settled_amount,
+                                                            )}
                                                         </span>
                                                     </div>
-                                                    <div className="flex items-center justify-between text-rose-700 font-bold">
-                                                        <span>Sisa Tagihan Tambahan:</span>
-                                                        <span className="font-mono">
+                                                    <div className="flex items-center justify-between font-bold text-[#C52828]">
+                                                        <span>
+                                                            Sisa Tagihan
+                                                            Tambahan
+                                                        </span>
+                                                        <span className="tabular-nums">
                                                             {formatRupiah(
                                                                 Math.max(
                                                                     0,
@@ -1648,50 +3166,72 @@ export default function CustomerOrder({
                                                 </div>
                                             )}
                                         </div>
-                                    ) : (
-                                        <div className="flex items-center justify-between">
-                                            <span className="text-xs text-neutral-600 font-medium">
-                                                Total Pembayaran:
-                                            </span>
-                                            <span className="font-mono text-lg font-black text-neutral-900">
-                                                {formatRupiah(totalCartPrice)}
-                                            </span>
-                                        </div>
                                     )}
 
-                                    <div className="p-2.5 rounded-xl bg-[#FEF6D8] border border-[#F5E59F] text-[11px] text-amber-950">
-                                        <p className="font-bold">
-                                            {activeOrder
-                                                ? `Digabungkan ke Pesanan Aktif #${activeOrder.order_number}`
-                                                : 'Metode Pembayaran: Kasir (Tunai / QRIS)'}
-                                        </p>
-                                        <p className="text-[10px] text-amber-900 mt-0.5">
-                                            {activeOrder
-                                                ? activeOrder.settled_amount > 0
-                                                    ? 'Pembayaran sebelumnya tetap tercatat aman. Anda hanya perlu membayar selisih menu tambahan di kasir.'
-                                                    : 'Menu baru akan digabungkan ke tagihan pesanan Anda yang sedang berjalan.'
-                                                : 'Setelah klik kirim pesanan, silakan ke kasir untuk konfirmasi dan pembayaran.'}
-                                        </p>
-                                    </div>
+                                    <div className="flex items-center gap-2.5">
+                                        <div className="min-w-0 pr-1">
+                                            <span className="block text-[9.5px] font-bold tracking-wider text-[#7C756B] uppercase">
+                                                {activeOrder &&
+                                                activeOrder.settled_amount > 0
+                                                    ? 'Sisa Bayar'
+                                                    : 'Total'}
+                                            </span>
+                                            <span className="block text-base leading-tight font-black text-[#C52828] tabular-nums">
+                                                {formatRupiah(
+                                                    activeOrder &&
+                                                        activeOrder.settled_amount >
+                                                            0
+                                                        ? Math.max(
+                                                              0,
+                                                              activeOrder.total_amount +
+                                                                  totalCartPrice -
+                                                                  activeOrder.settled_amount,
+                                                          )
+                                                        : totalCartPrice,
+                                                )}
+                                            </span>
+                                        </div>
 
-                                    <button
-                                        type="submit"
-                                        disabled={isSubmitting || cart.length === 0}
-                                        className="w-full h-12 bg-[#FF0000] hover:bg-[#e00000] active:scale-95 text-white font-extrabold text-sm rounded-xl shadow-md transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
-                                    >
-                                        {isSubmitting ? (
-                                            'Mengirim Pesanan...'
-                                        ) : (
-                                            <>
-                                                <span>
-                                                    {activeOrder
-                                                        ? `Tambahkan ke Pesanan #${activeOrder.order_number}`
-                                                        : 'Kirim Pesanan Sekarang'}
-                                                </span>
-                                                <ArrowRight className="size-4 stroke-[3]" />
-                                            </>
-                                        )}
-                                    </button>
+                                        <button
+                                            type="submit"
+                                            disabled={
+                                                isSubmitting ||
+                                                cart.length === 0
+                                            }
+                                            className="flex h-10 min-w-0 flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-3.5 text-xs font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-50"
+                                        >
+                                            {isSubmitting ? (
+                                                <span>Mengirim Pesanan...</span>
+                                            ) : (
+                                                <>
+                                                    {paymentMethod ===
+                                                    'qris' ? (
+                                                        <PhQrCode
+                                                            weight="bold"
+                                                            className="size-4 shrink-0"
+                                                        />
+                                                    ) : (
+                                                        <Money
+                                                            weight="bold"
+                                                            className="size-4 shrink-0"
+                                                        />
+                                                    )}
+                                                    <span className="truncate">
+                                                        {activeOrder
+                                                            ? `Kirim (#${activeOrder.order_number})`
+                                                            : paymentMethod ===
+                                                                'qris'
+                                                              ? 'Kirim & Bayar QRIS'
+                                                              : 'Kirim Pesanan'}
+                                                    </span>
+                                                    <PhArrowRight
+                                                        weight="bold"
+                                                        className="size-3.5 shrink-0"
+                                                    />
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
                                 </div>
                             </form>
                         </DialogContent>

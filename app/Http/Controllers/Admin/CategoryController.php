@@ -66,11 +66,14 @@ class CategoryController extends Controller
     }
 
     /**
-     * Menghapus kategori.
+     * Menghapus kategori jika sudah tidak memiliki menu terkait.
      */
     public function destroy(Category $category): RedirectResponse
     {
-        // Menghapus kategori (menu di dalamnya otomatis terhapus karena cascade)
+        if ($category->menus()->exists()) {
+            return back()->with('error', 'Kategori tidak dapat dihapus karena masih memiliki daftar menu. Pindahkan atau hapus menu di dalamnya terlebih dahulu.');
+        }
+
         $category->delete();
 
         return back()->with('success', 'Kategori berhasil dihapus.');

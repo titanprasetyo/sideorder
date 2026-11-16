@@ -4,7 +4,7 @@
  * agar tampilan seluruh tabel, kartu, dan formulir konsisten dan ramah pengguna.
  */
 import type { LucideIcon } from 'lucide-react';
-import { AlertTriangle, Search, X } from 'lucide-react';
+import { AlertTriangle, Coffee, Search, Sparkles, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -22,9 +22,20 @@ import { cn } from '@/lib/utils';
 /* Layout                                                                     */
 /* -------------------------------------------------------------------------- */
 
-export function AdminPage({ children, className }: { children: ReactNode; className?: string }) {
+export function AdminPage({
+    children,
+    className,
+}: {
+    children: ReactNode;
+    className?: string;
+}) {
     return (
-        <div className={cn('mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 sm:p-6 lg:p-8', className)}>
+        <div
+            className={cn(
+                'animate-sideline-fade-up mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 font-sans sm:p-6 lg:p-8',
+                className,
+            )}
+        >
             {children}
         </div>
     );
@@ -42,24 +53,45 @@ export function PageHeader({
     actions?: ReactNode;
 }) {
     return (
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-4 border-b border-[#E8DFC8] pb-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-start gap-3.5">
-                <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#C52828] text-white shadow-sm shadow-[#C52828]/25">
+                <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#C52828] to-[#991B1B] text-white shadow-sm ring-1 shadow-[#C52828]/25 ring-white/20">
                     <Icon className="size-5" />
                 </div>
                 <div>
-                    <h1 className="text-xl font-extrabold tracking-tight text-[#18181B] sm:text-2xl">{title}</h1>
-                    {description && <p className="mt-0.5 text-sm font-medium text-[#78716C]">{description}</p>}
+                    <h1 className="font-heading text-xl font-extrabold tracking-tight text-[#18181B] sm:text-2xl">
+                        {title}
+                    </h1>
+                    {description && (
+                        <p className="mt-0.5 text-xs font-medium text-[#78716C] sm:text-sm">
+                            {description}
+                        </p>
+                    )}
                 </div>
             </div>
-            {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+            {actions && (
+                <div className="flex flex-wrap items-center gap-2">
+                    {actions}
+                </div>
+            )}
         </div>
     );
 }
 
-export function Panel({ children, className }: { children: ReactNode; className?: string }) {
+export function Panel({
+    children,
+    className,
+}: {
+    children: ReactNode;
+    className?: string;
+}) {
     return (
-        <div className={cn('overflow-hidden rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] shadow-xs', className)}>
+        <div
+            className={cn(
+                'overflow-hidden rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] shadow-xs',
+                className,
+            )}
+        >
             {children}
         </div>
     );
@@ -93,21 +125,36 @@ export function StatCard({
     tone?: Tone;
 }) {
     return (
-        <div className="flex items-center gap-3.5 rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] p-4 shadow-xs transition-shadow hover:shadow-sm">
-            <div className={cn('flex size-11 shrink-0 items-center justify-center rounded-xl shadow-2xs', toneIcon[tone])}>
+        <div className="flex items-center gap-3.5 rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] p-4 shadow-xs transition-all hover:border-[#DFCFA9] hover:shadow-sm">
+            <div
+                className={cn(
+                    'flex size-11 shrink-0 items-center justify-center rounded-xl shadow-2xs',
+                    toneIcon[tone],
+                )}
+            >
                 <Icon className="size-5" />
             </div>
             <div className="min-w-0">
-                <p className="truncate text-xs font-bold text-[#78716C]">{label}</p>
-                <p className="text-2xl font-black leading-tight tracking-tight text-[#18181B]">{value}</p>
-                {hint && <p className="truncate text-[11px] font-medium text-[#A8A29E]">{hint}</p>}
+                <p className="truncate text-[11px] font-bold tracking-wide text-[#78716C] uppercase">
+                    {label}
+                </p>
+                <p className="font-mono text-2xl leading-tight font-black tracking-tight text-[#18181B] tabular-nums">
+                    {value}
+                </p>
+                {hint && (
+                    <p className="truncate text-[11px] font-medium text-[#A8A29E]">
+                        {hint}
+                    </p>
+                )}
             </div>
         </div>
     );
 }
 
 export function StatGrid({ children }: { children: ReactNode }) {
-    return <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{children}</div>;
+    return (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{children}</div>
+    );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -138,7 +185,7 @@ export function StatusPill({
     return (
         <span
             className={cn(
-                'inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-bold ring-1 ring-inset',
+                'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-bold whitespace-nowrap ring-1 ring-inset',
                 tonePill[tone],
                 className,
             )}
@@ -173,7 +220,7 @@ export function SearchInput({
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
                 placeholder={placeholder}
-                className="h-10 w-full rounded-xl border border-[#DFCFA9] bg-[#FFFDF9] pr-9 pl-9 text-sm font-medium text-[#18181B] shadow-xs outline-none transition placeholder:text-[#A8A29E] focus:border-[#C52828] focus:ring-3 focus:ring-[#C52828]/15"
+                className="h-10 w-full rounded-xl border border-[#DFCFA9] bg-[#FFFDF9] pr-9 pl-9 text-sm font-medium text-[#18181B] shadow-xs transition outline-none placeholder:text-[#A8A29E] focus:border-[#C52828] focus:ring-3 focus:ring-[#C52828]/15"
             />
             {value && (
                 <button
@@ -226,7 +273,9 @@ export function FilterTabs<T extends string | number>({
                             <span
                                 className={cn(
                                     'rounded-full px-1.5 text-[10px] leading-4 font-black',
-                                    active ? 'bg-white/20 text-white' : 'bg-[#F5EEDC] text-[#5B4126]',
+                                    active
+                                        ? 'bg-white/20 text-white'
+                                        : 'bg-[#F5EEDC] text-[#5B4126]',
                                 )}
                             >
                                 {opt.count}
@@ -260,7 +309,11 @@ export function EmptyState({
                 <Icon className="size-6" />
             </div>
             <p className="text-sm font-bold text-[#18181B]">{title}</p>
-            {description && <p className="mt-1 max-w-sm text-xs font-medium text-[#78716C]">{description}</p>}
+            {description && (
+                <p className="mt-1 max-w-sm text-xs font-medium text-[#78716C]">
+                    {description}
+                </p>
+            )}
             {action && <div className="mt-5">{action}</div>}
         </div>
     );
@@ -326,7 +379,9 @@ export function ToggleField({
         >
             <div>
                 <p className="text-sm font-bold text-[#18181B]">{label}</p>
-                {description && <p className="text-xs text-[#78716C]">{description}</p>}
+                {description && (
+                    <p className="text-xs text-[#78716C]">{description}</p>
+                )}
             </div>
             <button
                 id={id}
@@ -351,28 +406,212 @@ export function ToggleField({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Header dialog form                                                         */
+/* Header dialog form (Gaya Card Modal Pemesanan Meja QRIS)                   */
 /* -------------------------------------------------------------------------- */
 
 export function FormDialogHeader({
     icon: Icon,
     title,
     description,
+    badge = 'SIDE LINE • ADMIN',
+    tag,
+    statusLabel,
+    statusActive = true,
 }: {
     icon: LucideIcon;
     title: string;
     description?: string;
+    badge?: string;
+    tag?: string;
+    statusLabel?: string;
+    statusActive?: boolean;
 }) {
     return (
-        <DialogHeader className="flex-row items-center gap-3 space-y-0 text-left">
-            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-[#FDECEC] text-[#C52828]">
-                <Icon className="size-5" />
+        <div className="space-y-1 pr-10 text-left">
+            <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 rounded-md bg-[#FDECEB] px-2 py-0.5 text-[10px] font-bold tracking-wider text-[#C52828] uppercase">
+                    <Icon className="size-3" />
+                    {badge}
+                </span>
+                {tag && (
+                    <span className="rounded-md bg-[#1A1A1A] px-2 py-0.5 text-[10px] font-bold tracking-wider text-white uppercase">
+                        {tag}
+                    </span>
+                )}
+                {statusLabel && (
+                    <span
+                        className={cn(
+                            'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-bold uppercase',
+                            statusActive
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-neutral-200 text-neutral-700',
+                        )}
+                    >
+                        <span
+                            className={cn(
+                                'size-1.5 rounded-full',
+                                statusActive
+                                    ? 'bg-emerald-500'
+                                    : 'bg-neutral-500',
+                            )}
+                        />
+                        {statusLabel}
+                    </span>
+                )}
             </div>
-            <div className="space-y-0.5">
-                <DialogTitle className="text-base font-extrabold text-[#18181B]">{title}</DialogTitle>
-                {description && <DialogDescription className="text-xs text-[#78716C]">{description}</DialogDescription>}
+            <DialogHeader className="space-y-0.5 text-left">
+                <DialogTitle className="text-[17px] font-bold tracking-tight text-[#1A1A1A] sm:text-lg">
+                    {title}
+                </DialogTitle>
+                {description && (
+                    <DialogDescription className="text-xs text-[#6E6A64]">
+                        {description}
+                    </DialogDescription>
+                )}
+            </DialogHeader>
+        </div>
+    );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Kartu Standee Preview Kiri (Gaya Modal QR Code Meja 2 Kolom)               */
+/* -------------------------------------------------------------------------- */
+
+export function StandeeModalCard({
+    pillPrimary,
+    pillSecondary,
+    topBadgeIcon: TopBadgeIcon,
+    topBadgeLabel = 'PREVIEW',
+    heading,
+    subheading,
+    steps,
+    children,
+    footerSlot,
+    className,
+}: {
+    pillPrimary: string;
+    pillSecondary?: string;
+    topBadgeIcon?: LucideIcon;
+    topBadgeLabel?: string;
+    heading: string;
+    subheading?: string;
+    steps: [
+        { num?: string; label: string },
+        { num?: string; label: string },
+        { num?: string; label: string },
+    ];
+    children: ReactNode;
+    footerSlot?: ReactNode;
+    className?: string;
+}) {
+    return (
+        <div
+            className={cn(
+                'flex w-full shrink-0 flex-col items-center justify-center gap-3 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3.5 shadow-[0_2px_12px_rgba(26,26,26,0.03)] md:w-[295px] lg:w-[310px]',
+                className,
+            )}
+        >
+            <div className="relative flex w-full max-w-[17rem] flex-col items-center overflow-hidden rounded-[1.35rem] border-2 border-[#E2D4B5] bg-[#FFFDF9] shadow-md">
+                {/* Header Brand Café SIDE LINE */}
+                <div className="relative w-full overflow-hidden bg-gradient-to-br from-[#C52828] via-[#B71C1C] to-[#8E1414] px-4 pt-3.5 pb-4 text-center text-white">
+                    <div className="pointer-events-none absolute -top-8 -right-8 size-24 rounded-full bg-[#FBF1CB]/15 blur-lg" />
+                    <div className="pointer-events-none absolute -bottom-8 -left-8 size-20 rounded-full bg-black/15 blur-lg" />
+
+                    <div className="relative z-10 flex flex-col items-center">
+                        <div className="mb-1.5 flex items-center gap-1.5 rounded-full border border-[#FBF1CB]/30 bg-white/10 px-2.5 py-0.5 backdrop-blur-xs">
+                            <Coffee className="size-2.5 text-[#FBF1CB]" />
+                            <span className="text-[8.5px] font-extrabold tracking-[0.2em] text-[#FBF1CB] uppercase">
+                                Café & Roastery
+                            </span>
+                        </div>
+                        <h3 className="font-heading text-xl leading-none font-black tracking-[0.14em] text-white uppercase">
+                            SIDE LINE
+                        </h3>
+                    </div>
+                </div>
+
+                {/* Badge Melayang di Perbatasan Header */}
+                <div className="relative z-20 -mt-3.5 flex flex-col items-center">
+                    <div className="inline-flex items-center gap-1.5 rounded-full border-2 border-[#FFFDF9] bg-[#FBF1CB] px-3.5 py-1 shadow-md">
+                        <span className="size-2 rounded-full bg-[#C52828]" />
+                        <span className="max-w-[7.5rem] truncate font-heading text-xs font-black tracking-[0.08em] text-[#3F2D1C] uppercase">
+                            {pillPrimary}
+                        </span>
+                        {pillSecondary && (
+                            <>
+                                <span className="text-[#C8B58A]">•</span>
+                                <span className="max-w-[5.5rem] truncate text-[9.5px] font-bold text-[#78716C]">
+                                    {pillSecondary}
+                                </span>
+                            </>
+                        )}
+                    </div>
+                </div>
+
+                {/* Area Utama Bingkai Viewfinder & Konten Preview */}
+                <div className="flex w-full flex-col items-center gap-3 px-4 pt-3 pb-3.5">
+                    <div className="relative mt-0.5 rounded-2xl border border-[#E8DFC8] bg-gradient-to-b from-white to-[#FAF6EC] p-3 shadow-sm">
+                        {/* Label Pill Atas Bingkai */}
+                        <div className="absolute -top-2 left-1/2 z-10 -translate-x-1/2">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-[#C52828] px-2.5 py-0.5 text-[8.5px] font-extrabold tracking-widest whitespace-nowrap text-white uppercase shadow-xs">
+                                {TopBadgeIcon && (
+                                    <TopBadgeIcon className="size-2.5" />
+                                )}
+                                {topBadgeLabel}
+                            </span>
+                        </div>
+
+                        {/* 4 Siku Viewfinder Kamera (#C52828) */}
+                        <span className="pointer-events-none absolute top-1.5 left-1.5 size-4 rounded-tl-lg border-t-[3px] border-l-[3px] border-[#C52828]" />
+                        <span className="pointer-events-none absolute top-1.5 right-1.5 size-4 rounded-tr-lg border-t-[3px] border-r-[3px] border-[#C52828]" />
+                        <span className="pointer-events-none absolute bottom-1.5 left-1.5 size-4 rounded-bl-lg border-b-[3px] border-l-[3px] border-[#C52828]" />
+                        <span className="pointer-events-none absolute right-1.5 bottom-1.5 size-4 rounded-br-lg border-r-[3px] border-b-[3px] border-[#C52828]" />
+
+                        {/* Isi Bingkai */}
+                        <div className="relative overflow-hidden rounded-xl border border-[#EFE5CF] bg-white p-1.5 shadow-2xs">
+                            {children}
+                        </div>
+                    </div>
+
+                    {/* Teks Judul & Subjudul */}
+                    <div className="space-y-0.5 px-1 text-center">
+                        <p className="line-clamp-1 font-heading text-sm font-black tracking-tight text-[#18181B]">
+                            {heading}
+                        </p>
+                        {subheading && (
+                            <p className="line-clamp-2 text-[10px] leading-snug font-medium text-[#78716C]">
+                                {subheading}
+                            </p>
+                        )}
+                    </div>
+
+                    {/* 3 Kotak Info/Langkah Visual */}
+                    <div className="grid w-full grid-cols-3 gap-1 rounded-xl border border-[#E8DFC8] bg-[#FAF6EC] p-1.5 text-center">
+                        {steps.map((step, idx) => (
+                            <div
+                                key={idx}
+                                className="flex min-w-0 flex-col items-center gap-0.5 rounded-lg bg-[#FFFDF9] px-1 py-1 shadow-2xs"
+                            >
+                                <span className="text-[8.5px] font-black text-[#C52828]">
+                                    {step.num ?? `0${idx + 1}`}
+                                </span>
+                                <span className="w-full truncate text-[9.5px] leading-tight font-bold text-[#18181B]">
+                                    {step.label}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Footer Kartu Standee */}
+                <div className="flex w-full items-center justify-center gap-1.5 border-t border-[#E8DFC8] bg-[#FAF5E8] px-3 py-1.5 text-[8.5px] font-extrabold tracking-[0.16em] text-[#78716C] uppercase">
+                    <Sparkles className="size-2 text-[#C52828]" />
+                    <span>SIDEORDER • DIGITAL MENU</span>
+                </div>
             </div>
-        </DialogHeader>
+
+            {footerSlot}
+        </div>
     );
 }
 
@@ -383,7 +622,7 @@ export function FieldError({ message }: { message?: string }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Dialog konfirmasi hapus                                                    */
+/* Dialog konfirmasi hapus (Gaya Card Modal Pemesanan Meja QRIS)              */
 /* -------------------------------------------------------------------------- */
 
 export function ConfirmDialog({
@@ -405,35 +644,100 @@ export function ConfirmDialog({
 }) {
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="rounded-2xl border border-[#E8DFC8] bg-[#FFFDF9] sm:max-w-sm">
-                <div className="flex flex-col items-center gap-3 pt-2 text-center">
-                    <div className="flex size-14 items-center justify-center rounded-full bg-[#FEE2E2] text-[#B91C1C] ring-8 ring-[#FEF2F2]">
-                        <AlertTriangle className="size-6" />
+            <DialogContent className="flex w-full max-w-2xl flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl">
+                {/* Sticky Top Header ala QRIS Card Modal */}
+                <div className="shrink-0 border-b border-[#EBE5DC] bg-[#FAF8F4] px-5 pt-4 pr-14 pb-3.5">
+                    <div className="mb-1 flex items-center gap-1.5">
+                        <span className="inline-flex items-center gap-1 rounded-md bg-[#FDECEB] px-2 py-0.5 text-[10px] font-bold tracking-wider text-[#C52828] uppercase">
+                            <AlertTriangle className="size-3" />
+                            Konfirmasi Tindakan
+                        </span>
+                        <span className="rounded-md bg-[#1A1A1A] px-2 py-0.5 text-[10px] font-bold tracking-wider text-white uppercase">
+                            SIDE LINE
+                        </span>
+                        <span className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 uppercase">
+                            <span className="size-1.5 rounded-full bg-amber-500" />
+                            Perhatian
+                        </span>
                     </div>
-                    <DialogHeader className="items-center text-center">
-                        <DialogTitle className="text-base font-extrabold text-[#18181B]">{title}</DialogTitle>
-                        <DialogDescription className="text-sm text-[#78716C]">{description}</DialogDescription>
+                    <DialogHeader className="space-y-0.5 text-left">
+                        <DialogTitle className="text-[17px] font-bold tracking-tight text-[#1A1A1A] sm:text-lg">
+                            {title}
+                        </DialogTitle>
+                        <DialogDescription className="text-xs text-[#6E6A64]">
+                            Pastikan kembali sebelum melanjutkan tindakan ini.
+                        </DialogDescription>
                     </DialogHeader>
                 </div>
-                <DialogFooter className="mt-2 gap-2 sm:justify-center">
-                    <Button
-                        type="button"
-                        variant="outline"
-                        className="rounded-xl border-[#DFCFA9] bg-white font-semibold text-[#18181B] hover:bg-[#FAF5E8] sm:flex-1"
-                        onClick={() => onOpenChange(false)}
-                        disabled={processing}
-                    >
-                        Batal
-                    </Button>
-                    <Button
-                        type="button"
-                        className="rounded-xl bg-[#C52828] font-bold text-white hover:bg-[#A81E1E] sm:flex-1"
-                        onClick={onConfirm}
-                        disabled={processing}
-                    >
-                        {processing ? 'Memproses...' : confirmLabel}
-                    </Button>
-                </DialogFooter>
+
+                {/* Inner Card Body 2-Bagian ala QRIS Card Modal */}
+                <div className="space-y-3.5 bg-[#FAF8F4] p-4 sm:p-5">
+                    <div className="flex items-center justify-between rounded-xl bg-[#1A1A1A] p-3.5 text-white shadow-sm">
+                        <div className="flex items-center gap-3">
+                            <div className="flex size-10 items-center justify-center rounded-lg bg-[#C52828] text-xs font-black tracking-tight text-white">
+                                <AlertTriangle className="size-5" />
+                            </div>
+                            <div>
+                                <p className="text-xs font-bold tracking-wide text-white uppercase">
+                                    SIDE LINE COFFEE • OTORISASI ADMIN
+                                </p>
+                                <p className="text-[10px] text-white/60">
+                                    Tindakan bersifat permanen & langsung
+                                    diperbarui di sistem
+                                </p>
+                            </div>
+                        </div>
+                        <div className="text-right">
+                            <p className="text-[10px] font-medium text-white/60">
+                                Status
+                            </p>
+                            <p className="text-xs font-black text-amber-400 uppercase">
+                                Konfirmasi
+                            </p>
+                        </div>
+                    </div>
+
+                    <div className="space-y-2 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-4 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
+                        <div className="flex items-center justify-between text-xs font-bold text-[#1A1A1A]">
+                            <span className="flex items-center gap-1.5">
+                                <Sparkles className="size-3.5 text-[#C52828]" />
+                                Detail Konfirmasi Tindakan
+                            </span>
+                            <span className="font-mono text-[10px] text-[#6E6A64]">
+                                Verifikasi Admin
+                            </span>
+                        </div>
+                        <div className="rounded-xl border border-[#EBE5DC] bg-[#FAF8F4] p-3 text-xs leading-relaxed text-[#4A4640]">
+                            {description}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Sticky Footer Action Bar ala QRIS Card Modal */}
+                <div className="flex shrink-0 items-center justify-between gap-2.5 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 px-5 py-3.5">
+                    <span className="hidden text-[11px] font-semibold text-[#6E6A64] sm:inline">
+                        Tindakan ini memerlukan konfirmasi Anda
+                    </span>
+                    <div className="ml-auto flex items-center gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="h-11 cursor-pointer rounded-xl border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-bold text-[#1A1A1A] hover:bg-[#F3EFE6]"
+                            onClick={() => onOpenChange(false)}
+                            disabled={processing}
+                        >
+                            Batal
+                        </Button>
+                        <Button
+                            type="button"
+                            className="h-11 cursor-pointer gap-2 rounded-xl bg-[#C52828] px-5 text-xs font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] hover:bg-[#B02222]"
+                            onClick={onConfirm}
+                            disabled={processing}
+                        >
+                            {processing ? 'Memproses...' : confirmLabel}
+                        </Button>
+                    </div>
+                </div>
             </DialogContent>
         </Dialog>
     );

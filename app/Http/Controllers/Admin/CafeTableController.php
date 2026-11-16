@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\CafeTableRequest;
 use App\Models\CafeTable;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\Cache;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -35,6 +36,7 @@ class CafeTableController extends Controller
         $validated['is_active'] = $request->boolean('is_active', true);
 
         CafeTable::create($validated);
+        Cache::forget('active_tables_count');
 
         return back()->with('success', 'Meja baru berhasil ditambahkan.');
     }
@@ -48,6 +50,7 @@ class CafeTableController extends Controller
         $validated['is_active'] = $request->boolean('is_active', true);
 
         $table->update($validated);
+        Cache::forget('active_tables_count');
 
         return back()->with('success', 'Data meja berhasil diperbarui.');
     }
@@ -62,6 +65,7 @@ class CafeTableController extends Controller
         }
 
         $table->delete();
+        Cache::forget('active_tables_count');
 
         return back()->with('success', 'Meja berhasil dihapus.');
     }

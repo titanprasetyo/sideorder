@@ -2,12 +2,12 @@
 
 namespace App\Http\Controllers\Admin;
 
-use App\Events\OrderItemRejected;
 use App\Events\OrderStatusUpdated;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
-use App\Models\OrderItem;
 use App\Models\OrderStatusHistory;
+use App\Services\Payments\PaymentService;
+use App\Services\Stock\MenuStockService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -19,6 +19,11 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class OrderController extends Controller
 {
+    public function __construct(
+        private readonly PaymentService $paymentService,
+        private readonly MenuStockService $menuStockService,
+    ) {}
+
     /**
      * Menampilkan daftar pesanan untuk panel Administrator dengan filter lengkap.
      */
@@ -49,7 +54,7 @@ class OrderController extends Controller
             session_write_close();
         }
 
-        return response()->stream(function () use ($request) {
+        return response()->stream(function () use ($request): void {
             $data = $this->getAdminOrdersData($request);
             echo "retry: 2000\n";
             echo "event: sync\n";
@@ -59,7 +64,7 @@ class OrderController extends Controller
             }
             flush();
         }, 200, [
-            'Content-Type' => 'text/event-stream ',
+            'Content-Type' => 'text/event-stream',
             'Cache-Control' => 'no-cache, no-transform',
             'Connection' => 'keep-alive',
             'X-Accel-Buffering' => 'no',
@@ -68,22 +73,29 @@ class OrderController extends Controller
 
     /**
      * Helper query data pesanan admin dengan kalkulasi agregasi tunggal.
+     *
+     * @return array<string, mixed>
      */
     private function getAdminOrdersData(Request $request): array
     {
         @set_time_limit(60);
 
-        $statusFilter = $request->query('status', 'all');
-        $paymentFilter = $request->query('payment', 'all');
-        $dateFilter = $request->query('date', 'today'); // 'today', 'yesterday', 'this_week', 'this_month', 'all'
-        $search = $request->query('search', '');
+        $statusFilter = (string) $request->query('status', 'all');
+        $paymentFilter = (string) $request->query('payment', 'all');
+        $dateFilter = (string) $request->query('date', 'today'); // 'today', 'yesterday', 'this_week', 'this_month', 'all'
+        $search = (string) $request->query('search', '');
 
         $todayStart = Carbon::today()->startOfDay();
         $todayEnd = Carbon::today()->endOfDay();
         $yesterdayStart = Carbon::yesterday()->startOfDay();
         $yesterdayEnd = Carbon::yesterday()->endOfDay();
+        $weekStart = Carbon::now()->startOfWeek();
+        $weekEnd = Carbon::now()->endOfWeek();
+        $monthStart = Carbon::now()->startOfMonth();
+        $monthEnd = Carbon::now()->endOfMonth();
 
         // 1. Single Aggregation untuk Ringkasan Global
+        /** @var object{total_all_time?: int|string, today_orders?: int|string, yesterday_orders?: int|string, today_revenue?: float|string}|null $globalMetrics */
         $globalMetrics = DB::table('orders')
             ->selectRaw("
                 COUNT(id) as total_all_time,
@@ -107,12 +119,13 @@ class OrderController extends Controller
         } elseif ($dateFilter === 'yesterday') {
             $dateQuery->whereBetween('created_at', [$yesterdayStart, $yesterdayEnd]);
         } elseif ($dateFilter === 'this_week') {
-            $dateQuery->whereBetween('created_at', [Carbon::now()->startOfWeek(), Carbon::now()->endOfWeek()]);
+            $dateQuery->whereBetween('created_at', [$weekStart, $weekEnd]);
         } elseif ($dateFilter === 'this_month') {
-            $dateQuery->whereBetween('created_at', [Carbon::now()->startOfMonth(), Carbon::now()->endOfMonth()]);
+            $dateQuery->whereBetween('created_at', [$monthStart, $monthEnd]);
         }
 
         // 3. Single Aggregation untuk Badge Tab Status
+        /** @var object{all_count?: int|string, pending?: int|string, processing?: int|string, ready?: int|string, completed?: int|string, cancelled?: int|string, unpaid?: int|string}|null $tabMetrics */
         $tabMetrics = (clone $dateQuery)
             ->selectRaw("
                 COUNT(id) as all_count,
@@ -126,7 +139,7 @@ class OrderController extends Controller
             ->first();
 
         // 4. Query Pesanan Utama dengan Relasi Ringkas
-        $query = (clone $dateQuery)->with(['table', 'items.options', 'items.rejectedByUser', 'statusHistories.user'])
+        $query = (clone $dateQuery)->with(['table', 'items.options', 'items.rejectedByUser', 'latestPayment'])
             ->latest();
 
         // Filter Status Pesanan
@@ -140,47 +153,18 @@ class OrderController extends Controller
         }
 
         // Filter Pencarian (kompatibel PostgreSQL & SQLite)
-        if (! empty($search)) {
+        if (trim($search) !== '') {
             $likeTerm = '%'.strtolower(trim($search)).'%';
-            $query->where(function ($q) use ($likeTerm) {
+            $query->where(function ($q) use ($likeTerm): void {
                 $q->whereRaw('LOWER(order_number) LIKE ?', [$likeTerm])
                     ->orWhereRaw('LOWER(customer_name) LIKE ?', [$likeTerm])
-                    ->orWhereHas('table', function ($t) use ($likeTerm) {
+                    ->orWhereHas('table', function ($t) use ($likeTerm): void {
                         $t->whereRaw('LOWER(table_number) LIKE ?', [$likeTerm]);
                     });
             });
         }
 
         $orders = $query->paginate(25)->withQueryString();
-
-        // Riwayat Penolakan Menu untuk Admin
-        $rejectionsQuery = OrderItem::with(['order.table', 'rejectedByUser', 'options'])
-            ->where('status', 'rejected');
-
-        if ($dateFilter === 'today') {
-            $rejectionsQuery->whereBetween('rejected_at', [$todayStart, $todayEnd]);
-        }
-
-        $rejections = $rejectionsQuery->latest('rejected_at')->limit(50)->get()->map(function ($item) {
-            $optLabels = $item->options && $item->options->isNotEmpty()
-                ? ' ('.$item->options->pluck('option_name')->join(', ').')'
-                : '';
-
-            return [
-                'id' => $item->id,
-                'order_id' => $item->order_id,
-                'order_number' => $item->order ? $item->order->order_number : '-',
-                'table_number' => $item->order && $item->order->table ? $item->order->table->table_number : '00',
-                'customer_name' => $item->order ? $item->order->customer_name : 'Pelanggan',
-                'menu_name' => $item->menu_name.$optLabels,
-                'quantity' => $item->quantity,
-                'unit_price' => (float) $item->unit_price,
-                'total_price' => (float) $item->total_price,
-                'rejection_reason' => $item->rejection_reason ?? 'Stok bahan habis / Ditolak kasir',
-                'rejected_at' => $item->rejected_at ? $item->rejected_at->toIso8601String() : null,
-                'cashier_name' => $item->rejectedByUser ? $item->rejectedByUser->name : 'Staf',
-            ];
-        });
 
         $counts = [
             'all' => (int) ($tabMetrics->all_count ?? 0),
@@ -190,7 +174,6 @@ class OrderController extends Controller
             'completed' => (int) ($tabMetrics->completed ?? 0),
             'cancelled' => (int) ($tabMetrics->cancelled ?? 0),
             'unpaid' => (int) ($tabMetrics->unpaid ?? 0),
-            'rejections' => $rejections->count(),
             'today_orders' => (int) ($globalMetrics->today_orders ?? 0),
             'yesterday_orders' => (int) ($globalMetrics->yesterday_orders ?? 0),
             'today_revenue' => (float) ($globalMetrics->today_revenue ?? 0),
@@ -200,7 +183,6 @@ class OrderController extends Controller
         return [
             'orders' => $orders,
             'counts' => $counts,
-            'rejections' => $rejections,
             'filters' => [
                 'status' => $statusFilter,
                 'payment' => $paymentFilter,
@@ -225,12 +207,9 @@ class OrderController extends Controller
      */
     public function updateStatus(Request $request, Order $order): RedirectResponse
     {
-        if ($order->order_status === 'completed') {
-            return back()->with('error', "Pesanan #{$order->order_number} sudah selesai dan tidak dapat diproses ulang.");
-        }
-
-        if ($order->order_status === 'cancelled') {
-            return back()->with('error', "Pesanan #{$order->order_number} sudah dibatalkan dan tidak dapat diproses ulang.");
+        $user = $request->user();
+        if (! $user) {
+            abort(403);
         }
 
         $validated = $request->validate([
@@ -238,140 +217,140 @@ class OrderController extends Controller
             'notes' => ['nullable', 'string', 'max:255'],
         ]);
 
+        $newStatus = (string) $validated['status'];
         $oldStatus = $order->order_status;
-        $newStatus = $validated['status'];
+        $blockedError = null;
 
-        DB::transaction(function () use ($request, $order, $oldStatus, $newStatus, $validated) {
-            $order->update([
+        DB::transaction(function () use ($user, $order, &$oldStatus, $newStatus, $validated, &$blockedError): void {
+            /** @var Order $lockedOrder */
+            $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+            $oldStatus = $lockedOrder->order_status;
+
+            if ($lockedOrder->order_status === 'completed') {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} sudah selesai dan tidak dapat diproses ulang.";
+
+                return;
+            }
+
+            if ($lockedOrder->order_status === 'cancelled') {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} sudah dibatalkan dan tidak dapat diproses ulang.";
+
+                return;
+            }
+
+            if ($newStatus === 'cancelled' && $lockedOrder->hasAnySettlement()) {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} sudah memiliki pembayaran lunas dan tidak dapat dibatalkan maupun di-refund.";
+
+                return;
+            }
+
+            if ($newStatus === 'completed' && $lockedOrder->payment_status !== 'paid') {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} belum lunas. Konfirmasi pembayaran terlebih dahulu melalui Kasir.";
+
+                return;
+            }
+
+            $lockedOrder->update([
                 'order_status' => $newStatus,
             ]);
 
-            $auditNote = $validated['notes'] ?? "Status pesanan diubah dari {$oldStatus} ke {$newStatus} oleh Admin {$request->user()->name}";
+            if ($newStatus === 'cancelled') {
+                $this->menuStockService->releaseUnsettledOrderStock($lockedOrder);
+            }
+
+            $auditNote = $validated['notes'] ?? "Status pesanan diubah dari {$oldStatus} ke {$newStatus} oleh Admin {$user->name}";
 
             OrderStatusHistory::create([
-                'order_id' => $order->id,
-                'user_id' => $request->user()->id,
+                'order_id' => $lockedOrder->id,
+                'user_id' => $user->id,
                 'status' => $newStatus,
                 'notes' => $auditNote,
             ]);
         });
 
+        if ($blockedError !== null) {
+            return back()->with('error', $blockedError);
+        }
+
+        $order->refresh();
+
         try {
             event(new OrderStatusUpdated($order, $oldStatus, $newStatus));
-        } catch (\Throwable $e) {
+        } catch (\Throwable) {
         }
 
         return back()->with('success', "Status Pesanan #{$order->order_number} berhasil diubah.");
     }
 
     /**
-     * Menolak item menu oleh Administrator.
-     */
-    public function rejectItem(Request $request, Order $order, OrderItem $item): RedirectResponse
-    {
-        if ($item->order_id !== $order->id) {
-            return back()->with('error', 'Item menu tidak sesuai dengan pesanan.');
-        }
-
-        if ($order->order_status === 'completed' || $order->order_status === 'cancelled') {
-            return back()->with('error', "Tidak dapat menolak menu pada pesanan yang sudah {$order->order_status}.");
-        }
-
-        if ($item->status === 'rejected') {
-            return back()->with('info', "Menu {$item->menu_name} sudah berstatus ditolak sebelumnya.");
-        }
-
-        $validated = $request->validate([
-            'reason' => ['required', 'string', 'max:500'],
-        ]);
-
-        DB::transaction(function () use ($request, $order, $item, $validated) {
-            $item->update([
-                'status' => 'rejected',
-                'rejection_reason' => $validated['reason'],
-                'rejected_at' => now(),
-                'rejected_by' => $request->user()->id,
-            ]);
-
-            $activeItems = $order->items()->where('status', 'active')->get();
-            $newSubtotal = (float) $activeItems->sum('total_price');
-
-            if ($activeItems->isEmpty()) {
-                $order->update([
-                    'order_status' => 'cancelled',
-                    'subtotal' => 0,
-                    'total_amount' => 0,
-                ]);
-
-                OrderStatusHistory::create([
-                    'order_id' => $order->id,
-                    'user_id' => $request->user()->id,
-                    'status' => 'cancelled',
-                    'notes' => "Pesanan otomatis dibatalkan oleh Admin {$request->user()->name} karena semua menu ditolak. Alasan: {$validated['reason']}",
-                ]);
-            } else {
-                $previouslySettled = $order->getSettledAmount();
-                $updateOrderPayload = [
-                    'subtotal' => $newSubtotal,
-                    'total_amount' => $newSubtotal,
-                ];
-
-                if ($order->paid_at !== null && $order->payment_status === 'unpaid' && $previouslySettled >= $newSubtotal && $newSubtotal > 0) {
-                    $updateOrderPayload['payment_status'] = 'paid';
-                }
-
-                $order->update($updateOrderPayload);
-
-                OrderStatusHistory::create([
-                    'order_id' => $order->id,
-                    'user_id' => $request->user()->id,
-                    'status' => $order->order_status,
-                    'notes' => "Menu '{$item->menu_name}' (x{$item->quantity}) ditolak oleh Admin {$request->user()->name}. Alasan: {$validated['reason']}. Total tagihan diperbarui menjadi Rp ".number_format($newSubtotal, 0, ',', '.'),
-                ]);
-            }
-        });
-
-        try {
-            event(new OrderItemRejected($order, $item));
-        } catch (\Throwable $e) {
-        }
-
-        return back()->with('success', "Menu {$item->menu_name} berhasil ditolak.");
-    }
-
-    /**
-     * Batalkan pesanan.
+     * Batalkan pesanan yang belum dibayar.
      */
     public function destroy(Request $request, Order $order): RedirectResponse
     {
-        if ($order->order_status === 'completed') {
-            return back()->with('error', "Pesanan #{$order->order_number} sudah selesai dan tidak dapat dibatalkan.");
+        $user = $request->user();
+        if (! $user) {
+            abort(403);
         }
 
-        DB::transaction(function () use ($request, $order) {
-            $order->update([
+        $oldStatus = $order->order_status;
+        $blockedError = null;
+
+        DB::transaction(function () use ($user, $order, &$oldStatus, &$blockedError): void {
+            /** @var Order $lockedOrder */
+            $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+            $oldStatus = $lockedOrder->order_status;
+
+            if ($lockedOrder->order_status === 'completed') {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} sudah selesai dan tidak dapat dibatalkan.";
+
+                return;
+            }
+
+            if ($lockedOrder->order_status === 'cancelled') {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} sudah dibatalkan sebelumnya.";
+
+                return;
+            }
+
+            if ($lockedOrder->hasAnySettlement()) {
+                $blockedError = "Pesanan #{$lockedOrder->order_number} sudah dibayar dan tidak dapat dibatalkan maupun di-refund.";
+
+                return;
+            }
+
+            $this->menuStockService->releaseUnsettledOrderStock($lockedOrder);
+
+            $lockedOrder->update([
                 'order_status' => 'cancelled',
+                'subtotal' => 0,
+                'total_amount' => 0,
             ]);
 
             // Tandai seluruh item yang masih aktif sebagai ditolak/dibatalkan
-            $order->items()->where('status', 'active')->update([
+            $lockedOrder->items()->where('status', 'active')->update([
                 'status' => 'rejected',
                 'rejection_reason' => 'Dibatalkan oleh Administrator',
                 'rejected_at' => now(),
-                'rejected_by' => $request->user()->id,
+                'rejected_by' => $user->id,
             ]);
 
             OrderStatusHistory::create([
-                'order_id' => $order->id,
-                'user_id' => $request->user()->id,
+                'order_id' => $lockedOrder->id,
+                'user_id' => $user->id,
                 'status' => 'cancelled',
-                'notes' => "Pesanan dibatalkan oleh Administrator {$request->user()->name}",
+                'notes' => "Pesanan belum bayar dibatalkan oleh Administrator {$user->name}",
             ]);
         });
 
+        if ($blockedError !== null) {
+            return back()->with('error', $blockedError);
+        }
+
+        $order->refresh();
+
         try {
-            event(new OrderStatusUpdated($order, $order->order_status, 'cancelled'));
-        } catch (\Throwable $e) {
+            event(new OrderStatusUpdated($order, $oldStatus, 'cancelled'));
+        } catch (\Throwable) {
         }
 
         return back()->with('success', "Pesanan #{$order->order_number} berhasil dibatalkan.");

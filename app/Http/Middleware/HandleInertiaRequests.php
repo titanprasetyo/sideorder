@@ -35,11 +35,26 @@ class HandleInertiaRequests extends Middleware
      */
     public function share(Request $request): array
     {
+        $driver = (string) config('services.payment_gateway.default_driver', 'xendit');
+        $xenditConfigured = ! empty(config('services.xendit.secret_key'));
+
         return [
             ...parent::share($request),
             'name' => config('app.name'),
             'auth' => [
                 'user' => $request->user(),
+            ],
+            'flash' => [
+                'success' => fn () => $request->session()->get('success'),
+                'error' => fn () => $request->session()->get('error'),
+                'info' => fn () => $request->session()->get('info'),
+                'toast' => fn () => $request->session()->get('toast'),
+            ],
+            'paymentGateway' => [
+                'driver' => $driver,
+                'label' => $driver === 'midtrans' ? 'Midtrans Snap' : 'Xendit Payment Gateway',
+                'isConfigured' => $xenditConfigured,
+                'mode' => $xenditConfigured && config('services.xendit.is_production', false) ? 'production' : 'sandbox',
             ],
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];
