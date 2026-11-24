@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Admin\CafeTableController;
 use App\Http\Controllers\Admin\CategoryController;
+use App\Http\Controllers\Admin\ExpenseController;
 use App\Http\Controllers\Admin\FinancialReportController;
 use App\Http\Controllers\Admin\LocationSettingController;
 use App\Http\Controllers\Admin\MenuController;
@@ -20,16 +21,24 @@ Route::inertia('/', 'welcome')->name('home');
 Route::get('order', [CustomerOrderController::class, 'index'])->name('order.index');
 Route::post('order/verify-location', [CustomerOrderController::class, 'verifyLocation'])->name('order.verify-location');
 Route::get('order/stock-sync', [CustomerOrderController::class, 'stockSync'])->name('order.stock-sync');
-Route::post('order/checkout', [CustomerOrderController::class, 'checkout'])->name('order.checkout');
+Route::post('order/checkout', [CustomerOrderController::class, 'checkout'])
+    ->middleware('throttle:60,1')
+    ->name('order.checkout');
 Route::get('order/status/{order_number}', [CustomerOrderController::class, 'status'])->name('order.status');
 Route::get('order/payment/{order_number}', [CustomerOrderController::class, 'payment'])->name('order.payment');
 Route::get('order/check-payment/{order_number}', [CustomerOrderController::class, 'checkPayment'])->name('order.check-payment');
-Route::post('order/simulate-payment/{order_number}', [CustomerOrderController::class, 'simulatePayment'])->name('order.simulate-payment');
-Route::post('order/switch-payment-method/{order_number}', [CustomerOrderController::class, 'switchPaymentMethod'])->name('order.switch-payment-method');
+Route::post('order/simulate-payment/{order_number}', [CustomerOrderController::class, 'simulatePayment'])
+    ->middleware('throttle:60,1')
+    ->name('order.simulate-payment');
+Route::post('order/switch-payment-method/{order_number}', [CustomerOrderController::class, 'switchPaymentMethod'])
+    ->middleware('throttle:60,1')
+    ->name('order.switch-payment-method');
 
 // RUTE TERPISAH PAYMENT GATEWAY (Xendit / Midtrans Slot & Terverifikasi Webhook)
 Route::prefix('payments')->name('payments.')->group(function () {
-    Route::post('orders/{order_number}/initiate', [PaymentController::class, 'initiate'])->name('initiate');
+    Route::post('orders/{order_number}/initiate', [PaymentController::class, 'initiate'])
+        ->middleware('throttle:60,1')
+        ->name('initiate');
     Route::get('orders/{order_number}/status', [PaymentController::class, 'status'])->name('status');
     Route::post('webhook/{driver?}', [PaymentWebhookController::class, 'handle'])->name('webhook');
 });
@@ -51,6 +60,7 @@ Route::middleware(['auth', 'role:admin,cashier'])->prefix('cashier')->name('cash
     Route::get('orders/stream', [CashierOrderController::class, 'stream'])->name('orders.stream');
     Route::post('orders/{order}/confirm-payment', [CashierOrderController::class, 'confirmPayment'])->name('orders.confirm-payment');
     Route::post('orders/{order}/update-status', [CashierOrderController::class, 'updateStatus'])->name('orders.update-status');
+    Route::post('orders/{order}/items/{item}/toggle-served', [CashierOrderController::class, 'toggleItemServed'])->name('orders.items.toggle-served');
 });
 
 // Rute Khusus Administrator SIDE LINE (Hanya Admin)
@@ -61,6 +71,7 @@ Route::middleware(['auth', 'role:admin'])->prefix('admin')->name('admin.')->grou
     Route::get('orders/stream', [AdminOrderController::class, 'stream'])->name('orders.stream');
     Route::post('orders/{order}/confirm-payment', [AdminOrderController::class, 'confirmPayment'])->name('orders.confirm-payment');
     Route::post('orders/{order}/update-status', [AdminOrderController::class, 'updateStatus'])->name('orders.update-status');
+    Route::post('orders/{order}/items/{item}/toggle-served', [AdminOrderController::class, 'toggleItemServed'])->name('orders.items.toggle-served');
     Route::delete('orders/{order}', [AdminOrderController::class, 'destroy'])->name('orders.destroy');
 
     // Laporan Keuangan & Analitik Pendapatan Admin
@@ -69,9 +80,11 @@ Route::middleware(['auth', 'role:admin'])->prefix('admin')->name('admin.')->grou
     Route::get('financial-reports/export/excel', [FinancialReportController::class, 'exportExcel'])->name('financial-reports.export.excel');
     Route::get('financial-reports/export/csv', [FinancialReportController::class, 'exportCsv'])->name('financial-reports.export.csv');
     Route::get('financial-reports/export/pdf', [FinancialReportController::class, 'exportPdf'])->name('financial-reports.export.pdf');
+    Route::resource('expenses', ExpenseController::class)->only(['store', 'update', 'destroy']);
 
     Route::resource('categories', CategoryController::class)->only(['index', 'store', 'update', 'destroy']);
     Route::post('menus/size-icons', [MenuController::class, 'updateSizeIcons'])->name('menus.size-icons');
+    Route::post('menus/{menu}/stock', [MenuController::class, 'updateStock'])->name('menus.stock');
     Route::resource('menus', MenuController::class)->only(['index', 'store', 'update', 'destroy']);
     Route::resource('tables', CafeTableController::class)->only(['index', 'store', 'update', 'destroy']);
     Route::post('tables/{table}/regenerate-token', [CafeTableController::class, 'regenerateToken'])->name('tables.regenerate-token');

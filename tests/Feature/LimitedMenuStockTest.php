@@ -8,6 +8,7 @@ use App\Models\Menu;
 use App\Models\MenuOptionGroup;
 use App\Models\MenuOptionItem;
 use App\Models\Order;
+use App\Models\Payment;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
@@ -249,6 +250,7 @@ test('cashier payment confirmation marks reserved stock confirmed without double
     $this->post(route('order.checkout'), [
         'qr_token' => $this->tableA->qr_token,
         'customer_name' => 'Sari',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $this->limitedMenu->id,
@@ -368,6 +370,7 @@ test('expired additional payment on tambah menu order releases newly added reser
     $this->post(route('order.checkout'), [
         'qr_token' => $this->tableA->qr_token,
         'customer_name' => 'Adit Initial',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $this->limitedMenu->id,
@@ -564,7 +567,7 @@ test('stock sync endpoint returns live limited stock flags and remaining quantit
         ->assertOk()
         ->assertJsonStructure([
             'menus' => [
-                '*' => ['id', 'is_active', 'is_limited_stock', 'stock_quantity'],
+                '*' => ['id', 'is_active', 'is_limited_stock', 'stock_quantity', 'is_stock_expired'],
             ],
             'synced_at',
         ]);
@@ -573,6 +576,193 @@ test('stock sync endpoint returns live limited stock flags and remaining quantit
 
     expect($menus[$this->limitedMenu->id]['is_limited_stock'])->toBeTrue()
         ->and($menus[$this->limitedMenu->id]['stock_quantity'])->toBe(5)
+        ->and($menus[$this->limitedMenu->id]['is_stock_expired'])->toBeFalse()
         ->and($menus[$this->unlimitedMenu->id]['is_limited_stock'])->toBeFalse()
-        ->and($menus[$this->unlimitedMenu->id]['stock_quantity'])->toBe(0);
+        ->and($menus[$this->unlimitedMenu->id]['stock_quantity'])->toBe(0)
+        ->and($menus[$this->unlimitedMenu->id]['is_stock_expired'])->toBeFalse();
+});
+
+test('expired daily stock displays as habis to customer, blocks checkout, and recovers when admin updates stock', function () {
+    // Simulasikan Admin lupa update stok hari ini (terakhir diperbarui kemarin WIB, masa berlaku 1 hari)
+    $this->limitedMenu->update([
+        'stock_valid_days' => 1,
+        'stock_updated_at' => now('Asia/Jakarta')->subDay()->setTime(9, 0),
+    ]);
+
+    $freshMenu = $this->limitedMenu->fresh();
+    expect($freshMenu->hasExpiredStock())->toBeTrue()
+        ->and($freshMenu->resolveEffectiveStockQuantity())->toBe(0)
+        ->and((int) $freshMenu->stock_quantity)->toBe(5);
+
+    // Halaman customer melihat stok efektif 0 (Habis) + is_stock_expired = true
+    $syncResponse = $this->getJson(route('order.stock-sync'))->assertOk();
+    $synced = collect($syncResponse->json('menus'))->keyBy('id');
+    expect($synced[$this->limitedMenu->id]['stock_quantity'])->toBe(0)
+        ->and($synced[$this->limitedMenu->id]['is_stock_expired'])->toBeTrue();
+
+    // Tampilan Inertia meja customer juga menerima stok 0 (Habis) tanpa mengubah angka DB
+    $this->get(route('order.index', ['table' => $this->tableA->qr_token]))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->where('categories.0.menus.0.stock_quantity', 0)
+            ->where('categories.0.menus.0.is_stock_expired', true)
+        );
+    expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(5);
+
+    // Checkout diblokir saat stok kedaluwarsa
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->tableA->qr_token,
+        'customer_name' => 'Raka',
+        'items' => [
+            [
+                'menu_id' => $this->limitedMenu->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$this->optionHot->id],
+            ],
+        ],
+    ])->assertSessionHasErrors('items.0.quantity');
+
+    // Dashboard Ringkasan & Manajemen Sistem menampilkan pengingat update stok
+    $this->actingAs($this->admin)
+        ->get(route('dashboard'))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->where('alerts.expired_stock_count', 1)
+            ->where('alerts.expired_stock_menus.0.id', $this->limitedMenu->id)
+        );
+
+    $this->actingAs($this->admin)
+        ->get(route('admin.location-settings.edit', ['tab' => 'system']))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->where('systemHealth.expired_stock_menus.0.id', $this->limitedMenu->id)
+        );
+
+    // Admin melakukan Update Stok Cepat (misal 8 porsi, berlaku 3 hari)
+    $this->actingAs($this->admin)
+        ->post(route('admin.menus.stock', $this->limitedMenu), [
+            'stock_quantity' => 8,
+            'stock_valid_days' => 3,
+        ])
+        ->assertSessionHas('success');
+
+    $updated = $this->limitedMenu->fresh();
+    expect($updated->hasExpiredStock())->toBeFalse()
+        ->and($updated->resolveEffectiveStockQuantity())->toBe(8)
+        ->and($updated->stockValidDays())->toBe(3);
+
+    // Customer kembali dapat memesan setelah Admin memperbarui stok
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->tableA->qr_token,
+        'customer_name' => 'Raka',
+        'items' => [
+            [
+                'menu_id' => $this->limitedMenu->id,
+                'quantity' => 2,
+                'selected_option_ids' => [$this->optionHot->id],
+            ],
+        ],
+    ])->assertRedirect();
+
+    expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(6);
+});
+
+test('custom multi-day stock validity stays purchasable within window and expires after configured days without checkout extending timestamp', function () {
+    $twoDaysAgo = now('Asia/Jakarta')->subDays(2)->setTime(10, 0);
+
+    $this->limitedMenu->update([
+        'stock_quantity' => 10,
+        'stock_valid_days' => 3,
+        'stock_updated_at' => $twoDaysAgo,
+    ]);
+
+    // Hari ke-2 dari masa berlaku 3 hari masih aktif
+    expect($this->limitedMenu->fresh()->hasExpiredStock())->toBeFalse()
+        ->and($this->limitedMenu->fresh()->resolveEffectiveStockQuantity())->toBe(10);
+
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->tableA->qr_token,
+        'customer_name' => 'Sari',
+        'items' => [
+            [
+                'menu_id' => $this->limitedMenu->id,
+                'quantity' => 3,
+                'selected_option_ids' => [$this->optionHot->id],
+            ],
+        ],
+    ])->assertRedirect();
+
+    $afterCheckout = $this->limitedMenu->fresh();
+    expect((int) $afterCheckout->stock_quantity)->toBe(7)
+        ->and($afterCheckout->stock_updated_at?->timezone('Asia/Jakarta')->toDateString())
+        ->toBe($twoDaysAgo->toDateString());
+
+    // Setelah melewati 3 hari kalender WIB (diupdate 3 hari lalu), stok otomatis kedaluwarsa (Habis di customer)
+    $this->limitedMenu->update([
+        'stock_updated_at' => now('Asia/Jakarta')->subDays(3)->setTime(10, 0),
+    ]);
+
+    expect($this->limitedMenu->fresh()->hasExpiredStock())->toBeTrue()
+        ->and($this->limitedMenu->fresh()->resolveEffectiveStockQuantity())->toBe(0);
+
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->tableB->qr_token,
+        'customer_name' => 'Sari 2',
+        'items' => [
+            [
+                'menu_id' => $this->limitedMenu->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$this->optionHot->id],
+            ],
+        ],
+    ])->assertSessionHasErrors('items.0.quantity');
+});
+
+test('overdue qris auto-expires on cashier sync, releases limited stock, and re-reserves on explicit cash switch or rejects when stock depletes', function () {
+    Event::fake([OrderCreated::class, OrderStatusUpdated::class]);
+
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->tableA->qr_token,
+        'customer_name' => 'Rizky Abandon QRIS',
+        'payment_method' => 'qris',
+        'items' => [
+            [
+                'menu_id' => $this->limitedMenu->id,
+                'quantity' => 3,
+                'selected_option_ids' => [$this->optionHot->id],
+            ],
+        ],
+    ])->assertRedirect();
+
+    $order = Order::latest('id')->firstOrFail();
+    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk();
+
+    expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(2);
+
+    // Pelanggan menunda 30 menit; ketika kasir sync antrean, QRIS otomatis kedaluwarsa & stok 3 porsi kembali ke 5
+    $this->travel(30)->minutes();
+
+    $this->actingAs($this->cashier)
+        ->get(route('cashier.orders.index'))
+        ->assertOk();
+
+    expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(5)
+        ->and($order->fresh()->payment_status)->toBe('failed')
+        ->and($order->items()->firstOrFail()->stock_state)->toBe('released')
+        ->and(Payment::where('order_id', $order->id)->firstOrFail()->status)->toBe('expired');
+
+    // Alihkan dari QRIS kedaluwarsa ke Tunai di Kasir -> stok ter-reservasi kembali ke 2 dan payment_status = unpaid
+    $this->postJson(route('order.switch-payment-method', ['order_number' => $order->order_number]), [
+        'payment_method' => 'cash',
+    ])->assertOk();
+
+    expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(2)
+        ->and($order->fresh()->payment_method)->toBe('cash')
+        ->and($order->fresh()->payment_status)->toBe('unpaid')
+        ->and($order->items()->firstOrFail()->stock_state)->toBe('reserved');
+
+    $this->travelBack();
 });

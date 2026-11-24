@@ -10,7 +10,7 @@ import {
     Globe,
     BarChart3,
 } from 'lucide-react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
     Dialog,
@@ -124,6 +124,7 @@ export default function DateRangeFilterModal({
     currentStartDate,
     currentEndDate,
     currentPeriodLabel,
+    compareMode,
     onApply,
 }: DateRangeFilterModalProps) {
     const [isOpen, setIsOpen] = useState(false);
@@ -131,6 +132,14 @@ export default function DateRangeFilterModal({
     const [startDate, setStartDate] = useState(currentStartDate);
     const [endDate, setEndDate] = useState(currentEndDate);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!isOpen) {
+            setSelectedPreset(currentPreset);
+            setStartDate(currentStartDate);
+            setEndDate(currentEndDate);
+        }
+    }, [currentPreset, currentStartDate, currentEndDate, isOpen]);
 
     // Navigasi Kalender Kustom
     const initialCalendarDate = useMemo(() => {
@@ -371,7 +380,10 @@ export default function DateRangeFilterModal({
             preset: selectedPreset,
             start_date: selectedPreset === 'custom' ? startDate : undefined,
             end_date: selectedPreset === 'custom' ? endDate : undefined,
-            compare_mode: 'none',
+            compare_mode:
+                compareMode && compareMode !== 'none'
+                    ? compareMode
+                    : 'previous_period',
         });
 
         setIsOpen(false);
@@ -388,21 +400,15 @@ export default function DateRangeFilterModal({
             <button
                 type="button"
                 onClick={handleOpen}
-                className="group flex h-11 cursor-pointer items-center gap-2.5 rounded-2xl border border-[#E9D5FF] bg-[#FAF5FF] px-3.5 text-xs font-bold text-neutral-800 shadow-2xs transition-all hover:border-[#D8B4FE] hover:bg-[#F3E8FF]"
+                className="inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-xl border border-[#DFCFA9] bg-[#FFFDF9] px-3 text-xs font-bold whitespace-nowrap text-[#18181B] shadow-2xs transition-colors hover:border-[#C52828]/40 hover:bg-[#FAF5E8]"
                 title="Buka pengaturan periode laporan"
             >
-                <div className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-purple-100 text-purple-600 transition-colors group-hover:bg-purple-200">
-                    <CalendarIcon className="size-4 text-purple-600" />
-                </div>
-                <div className="flex flex-col items-start text-left">
-                    <span className="text-[10px] leading-tight font-bold text-neutral-500">
-                        Periode Laporan
-                    </span>
-                    <span className="text-xs leading-tight font-extrabold text-neutral-900">
-                        {triggerLabel}
-                    </span>
-                </div>
-                <ChevronDown className="ml-1.5 size-4 shrink-0 text-purple-500 group-hover:text-purple-700" />
+                <CalendarIcon className="size-3.5 shrink-0 text-[#C52828]" />
+                <span className="hidden font-semibold text-[#78716C] xl:inline">
+                    Periode:
+                </span>
+                <span>{triggerLabel}</span>
+                <ChevronDown className="size-3.5 shrink-0 text-[#78716C]" />
             </button>
 
             {/* Modal Dialog Pemilih Periode (Gaya Card Modal Pemesanan Meja QRIS) */}

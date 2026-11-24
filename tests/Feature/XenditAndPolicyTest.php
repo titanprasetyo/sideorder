@@ -6,7 +6,10 @@ use App\Models\Menu;
 use App\Models\Order;
 use App\Models\Payment;
 use App\Models\User;
+use App\Services\Payments\PaymentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request as HttpClientRequest;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
 
 uses(RefreshDatabase::class);
@@ -121,9 +124,9 @@ test('payment initiation creates a xendit ledger record and returns public metad
     $response->assertOk()
         ->assertJsonPath('success', true)
         ->assertJsonPath('gateway.driver', 'xendit')
-        ->assertJsonPath('gateway.label', 'Xendit Payment Gateway')
+        ->assertJsonPath('gateway.label', 'Pembayaran Digital')
         ->assertJsonPath('payment.gateway', 'xendit')
-        ->assertJsonPath('payment.gateway_label', 'Xendit Payment Gateway')
+        ->assertJsonPath('payment.gateway_label', 'Pembayaran Digital')
         ->assertJsonPath('order.payment_gateway', 'xendit');
 
     $payment = Payment::where('order_id', $order->id)->first();
@@ -231,7 +234,7 @@ test('admin cannot delete or cancel a paid order', function () {
 test('dashboard sync includes xendit integration summary and filters transactions by payment gateway', function () {
     $xenditOrder = Order::create([
         'cafe_table_id' => $this->table->id,
-        'customer_name' => 'Bayar QRIS Xendit',
+        'customer_name' => 'Bayar QRIS',
         'subtotal' => 32000,
         'total_amount' => 32000,
         'order_status' => 'completed',
@@ -263,11 +266,178 @@ test('dashboard sync includes xendit integration summary and filters transaction
         ]));
 
     $response->assertOk()
-        ->assertJsonPath('summary.xendit_integration.label', 'Xendit Payment Gateway')
+        ->assertJsonPath('summary.xendit_integration.label', 'Pembayaran Digital')
         ->assertJsonPath('summary.xendit_integration.transactions_count', 1);
 
     $txRows = $response->json('transactions.data');
     expect($txRows)->toHaveCount(1)
         ->and($txRows[0]['order_number'])->toBe($xenditOrder->order_number)
         ->and($txRows[0]['payment_gateway'])->toBe('xendit');
+});
+
+test('xendit qris api uses rfc3339 zulu expires_at and persists real qr_string', function () {
+    config()->set('services.xendit.secret_key', 'xnd_development_test_secret_key');
+    config()->set('services.xendit.webhook_token', 'test-webhook-token-xyz');
+    config()->set('services.xendit.base_url', 'https://api.xendit.co');
+    config()->set('services.xendit.is_production', false);
+
+    $capturedExpiresAt = null;
+    $capturedApiVersion = null;
+
+    Http::fake([
+        'https://api.xendit.co/qr_codes' => function (HttpClientRequest $request) use (&$capturedExpiresAt, &$capturedApiVersion) {
+            $body = $request->data();
+            $capturedExpiresAt = $body['expires_at'] ?? null;
+            $capturedApiVersion = $request->header('api-version')[0] ?? null;
+
+            return Http::response([
+                'id' => 'qr_live_123456',
+                'reference_id' => $body['reference_id'] ?? 'PAY-TEST',
+                'type' => 'DYNAMIC',
+                'currency' => 'IDR',
+                'amount' => $body['amount'] ?? 32000,
+                'qr_string' => '00020101021226660014ID.CO.XENDIT.WWW01189360000000000000015802ID5910SIDE LINE6304ABCD',
+                'status' => 'ACTIVE',
+            ], 201);
+        },
+    ]);
+
+    $order = Order::create([
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Tamu QRIS Live',
+        'subtotal' => 32000,
+        'total_amount' => 32000,
+        'order_status' => 'pending',
+        'payment_status' => 'unpaid',
+        'payment_method' => 'qris',
+    ]);
+
+    $response = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ]);
+
+    $response->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('gateway.is_configured', true)
+        ->assertJsonPath('gateway.is_webhook_configured', true)
+        ->assertJsonPath('gateway.is_ready', true)
+        ->assertJsonPath('gateway.webhook_endpoint', '/payments/webhook/xendit')
+        ->assertJsonPath('payment.gateway_transaction_id', 'qr_live_123456')
+        ->assertJsonPath('payment.qr_string', '00020101021226660014ID.CO.XENDIT.WWW01189360000000000000015802ID5910SIDE LINE6304ABCD');
+
+    expect($capturedApiVersion)->toBe('2022-07-31')
+        ->and($capturedExpiresAt)->toBeString()
+        ->and($capturedExpiresAt)->toMatch('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/');
+});
+
+test('xendit webhook accepts verified test-and-save ping and settles both v2 and legacy qr payloads', function () {
+    config()->set('services.xendit.webhook_token', 'xendit-verify-token-999');
+
+    // 1. Xendit Dashboard "Test and Save" with valid token & dummy external_id -> HTTP 200 OK
+    $this->withHeaders([
+        'X-CALLBACK-TOKEN' => 'xendit-verify-token-999',
+    ])->postJson(route('payments.webhook', ['driver' => 'xendit']), [
+        'id' => 'qrpy_test_ping_001',
+        'reference_id' => 'testing_id_123',
+        'external_id' => 'invoice-ex-1672531199',
+        'status' => 'SUCCEEDED',
+        'amount' => 1500,
+    ])->assertOk()
+        ->assertJsonPath('status', 'ok')
+        ->assertJsonPath('gateway', 'xendit');
+
+    // 2. Xendit qr.payment (api-version 2022-07-31) settles real order
+    $orderV2 = Order::create([
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Pelanggan QR V2',
+        'subtotal' => 32000,
+        'total_amount' => 32000,
+        'order_status' => 'pending',
+        'payment_status' => 'unpaid',
+        'payment_method' => 'qris',
+        'payment_gateway' => 'xendit',
+        'payment_channel' => 'QRIS',
+    ]);
+    $initV2 = $this->postJson(route('payments.initiate', ['order_number' => $orderV2->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ]);
+    $refV2 = $initV2->json('payment.payment_reference');
+
+    $this->withHeaders([
+        'X-CALLBACK-TOKEN' => 'xendit-verify-token-999',
+    ])->postJson(route('payments.webhook', ['driver' => 'xendit']), [
+        'event' => 'qr.payment',
+        'api-version' => '2022-07-31',
+        'data' => [
+            'id' => 'qrpy_v2_001',
+            'qr_id' => 'qr_v2_001',
+            'reference_id' => $refV2,
+            'amount' => 32000,
+            'channel_code' => 'ID_DANA',
+            'status' => 'SUCCEEDED',
+            'updated' => '2026-11-23T09:00:00.000Z',
+        ],
+    ])->assertOk()->assertJsonPath('status', 'ok');
+
+    expect($orderV2->fresh()->payment_status)->toBe('paid')
+        ->and($orderV2->fresh()->order_status)->toBe('processing');
+
+    // 3. Legacy Xendit QR v1 webhook payload (qr_code.reference_id) also settles real order
+    $orderV1 = Order::create([
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Pelanggan QR V1',
+        'subtotal' => 32000,
+        'total_amount' => 32000,
+        'order_status' => 'pending',
+        'payment_status' => 'unpaid',
+        'payment_method' => 'qris',
+        'payment_gateway' => 'xendit',
+        'payment_channel' => 'QRIS',
+    ]);
+    $initV1 = $this->postJson(route('payments.initiate', ['order_number' => $orderV1->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ]);
+    $refV1 = $initV1->json('payment.payment_reference');
+
+    $this->withHeaders([
+        'X-CALLBACK-TOKEN' => 'xendit-verify-token-999',
+    ])->postJson(route('payments.webhook', ['driver' => 'xendit']), [
+        'id' => 'qrpy_legacy_001',
+        'amount' => 32000,
+        'created' => '2026-11-23T09:05:00.000Z',
+        'qr_code' => [
+            'id' => 'qr_legacy_001',
+            'reference_id' => $refV1,
+            'channel_code' => 'ID_OVO',
+            'amount' => 32000,
+            'status' => 'ACTIVE',
+        ],
+    ])->assertOk()->assertJsonPath('status', 'ok');
+
+    expect($orderV1->fresh()->payment_status)->toBe('paid')
+        ->and($orderV1->fresh()->order_status)->toBe('processing');
+});
+
+test('public gateway config distinguishes api key readiness from webhook token readiness', function () {
+    config()->set('services.payment_gateway.default_driver', 'xendit');
+    config()->set('services.xendit.secret_key', 'xnd_development_only_key');
+    config()->set('services.xendit.webhook_token', '');
+
+    /** @var PaymentService $paymentService */
+    $paymentService = app(PaymentService::class);
+    $partial = $paymentService->getPublicGatewayConfig();
+
+    expect($partial['is_configured'])->toBeTrue()
+        ->and($partial['is_webhook_configured'])->toBeFalse()
+        ->and($partial['is_ready'])->toBeFalse();
+
+    config()->set('services.xendit.webhook_token', 'whsec_ready');
+    $ready = $paymentService->getPublicGatewayConfig();
+
+    expect($ready['is_configured'])->toBeTrue()
+        ->and($ready['is_webhook_configured'])->toBeTrue()
+        ->and($ready['is_ready'])->toBeTrue();
 });

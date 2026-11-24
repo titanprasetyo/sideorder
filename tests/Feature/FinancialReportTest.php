@@ -75,10 +75,16 @@ test('role access control restricts financial reports and exports to admin only'
         ->get(route('admin.financial-reports.export.pdf'))
         ->assertForbidden();
 
-    // Admin diizinkan mengakses halaman laporan keuangan (dialihkan ke Dashboard terpadu)
+    // Admin diizinkan mengakses halaman khusus Pengelolaan Keuangan Detail
     $this->actingAs($this->admin)
         ->get(route('admin.financial-reports.index'))
-        ->assertRedirect(route('dashboard'));
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('admin/financial-reports/index')
+            ->has('summary')
+            ->has('expenses')
+            ->has('recaps')
+            ->has('transactions'));
 });
 
 test('admin cannot confirm payment via admin panel endpoint while cashier KDS endpoint confirms payment', function () {
@@ -585,4 +591,146 @@ test('csv export sanitizes formula injection characters', function () {
 
     expect($csvContent)->toContain("'=1+1")
         ->and($csvContent)->toContain("'@malicious_user");
+});
+
+test('product analytics today_ordered_menus lists all non-cancelled active menus ordered today without 10-item limit and excludes yesterday or cancelled orders', function () {
+    $now = Carbon::now('Asia/Jakarta');
+
+    // 1. Buat pesanan lunas hari ini berisi 12 menu berbeda (melebihi batas 10 item)
+    $paidOrderToday = Order::create([
+        'order_number' => 'SO-20261022-MENU1',
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Pelanggan Hari Ini',
+        'subtotal' => 240000,
+        'total_amount' => 240000,
+        'order_status' => 'completed',
+        'payment_status' => 'paid',
+        'payment_method' => 'qris',
+        'paid_at' => $now->copy()->subHour(),
+        'created_at' => $now->copy()->subHour(),
+    ]);
+
+    for ($i = 1; $i <= 12; $i++) {
+        $menu = Menu::create([
+            'category_id' => $this->category->id,
+            'name' => "Menu Kopi {$i}",
+            'slug' => "menu-kopi-{$i}",
+            'base_price' => 20000,
+            'is_active' => true,
+        ]);
+
+        $paidOrderToday->items()->create([
+            'menu_id' => $menu->id,
+            'menu_name' => $menu->name,
+            'base_price' => 20000,
+            'quantity' => 1,
+            'subtotal_options' => 0,
+            'unit_price' => 20000,
+            'total_price' => 20000,
+            'payment_status' => 'paid',
+            'status' => 'active',
+        ]);
+    }
+
+    // 2. Pesanan hari ini yang belum dibayar (unpaid) + 1 item ditolak (rejected)
+    $unpaidOrderToday = Order::create([
+        'order_number' => 'SO-20261022-MENU2',
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Pelanggan Menunggu Bayar',
+        'subtotal' => 30000,
+        'total_amount' => 30000,
+        'order_status' => 'pending',
+        'payment_status' => 'unpaid',
+        'payment_method' => 'cash',
+        'created_at' => $now->copy()->subMinutes(15),
+    ]);
+
+    $unpaidOrderToday->items()->create([
+        'menu_id' => $this->menu->id,
+        'menu_name' => 'Cappuccino Artisan',
+        'base_price' => 30000,
+        'quantity' => 1,
+        'subtotal_options' => 0,
+        'unit_price' => 30000,
+        'total_price' => 30000,
+        'payment_status' => 'unpaid',
+        'status' => 'active',
+    ]);
+
+    $unpaidOrderToday->items()->create([
+        'menu_id' => null,
+        'menu_name' => 'Item Ditolak Dapur',
+        'base_price' => 15000,
+        'quantity' => 2,
+        'subtotal_options' => 0,
+        'unit_price' => 15000,
+        'total_price' => 30000,
+        'payment_status' => 'unpaid',
+        'status' => 'rejected',
+    ]);
+
+    // 3. Pesanan dibatalkan hari ini & pesanan lunas kemarin -> TIDAK boleh masuk daftar hari ini
+    $cancelledOrder = Order::create([
+        'order_number' => 'SO-20261022-CNCLMENU',
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Pelanggan Batal',
+        'subtotal' => 25000,
+        'total_amount' => 25000,
+        'order_status' => 'cancelled',
+        'payment_status' => 'unpaid',
+        'created_at' => $now->copy()->subMinutes(10),
+    ]);
+    $cancelledOrder->items()->create([
+        'menu_id' => null,
+        'menu_name' => 'Menu Batal',
+        'base_price' => 25000,
+        'quantity' => 1,
+        'subtotal_options' => 0,
+        'unit_price' => 25000,
+        'total_price' => 25000,
+        'status' => 'active',
+    ]);
+
+    $yesterdayOrder = Order::create([
+        'order_number' => 'SO-20261021-YEST',
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Pelanggan Kemarin',
+        'subtotal' => 25000,
+        'total_amount' => 25000,
+        'order_status' => 'completed',
+        'payment_status' => 'paid',
+        'paid_at' => $now->copy()->subDay(),
+        'created_at' => $now->copy()->subDay(),
+    ]);
+    $yesterdayOrder->items()->create([
+        'menu_id' => null,
+        'menu_name' => 'Menu Kemarin',
+        'base_price' => 25000,
+        'quantity' => 3,
+        'subtotal_options' => 0,
+        'unit_price' => 25000,
+        'total_price' => 75000,
+        'status' => 'active',
+    ]);
+
+    // Sekalipun filter dashboard default 'this_month', today_ordered_menus tetap mendata menu hari ini secara penuh
+    $response = $this->actingAs($this->admin)
+        ->getJson(route('dashboard.sync', ['preset' => 'this_month']))
+        ->assertOk()
+        ->json();
+
+    $todayMenus = collect($response['product_analytics']['today_ordered_menus']);
+
+    expect($response['product_analytics']['today_date_label'])->toBe('Kamis, 22 Okt 2026')
+        ->and($todayMenus)->toHaveCount(13)
+        ->and($todayMenus->firstWhere('menu_name', 'Menu Kemarin'))->toBeNull()
+        ->and($todayMenus->firstWhere('menu_name', 'Menu Batal'))->toBeNull()
+        ->and($todayMenus->firstWhere('menu_name', 'Item Ditolak Dapur'))->toBeNull();
+
+    $cappuccino = $todayMenus->firstWhere('menu_name', 'Cappuccino Artisan');
+    expect($cappuccino)->not->toBeNull()
+        ->and($cappuccino['total_qty'])->toBe(1)
+        ->and($cappuccino['paid_qty'])->toBe(0)
+        ->and($cappuccino['unpaid_qty'])->toBe(1)
+        ->and((float) $cappuccino['total_amount'])->toBe(30000.0);
 });

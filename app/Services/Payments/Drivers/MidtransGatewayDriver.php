@@ -29,7 +29,7 @@ class MidtransGatewayDriver implements PaymentGatewayInterface
     public function createTransaction(Order $order, Payment $payment, array $options = []): array
     {
         $externalId = $payment->external_id ?: $payment->payment_reference;
-        $duration = max(300, (int) config('services.payment_gateway.invoice_duration_seconds', 900));
+        $duration = max(300, (int) ($options['invoice_duration_seconds'] ?? config('services.payment_gateway.invoice_duration_seconds', 900)));
         $expiresAt = Carbon::now('Asia/Jakarta')->addSeconds($duration);
 
         if (! $this->isConfigured() && app()->environment('production')) {

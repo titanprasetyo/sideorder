@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -127,7 +128,9 @@ class Order extends Model
      */
     public function items(): HasMany
     {
-        return $this->hasMany(OrderItem::class);
+        return $this->hasMany(OrderItem::class)
+            ->orderBy('batch_number', 'asc')
+            ->orderBy('id', 'asc');
     }
 
     /**
@@ -137,7 +140,10 @@ class Order extends Model
      */
     public function activeItems(): HasMany
     {
-        return $this->hasMany(OrderItem::class)->where('status', 'active');
+        return $this->hasMany(OrderItem::class)
+            ->where('status', 'active')
+            ->orderBy('batch_number', 'asc')
+            ->orderBy('id', 'asc');
     }
 
     /**
@@ -232,6 +238,87 @@ class Order extends Model
     }
 
     /**
+     * Cek apakah masih ada item aktif pada pesanan ini yang belum dibayar.
+     */
+    public function hasUnpaidActiveItems(): bool
+    {
+        if ($this->relationLoaded('items')) {
+            return $this->items
+                ->where('status', 'active')
+                ->contains(fn (OrderItem $item): bool => $item->payment_status !== OrderItem::PAYMENT_PAID);
+        }
+
+        return $this->items()
+            ->where('status', 'active')
+            ->where('payment_status', '!=', OrderItem::PAYMENT_PAID)
+            ->exists();
+    }
+
+    /**
+     * Cek apakah pesanan yang sedang diracik sudah memiliki minimal satu item lunas yang siap diantarkan.
+     */
+    public function hasServedActivePaidItem(): bool
+    {
+        if ($this->order_status !== 'processing') {
+            return false;
+        }
+
+        if ($this->relationLoaded('items')) {
+            return $this->items
+                ->where('status', 'active')
+                ->contains(fn (OrderItem $item): bool => $item->isPaid() && $item->isServed());
+        }
+
+        return $this->items()
+            ->where('status', 'active')
+            ->where('payment_status', OrderItem::PAYMENT_PAID)
+            ->where('is_served', true)
+            ->exists();
+    }
+
+    /**
+     * Scope pesanan yang berstatus siap saji penuh maupun sebagian menu sudah siap disajikan.
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
+     */
+    public function scopeReadyOrPartialReady(Builder $query): Builder
+    {
+        return $query->where(function (Builder $q): void {
+            $q->where('order_status', 'ready')
+                ->orWhere(function (Builder $sub): void {
+                    $sub->where('order_status', 'processing')
+                        ->whereHas('items', function (Builder $iq): void {
+                            $iq->where('status', 'active')
+                                ->where('payment_status', OrderItem::PAYMENT_PAID)
+                                ->where('is_served', true);
+                        });
+                });
+        });
+    }
+
+    /**
+     * Tentukan nomor gelombang (batch) untuk pesanan susulan berikutnya.
+     * Gelombang susulan yang masih belum dibayar dikelompokkan dalam batch yang sama
+     * hingga dilunasi; penambahan setelah lunas membentuk gelombang susulan baru.
+     */
+    public function getNextFollowupBatchNumber(): int
+    {
+        $maxBatch = (int) ($this->items()->max('batch_number') ?? 0);
+        if ($maxBatch <= 1) {
+            return 2;
+        }
+
+        $currentBatchHasUnpaid = $this->items()
+            ->where('status', 'active')
+            ->where('batch_number', $maxBatch)
+            ->where('payment_status', '!=', OrderItem::PAYMENT_PAID)
+            ->exists();
+
+        return $currentBatchHasUnpaid ? $maxBatch : $maxBatch + 1;
+    }
+
+    /**
      * Nominal yang sudah dibayar/diselesaikan pada pesanan ini.
      * Membaca ledger tabel `payments` terlebih dahulu agar pembayaran awal tidak hilang
      * ketika pelanggan melakukan Tambah Menu atau percobaan pembayaran kedua gagal/expired.
@@ -313,7 +400,7 @@ class Order extends Model
     public function resolvePaymentGatewayLabel(): string
     {
         return match ($this->resolveEffectivePaymentGateway()) {
-            'xendit' => 'Xendit Payment Gateway',
+            'xendit' => 'Pembayaran Digital',
             'midtrans' => 'Midtrans Snap',
             default => 'Kasir POS',
         };

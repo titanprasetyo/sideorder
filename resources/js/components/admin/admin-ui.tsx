@@ -12,7 +12,6 @@ import {
     Dialog,
     DialogContent,
     DialogDescription,
-    DialogFooter,
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
@@ -53,24 +52,24 @@ export function PageHeader({
     actions?: ReactNode;
 }) {
     return (
-        <div className="flex flex-col gap-4 border-b border-[#E8DFC8] pb-5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-start gap-3.5">
-                <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#C52828] to-[#991B1B] text-white shadow-sm ring-1 shadow-[#C52828]/25 ring-white/20">
+        <div className="flex flex-col gap-3 border-b border-[#E8DFC8] pb-4 lg:flex-row lg:items-center lg:justify-between lg:gap-4">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#C52828] to-[#991B1B] text-white shadow-sm ring-1 shadow-[#C52828]/25 ring-white/20">
                     <Icon className="size-5" />
                 </div>
-                <div>
-                    <h1 className="font-heading text-xl font-extrabold tracking-tight text-[#18181B] sm:text-2xl">
+                <div className="min-w-0">
+                    <h1 className="truncate font-heading text-lg font-extrabold tracking-tight text-[#18181B] sm:text-xl">
                         {title}
                     </h1>
                     {description && (
-                        <p className="mt-0.5 text-xs font-medium text-[#78716C] sm:text-sm">
+                        <p className="truncate text-xs font-medium text-[#78716C]">
                             {description}
                         </p>
                     )}
                 </div>
             </div>
             {actions && (
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-2 sm:flex-nowrap">
                     {actions}
                 </div>
             )}
@@ -185,7 +184,7 @@ export function StatusPill({
     return (
         <span
             className={cn(
-                'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-bold whitespace-nowrap ring-1 ring-inset',
+                'inline-flex items-center gap-1.5 rounded-md px-2.5 py-0.5 text-[11px] font-bold whitespace-nowrap ring-1 ring-inset',
                 tonePill[tone],
                 className,
             )}
@@ -272,7 +271,7 @@ export function FilterTabs<T extends string | number>({
                         {opt.count !== undefined && (
                             <span
                                 className={cn(
-                                    'rounded-full px-1.5 text-[10px] leading-4 font-black',
+                                    'rounded-md px-1.5 text-[10px] leading-4 font-black',
                                     active
                                         ? 'bg-white/20 text-white'
                                         : 'bg-[#F5EEDC] text-[#5B4126]',
@@ -507,40 +506,40 @@ export function StandeeModalCard({
     return (
         <div
             className={cn(
-                'flex w-full shrink-0 flex-col items-center justify-center gap-3 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3.5 shadow-[0_2px_12px_rgba(26,26,26,0.03)] md:w-[295px] lg:w-[310px]',
+                'flex w-full shrink-0 flex-col items-center justify-center gap-2.5 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3 shadow-[0_2px_12px_rgba(26,26,26,0.03)] md:w-[275px] lg:w-[290px]',
                 className,
             )}
         >
-            <div className="relative flex w-full max-w-[17rem] flex-col items-center overflow-hidden rounded-[1.35rem] border-2 border-[#E2D4B5] bg-[#FFFDF9] shadow-md">
+            <div className="relative flex w-full max-w-[15.5rem] flex-col items-center overflow-hidden rounded-2xl border-2 border-[#E2D4B5] bg-[#FFFDF9] shadow-md">
                 {/* Header Brand Café SIDE LINE */}
-                <div className="relative w-full overflow-hidden bg-gradient-to-br from-[#C52828] via-[#B71C1C] to-[#8E1414] px-4 pt-3.5 pb-4 text-center text-white">
+                <div className="relative w-full overflow-hidden bg-gradient-to-br from-[#C52828] via-[#B71C1C] to-[#8E1414] px-3.5 pt-2.5 pb-3.5 text-center text-white">
                     <div className="pointer-events-none absolute -top-8 -right-8 size-24 rounded-full bg-[#FBF1CB]/15 blur-lg" />
                     <div className="pointer-events-none absolute -bottom-8 -left-8 size-20 rounded-full bg-black/15 blur-lg" />
 
                     <div className="relative z-10 flex flex-col items-center">
-                        <div className="mb-1.5 flex items-center gap-1.5 rounded-full border border-[#FBF1CB]/30 bg-white/10 px-2.5 py-0.5 backdrop-blur-xs">
+                        <div className="mb-1 flex items-center gap-1.5 rounded-md border border-[#FBF1CB]/30 bg-white/10 px-2.5 py-0.5 backdrop-blur-xs">
                             <Coffee className="size-2.5 text-[#FBF1CB]" />
-                            <span className="text-[8.5px] font-extrabold tracking-[0.2em] text-[#FBF1CB] uppercase">
+                            <span className="text-[8px] font-extrabold tracking-[0.2em] text-[#FBF1CB] uppercase">
                                 Café & Roastery
                             </span>
                         </div>
-                        <h3 className="font-heading text-xl leading-none font-black tracking-[0.14em] text-white uppercase">
+                        <h3 className="font-heading text-lg leading-none font-black tracking-[0.14em] text-white uppercase">
                             SIDE LINE
                         </h3>
                     </div>
                 </div>
 
                 {/* Badge Melayang di Perbatasan Header */}
-                <div className="relative z-20 -mt-3.5 flex flex-col items-center">
-                    <div className="inline-flex items-center gap-1.5 rounded-full border-2 border-[#FFFDF9] bg-[#FBF1CB] px-3.5 py-1 shadow-md">
-                        <span className="size-2 rounded-full bg-[#C52828]" />
-                        <span className="max-w-[7.5rem] truncate font-heading text-xs font-black tracking-[0.08em] text-[#3F2D1C] uppercase">
+                <div className="relative z-20 -mt-3 flex flex-col items-center">
+                    <div className="inline-flex items-center gap-1.5 rounded-md border-2 border-[#FFFDF9] bg-[#FBF1CB] px-3 py-0.5 shadow-md">
+                        <span className="size-1.5 rounded-full bg-[#C52828]" />
+                        <span className="max-w-[7rem] truncate font-heading text-[11px] font-black tracking-[0.08em] text-[#3F2D1C] uppercase">
                             {pillPrimary}
                         </span>
                         {pillSecondary && (
                             <>
                                 <span className="text-[#C8B58A]">•</span>
-                                <span className="max-w-[5.5rem] truncate text-[9.5px] font-bold text-[#78716C]">
+                                <span className="max-w-[5.25rem] truncate text-[9px] font-bold text-[#78716C]">
                                     {pillSecondary}
                                 </span>
                             </>
@@ -549,11 +548,11 @@ export function StandeeModalCard({
                 </div>
 
                 {/* Area Utama Bingkai Viewfinder & Konten Preview */}
-                <div className="flex w-full flex-col items-center gap-3 px-4 pt-3 pb-3.5">
-                    <div className="relative mt-0.5 rounded-2xl border border-[#E8DFC8] bg-gradient-to-b from-white to-[#FAF6EC] p-3 shadow-sm">
+                <div className="flex w-full flex-col items-center gap-2 px-3 pt-2.5 pb-2.5">
+                    <div className="relative mt-0.5 rounded-2xl border border-[#E8DFC8] bg-gradient-to-b from-white to-[#FAF6EC] p-2.5 shadow-sm">
                         {/* Label Pill Atas Bingkai */}
                         <div className="absolute -top-2 left-1/2 z-10 -translate-x-1/2">
-                            <span className="inline-flex items-center gap-1 rounded-full bg-[#C52828] px-2.5 py-0.5 text-[8.5px] font-extrabold tracking-widest whitespace-nowrap text-white uppercase shadow-xs">
+                            <span className="inline-flex items-center gap-1 rounded-md bg-[#C52828] px-2.5 py-0.5 text-[8px] font-extrabold tracking-widest whitespace-nowrap text-white uppercase shadow-xs">
                                 {TopBadgeIcon && (
                                     <TopBadgeIcon className="size-2.5" />
                                 )}
@@ -562,10 +561,10 @@ export function StandeeModalCard({
                         </div>
 
                         {/* 4 Siku Viewfinder Kamera (#C52828) */}
-                        <span className="pointer-events-none absolute top-1.5 left-1.5 size-4 rounded-tl-lg border-t-[3px] border-l-[3px] border-[#C52828]" />
-                        <span className="pointer-events-none absolute top-1.5 right-1.5 size-4 rounded-tr-lg border-t-[3px] border-r-[3px] border-[#C52828]" />
-                        <span className="pointer-events-none absolute bottom-1.5 left-1.5 size-4 rounded-bl-lg border-b-[3px] border-l-[3px] border-[#C52828]" />
-                        <span className="pointer-events-none absolute right-1.5 bottom-1.5 size-4 rounded-br-lg border-r-[3px] border-b-[3px] border-[#C52828]" />
+                        <span className="pointer-events-none absolute top-1.5 left-1.5 size-3.5 rounded-tl-lg border-t-[3px] border-l-[3px] border-[#C52828]" />
+                        <span className="pointer-events-none absolute top-1.5 right-1.5 size-3.5 rounded-tr-lg border-t-[3px] border-r-[3px] border-[#C52828]" />
+                        <span className="pointer-events-none absolute bottom-1.5 left-1.5 size-3.5 rounded-bl-lg border-b-[3px] border-l-[3px] border-[#C52828]" />
+                        <span className="pointer-events-none absolute right-1.5 bottom-1.5 size-3.5 rounded-br-lg border-r-[3px] border-b-[3px] border-[#C52828]" />
 
                         {/* Isi Bingkai */}
                         <div className="relative overflow-hidden rounded-xl border border-[#EFE5CF] bg-white p-1.5 shadow-2xs">
@@ -575,27 +574,27 @@ export function StandeeModalCard({
 
                     {/* Teks Judul & Subjudul */}
                     <div className="space-y-0.5 px-1 text-center">
-                        <p className="line-clamp-1 font-heading text-sm font-black tracking-tight text-[#18181B]">
+                        <p className="line-clamp-1 font-heading text-[13px] font-black tracking-tight text-[#18181B]">
                             {heading}
                         </p>
                         {subheading && (
-                            <p className="line-clamp-2 text-[10px] leading-snug font-medium text-[#78716C]">
+                            <p className="line-clamp-2 text-[9.5px] leading-snug font-medium text-[#78716C]">
                                 {subheading}
                             </p>
                         )}
                     </div>
 
                     {/* 3 Kotak Info/Langkah Visual */}
-                    <div className="grid w-full grid-cols-3 gap-1 rounded-xl border border-[#E8DFC8] bg-[#FAF6EC] p-1.5 text-center">
+                    <div className="grid w-full grid-cols-3 gap-1 rounded-xl border border-[#E8DFC8] bg-[#FAF6EC] p-1 text-center">
                         {steps.map((step, idx) => (
                             <div
                                 key={idx}
                                 className="flex min-w-0 flex-col items-center gap-0.5 rounded-lg bg-[#FFFDF9] px-1 py-1 shadow-2xs"
                             >
-                                <span className="text-[8.5px] font-black text-[#C52828]">
+                                <span className="text-[8px] font-black text-[#C52828]">
                                     {step.num ?? `0${idx + 1}`}
                                 </span>
-                                <span className="w-full truncate text-[9.5px] leading-tight font-bold text-[#18181B]">
+                                <span className="w-full truncate text-[9px] leading-tight font-bold text-[#18181B]">
                                     {step.label}
                                 </span>
                             </div>
@@ -604,7 +603,7 @@ export function StandeeModalCard({
                 </div>
 
                 {/* Footer Kartu Standee */}
-                <div className="flex w-full items-center justify-center gap-1.5 border-t border-[#E8DFC8] bg-[#FAF5E8] px-3 py-1.5 text-[8.5px] font-extrabold tracking-[0.16em] text-[#78716C] uppercase">
+                <div className="flex w-full items-center justify-center gap-1.5 border-t border-[#E8DFC8] bg-[#FAF5E8] px-3 py-1 text-[8px] font-extrabold tracking-[0.16em] text-[#78716C] uppercase">
                     <Sparkles className="size-2 text-[#C52828]" />
                     <span>SIDEORDER • DIGITAL MENU</span>
                 </div>

@@ -74,6 +74,7 @@ interface Menu {
     is_active: boolean;
     is_limited_stock?: boolean;
     stock_quantity?: number;
+    is_stock_expired?: boolean;
     option_groups?: OptionGroup[];
 }
 
@@ -82,6 +83,7 @@ interface StockSyncEntry {
     is_active: boolean;
     is_limited_stock: boolean;
     stock_quantity: number;
+    is_stock_expired?: boolean;
 }
 
 interface LocationAccessInfo {
@@ -163,6 +165,17 @@ interface Props {
     } | null;
     lockedOrderNotice?: string | null;
     locationAccess?: LocationAccessInfo;
+    orderingStatus?: {
+        enabled: boolean;
+        closed_message: string;
+        cafe_name: string;
+    };
+    paymentPolicy?: {
+        allow_cash: boolean;
+        allow_xendit: boolean;
+        expiry_minutes: number;
+        default_method: 'qris' | 'cash';
+    };
 }
 
 const VERIFIED_COORDS_STORAGE_KEY = 'sideorder_verified_coords';
@@ -214,8 +227,22 @@ function clearStoredCoords(): void {
     }
 }
 
+function loadLastOrderNumber(qrToken: string): string | null {
+    if (typeof window === 'undefined') return null;
+
+    try {
+        const value = sessionStorage.getItem(`sideorder_last_order_${qrToken}`);
+        return value && value.trim() !== '' ? value.trim() : null;
+    } catch {
+        return null;
+    }
+}
+
 function isMenuOutOfStock(menu: Menu): boolean {
-    return Boolean(menu.is_limited_stock && (menu.stock_quantity ?? 0) <= 0);
+    return Boolean(
+        menu.is_limited_stock &&
+        (menu.is_stock_expired || (menu.stock_quantity ?? 0) <= 0),
+    );
 }
 
 function isSingleSelectGroup(group: OptionGroup): boolean {
@@ -234,12 +261,22 @@ function hasMenuVariants(menu: Menu): boolean {
     );
 }
 
+function uniqueOptionIds(ids: unknown[]): number[] {
+    return Array.from(
+        new Set(
+            ids
+                .map((id) => Number(id))
+                .filter((id) => Number.isInteger(id) && id > 0),
+        ),
+    );
+}
+
 function buildCartId(
     menuId: number,
     optionIds: number[],
     notes: string,
 ): string {
-    const sortedIds = [...optionIds].sort((a, b) => a - b);
+    const sortedIds = uniqueOptionIds(optionIds).sort((a, b) => a - b);
     return `${menuId}-${sortedIds.join('_')}-${notes.trim()}`;
 }
 
@@ -290,49 +327,54 @@ function hydrateCartFromStorage(
                     ? rawItem.customer_notes.trim()
                     : '';
 
-            // Ambil ID opsi dari struktur baru (selected_options) maupun struktur lama (selected_option_ids)
+            // Ambil ID opsi unik dari struktur baru (selected_options) maupun struktur lama (selected_option_ids)
             const rawOptionIds: number[] = Array.isArray(
                 rawItem?.selected_options,
             )
-                ? rawItem.selected_options
-                      .map((o: any) => Number(o?.option_item_id ?? o?.id))
-                      .filter((n: number) => !Number.isNaN(n) && n > 0)
+                ? uniqueOptionIds(
+                      rawItem.selected_options.map(
+                          (o: any) => o?.option_item_id ?? o?.id,
+                      ),
+                  )
                 : Array.isArray(rawItem?.selected_option_ids)
-                  ? rawItem.selected_option_ids
-                        .map((id: any) => Number(id))
-                        .filter((n: number) => !Number.isNaN(n) && n > 0)
+                  ? uniqueOptionIds(rawItem.selected_option_ids)
                   : [];
 
             const validOptions: CartOption[] = [];
+            const seenOptionIds = new Set<number>();
             let optionsPrice = 0;
 
             if (menu.option_groups) {
                 menu.option_groups.forEach((group) => {
-                    const matchedInGroup = group.option_items.filter(
-                        (opt) => opt.is_active && rawOptionIds.includes(opt.id),
+                    const activeGroupItems = group.option_items.filter(
+                        (opt) => opt.is_active,
+                    );
+                    const matchedInGroup = activeGroupItems.filter((opt) =>
+                        rawOptionIds.includes(opt.id),
                     );
 
                     const chosenItems = isSingleSelectGroup(group)
                         ? matchedInGroup.slice(0, 1)
                         : matchedInGroup;
 
-                    // Jika grup wajib belum terpilih pada data lama, pilih default/pertama
+                    // Jika grup wajib belum terpilih pada data lama, pilih default/aktif pertama
                     if (
                         chosenItems.length === 0 &&
                         group.is_required &&
                         isSingleSelectGroup(group) &&
-                        group.option_items.length > 0
+                        activeGroupItems.length > 0
                     ) {
                         const fallback =
-                            group.option_items.find(
-                                (i) => i.is_default && i.is_active,
-                            ) || group.option_items[0];
+                            activeGroupItems.find((i) => i.is_default) ||
+                            activeGroupItems[0];
                         if (fallback) {
                             chosenItems.push(fallback);
                         }
                     }
 
                     chosenItems.forEach((opt) => {
+                        if (seenOptionIds.has(opt.id)) return;
+                        seenOptionIds.add(opt.id);
                         const addPrice = parseFloat(opt.additional_price) || 0;
                         optionsPrice += addPrice;
                         validOptions.push({
@@ -432,6 +474,18 @@ export default function CustomerOrder({
         distance_meters: null,
         message: null,
     },
+    orderingStatus = {
+        enabled: true,
+        closed_message:
+            'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
+        cafe_name: 'Café SIDE LINE',
+    },
+    paymentPolicy = {
+        allow_cash: true,
+        allow_xendit: true,
+        expiry_minutes: 15,
+        default_method: 'qris',
+    },
 }: Props) {
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedCategory, setSelectedCategory] = useState<number | 'all'>(
@@ -452,6 +506,9 @@ export default function CustomerOrder({
     );
     const [verifiedCoords, setVerifiedCoords] = useState<VerifiedCoords | null>(
         () => loadStoredCoords(),
+    );
+    const [lastOrderNumber] = useState<string | null>(() =>
+        loadLastOrderNumber(table.qr_token),
     );
     const autoGeoTriggeredRef = useRef(false);
 
@@ -624,6 +681,7 @@ export default function CustomerOrder({
                             is_active: override.is_active,
                             is_limited_stock: override.is_limited_stock,
                             stock_quantity: override.stock_quantity,
+                            is_stock_expired: override.is_stock_expired,
                         };
                     })
                     .filter((m) => m.is_active),
@@ -661,8 +719,30 @@ export default function CustomerOrder({
         () => activeOrder?.customer_name || '',
     );
     const [orderNotes, setOrderNotes] = useState('');
-    const [paymentMethod, setPaymentMethod] = useState<'qris' | 'cash'>('qris');
+    const [paymentMethod, setPaymentMethod] = useState<'qris' | 'cash'>(
+        () =>
+            paymentPolicy.default_method ??
+            (!paymentPolicy.allow_xendit && paymentPolicy.allow_cash
+                ? 'cash'
+                : 'qris'),
+    );
     const [isSubmitting, setIsSubmitting] = useState(false);
+
+    useEffect(() => {
+        if (
+            !paymentPolicy.allow_xendit &&
+            paymentMethod === 'qris' &&
+            paymentPolicy.allow_cash
+        ) {
+            setPaymentMethod('cash');
+        } else if (
+            !paymentPolicy.allow_cash &&
+            paymentMethod === 'cash' &&
+            paymentPolicy.allow_xendit
+        ) {
+            setPaymentMethod('qris');
+        }
+    }, [paymentPolicy.allow_xendit, paymentPolicy.allow_cash, paymentMethod]);
 
     // Ref guard untuk mencegah klik berulang (double-click / rapid tap)
     const quickAddLockRef = useRef<Record<number, number>>({});
@@ -895,7 +975,7 @@ export default function CustomerOrder({
             });
         }
 
-        setSelectedOptionIds(defaults);
+        setSelectedOptionIds(uniqueOptionIds(defaults));
         setIsCustomizeOpen(true);
     };
 
@@ -912,7 +992,9 @@ export default function CustomerOrder({
         setCustomizeQty(cartItem.quantity);
         setCustomizeNotes(cartItem.customer_notes || '');
         setSelectedOptionIds(
-            cartItem.selected_options.map((o) => o.option_item_id),
+            uniqueOptionIds(
+                cartItem.selected_options.map((o) => o.option_item_id),
+            ),
         );
         setIsCustomizeOpen(true);
     };
@@ -994,15 +1076,15 @@ export default function CustomerOrder({
                 );
                 // Jika tidak wajib, mengklik opsi yang sedang terpilih dapat membatalkan pilihan
                 if (!group.is_required && prev.includes(item.id)) {
-                    return filtered;
+                    return uniqueOptionIds(filtered);
                 }
-                return [...filtered, item.id];
+                return uniqueOptionIds([...filtered, item.id]);
             });
         } else {
             setSelectedOptionIds((prev) =>
                 prev.includes(item.id)
-                    ? prev.filter((id) => id !== item.id)
-                    : [...prev, item.id],
+                    ? uniqueOptionIds(prev.filter((id) => id !== item.id))
+                    : uniqueOptionIds([...prev, item.id]),
             );
         }
     };
@@ -1086,6 +1168,7 @@ export default function CustomerOrder({
         modalSubmitLockRef.current = true;
 
         const optionsToStore: CartOption[] = [];
+        const seenOptionIds = new Set<number>();
         if (latestMenu.option_groups) {
             latestMenu.option_groups.forEach((group) => {
                 const matched = group.option_items.filter(
@@ -1097,6 +1180,8 @@ export default function CustomerOrder({
                     : matched;
 
                 itemsToKeep.forEach((item) => {
+                    if (seenOptionIds.has(item.id)) return;
+                    seenOptionIds.add(item.id);
                     optionsToStore.push({
                         group_name: group.name,
                         option_name: item.name,
@@ -1118,7 +1203,9 @@ export default function CustomerOrder({
         );
         const unitPrice = basePrice + optionsSum;
         const normalizedNotes = customizeNotes.trim();
-        const optionIds = optionsToStore.map((o) => o.option_item_id);
+        const optionIds = uniqueOptionIds(
+            optionsToStore.map((o) => o.option_item_id),
+        );
         const newCartId = buildCartId(
             latestMenu.id,
             optionIds,
@@ -1324,8 +1411,8 @@ export default function CustomerOrder({
                     menu_id: item.menu_id,
                     quantity: item.quantity,
                     customer_notes: item.customer_notes.trim() || null,
-                    selected_option_ids: item.selected_options.map(
-                        (opt) => opt.option_item_id,
+                    selected_option_ids: uniqueOptionIds(
+                        item.selected_options.map((opt) => opt.option_item_id),
                     ),
                 })),
             },
@@ -1395,6 +1482,52 @@ export default function CustomerOrder({
     const activeRemainingStock = activeMenu
         ? getRemainingStockForMenu(activeMenu, editingCartId)
         : 50;
+
+    if (!orderingStatus.enabled) {
+        return (
+            <>
+                <Head
+                    title={`Pemesanan Ditutup - Meja ${table.table_number} • ${orderingStatus.cafe_name}`}
+                />
+                <div className="flex min-h-dvh items-center justify-center bg-[#141413] p-0 font-sans selection:bg-[#C52828] selection:text-white md:py-4">
+                    <div className="relative flex min-h-dvh w-full max-w-md flex-col items-center justify-center overflow-hidden bg-[#FAF8F4] px-6 py-8 shadow-2xl sm:max-w-lg md:min-h-[88dvh] md:rounded-2xl md:border-[8px] md:border-[#242321]">
+                        <div className="w-full max-w-sm rounded-2xl border border-[#E8E2D9] bg-[#FFFDFB] p-7 text-center shadow-[0_8px_24px_rgba(26,26,26,0.04)]">
+                            <div className="mx-auto mb-5 flex size-16 items-center justify-center rounded-2xl bg-[#FDECEB] text-[#C52828]">
+                                <Storefront
+                                    weight="duotone"
+                                    className="size-8"
+                                />
+                            </div>
+
+                            <span className="inline-flex items-center rounded-full border border-[#E6DFD3] bg-[#FAF6EC] px-2.5 py-0.5 text-[10.5px] font-bold text-[#78716C] uppercase">
+                                Meja {table.table_number} •{' '}
+                                {orderingStatus.cafe_name}
+                            </span>
+
+                            <h1 className="mt-3 text-lg font-extrabold tracking-tight text-[#1A1A1A]">
+                                Pemesanan QR Sedang Ditutup
+                            </h1>
+                            <p className="mt-2 text-xs leading-relaxed text-[#6E6A64] sm:text-sm">
+                                {orderingStatus.closed_message}
+                            </p>
+
+                            <button
+                                type="button"
+                                onClick={() => router.reload()}
+                                className="mt-6 flex h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-4 text-sm font-bold text-white shadow-[0_6px_16px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99]"
+                            >
+                                <ArrowClockwise
+                                    weight="bold"
+                                    className="size-4"
+                                />
+                                <span>Periksa Status Pemesanan</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </>
+        );
+    }
 
     if (isLocationBlocked) {
         const isChecking = locationGateStatus === 'checking';
@@ -1480,10 +1613,10 @@ export default function CustomerOrder({
                     {/* BAGIAN ATAS STICKY (HEADER + INFO MEJA + SEARCH + KATEGORI NAVBAR DIAM) */}
                     <div className="sticky top-0 z-20 shrink-0 border-b border-[#EBE5DC] bg-[#FAF8F4]/95 backdrop-blur-xs">
                         {/* 1. TOP BRAND HEADER */}
-                        <header className="animate-sideline-header flex items-center justify-between px-4 pt-3.5 pb-2">
-                            <div className="flex items-center gap-2.5">
+                        <header className="animate-sideline-header flex items-center justify-between px-3 pt-2.5 pb-1.5 sm:px-4 sm:pt-3">
+                            <div className="flex items-center gap-2">
                                 {/* Icon Logo Kafe SIDELINE */}
-                                <div className="flex size-10 items-center justify-center overflow-hidden rounded-lg bg-[#C52828] shadow-sm ring-1 shadow-[#C52828]/20 ring-black/5">
+                                <div className="flex size-8 items-center justify-center overflow-hidden rounded-lg bg-[#C52828] shadow-sm ring-1 shadow-[#C52828]/20 ring-black/5 sm:size-9">
                                     <img
                                         src="/images/sideline-icon.png"
                                         alt="SIDELINE"
@@ -1493,34 +1626,34 @@ export default function CustomerOrder({
 
                                 <div>
                                     <div className="flex items-center gap-1.5">
-                                        <span className="text-[15px] leading-tight font-bold tracking-tight text-[#1A1A1A] uppercase">
+                                        <span className="text-[13.5px] leading-tight font-bold tracking-tight text-[#1A1A1A] uppercase sm:text-[14.5px]">
                                             SIDE LINE
                                         </span>
                                     </div>
-                                    <p className="text-[9px] font-semibold tracking-[0.14em] text-[#6E6A64] uppercase">
+                                    <p className="text-[8px] font-semibold tracking-[0.12em] text-[#6E6A64] uppercase sm:text-[8.5px]">
                                         Coffee &bull; Eatery
                                     </p>
                                 </div>
                             </div>
 
-                            <span className="inline-flex items-center rounded-[4px] bg-[#1A1A1A] px-2.5 py-1.5 text-[10px] leading-none font-bold text-white">
+                            <span className="inline-flex items-center rounded-[4px] bg-[#1A1A1A] px-2 py-1 text-[9.5px] leading-none font-bold text-white">
                                 MEJA {table.table_number}
                             </span>
                         </header>
 
                         {/* 2. CARD INFO MEJA & WIFI */}
-                        <div className="px-4 pt-1.5 pb-2.5">
-                            <div className="space-y-2 rounded-lg border border-[#E8E2D9] bg-[#FFFDFB] px-3 py-2.5 shadow-[0_2px_10px_rgba(26,26,26,0.03)]">
+                        <div className="px-3 pt-1 pb-2 sm:px-4">
+                            <div className="space-y-1.5 rounded-lg border border-[#E8E2D9] bg-[#FFFDFB] px-2.5 py-2 shadow-[0_2px_10px_rgba(26,26,26,0.03)]">
                                 {/* Baris Atas Info Meja */}
                                 <div className="flex items-center justify-between gap-2">
                                     <div className="flex min-w-0 items-center gap-1.5">
                                         {/* Pill Hitam Nomor Meja */}
-                                        <span className="shrink-0 rounded-[4px] bg-[#1A1A1A] px-2.5 py-1.5 text-[10px] leading-none font-bold whitespace-nowrap text-white">
+                                        <span className="shrink-0 rounded-[4px] bg-[#1A1A1A] px-2 py-1 text-[9px] leading-none font-bold whitespace-nowrap text-white">
                                             MEJA {table.table_number}
                                         </span>
 
                                         {/* Token Meja */}
-                                        <span className="flex min-w-0 items-center gap-1 rounded-[4px] border border-emerald-200/80 bg-emerald-50 px-2 py-1 text-[9.5px] leading-none font-semibold whitespace-nowrap text-emerald-700">
+                                        <span className="flex min-w-0 items-center gap-1 rounded-[4px] border border-emerald-200/80 bg-emerald-50 px-1.5 py-0.5 text-[9px] leading-none font-semibold whitespace-nowrap text-emerald-700">
                                             <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" />
                                             <span className="truncate">
                                                 QR-
@@ -1533,11 +1666,11 @@ export default function CustomerOrder({
                                 </div>
 
                                 {/* Baris Bawah Lokasi & WiFi */}
-                                <div className="flex items-center justify-between gap-2 border-t border-[#F0EAE1] pt-2">
-                                    <div className="flex min-w-0 items-center gap-1.5 text-[10.5px] font-medium text-[#3F3A34]">
+                                <div className="flex items-center justify-between gap-2 border-t border-[#F0EAE1] pt-1.5">
+                                    <div className="flex min-w-0 items-center gap-1 text-[10px] font-medium text-[#3F3A34]">
                                         <Storefront
                                             weight="duotone"
-                                            className="size-3.5 shrink-0 text-[#4A2C18]"
+                                            className="size-3 shrink-0 text-[#4A2C18]"
                                         />
                                         <span className="truncate">
                                             {table.name ||
@@ -1545,10 +1678,10 @@ export default function CustomerOrder({
                                         </span>
                                     </div>
 
-                                    <div className="flex shrink-0 items-center gap-1 rounded-[4px] border border-[#E8E2D9] bg-[#F5F1E9] px-2 py-1 text-[9.5px] leading-none font-semibold whitespace-nowrap text-[#4A2C18]">
+                                    <div className="flex shrink-0 items-center gap-1 rounded-[4px] border border-[#E8E2D9] bg-[#F5F1E9] px-1.5 py-0.5 text-[9px] leading-none font-semibold whitespace-nowrap text-[#4A2C18]">
                                         <WifiHigh
                                             weight="bold"
-                                            className="size-3 text-[#C52828]"
+                                            className="size-2.5 text-[#C52828]"
                                         />
                                         <span>WIFI: SIDELINE-GUEST</span>
                                     </div>
@@ -1557,23 +1690,23 @@ export default function CustomerOrder({
 
                             {/* Banner Pesanan Aktif (Mode Tambah Menu ke Pesanan yang Sedang Berjalan) */}
                             {activeOrder && (
-                                <div className="mt-2 space-y-1.5 rounded-lg border border-[#2E2C29] bg-[#1A1A1A] px-3.5 py-3 text-white shadow-sm">
+                                <div className="mt-1.5 space-y-1 rounded-lg border border-[#2E2C29] bg-[#1A1A1A] px-3 py-2 text-white shadow-sm">
                                     <div className="flex items-center justify-between gap-2">
                                         <div className="flex min-w-0 items-center gap-1.5">
                                             <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" />
-                                            <span className="truncate text-[11px] font-semibold tracking-tight">
+                                            <span className="truncate text-[10.5px] font-semibold tracking-tight">
                                                 Tambah Menu ke #
                                                 {activeOrder.order_number}
                                             </span>
                                         </div>
                                         <Link
                                             href={`/order/status/${activeOrder.order_number}`}
-                                            className="shrink-0 rounded-[4px] bg-white/15 px-2.5 py-1.5 text-[10px] leading-none font-semibold whitespace-nowrap text-white transition hover:bg-white/25"
+                                            className="shrink-0 rounded-[4px] bg-white/15 px-2 py-1 text-[9.5px] leading-none font-semibold whitespace-nowrap text-white transition hover:bg-white/25"
                                         >
-                                            Lihat Status
+                                            Lihat Status &amp; Nota
                                         </Link>
                                     </div>
-                                    <p className="text-[10.5px] leading-relaxed text-neutral-300">
+                                    <p className="text-[10px] leading-relaxed text-neutral-300">
                                         Pesanan atas nama{' '}
                                         <strong className="font-semibold text-white">
                                             {activeOrder.customer_name}
@@ -1598,7 +1731,7 @@ export default function CustomerOrder({
                             )}
 
                             {!activeOrder && lockedOrderNotice && (
-                                <div className="mt-2 flex items-start gap-2 rounded-lg border border-[#F2DEC0] bg-[#FFF8EB] p-2.5 text-[10.5px] text-[#5C4318]">
+                                <div className="mt-1.5 flex items-start gap-2 rounded-lg border border-[#F2DEC0] bg-[#FFF8EB] p-2 text-[10px] text-[#5C4318]">
                                     <WarningCircle
                                         weight="fill"
                                         className="mt-0.5 size-3.5 shrink-0 text-[#C52828]"
@@ -1608,14 +1741,31 @@ export default function CustomerOrder({
                                     </span>
                                 </div>
                             )}
+
+                            {!activeOrder && lastOrderNumber && (
+                                <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-2.5 py-1.5 text-[10px]">
+                                    <span className="truncate font-medium text-[#3F3A34]">
+                                        Pesanan meja ini:{' '}
+                                        <strong className="font-bold text-[#1A1A1A] tabular-nums">
+                                            #{lastOrderNumber}
+                                        </strong>
+                                    </span>
+                                    <Link
+                                        href={`/order/status/${lastOrderNumber}`}
+                                        className="shrink-0 rounded-[4px] bg-[#1A1A1A] px-2 py-1 text-[9.5px] leading-none font-bold whitespace-nowrap text-white transition hover:bg-[#C52828]"
+                                    >
+                                        Lihat Status &amp; Nota
+                                    </Link>
+                                </div>
+                            )}
                         </div>
 
                         {/* 3. INPUT PENCARIAN */}
-                        <div className="px-4 pb-2.5">
-                            <div className="flex items-center gap-2.5 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-3.5 py-2 transition focus-within:border-[#C52828] focus-within:bg-[#FFFDFB]">
+                        <div className="px-3 pb-2 sm:px-4">
+                            <div className="flex items-center gap-2 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-3 py-1.5 transition focus-within:border-[#C52828] focus-within:bg-[#FFFDFB]">
                                 <MagnifyingGlass
                                     weight="bold"
-                                    className="size-4 shrink-0 text-[#6E6A64]"
+                                    className="size-3.5 shrink-0 text-[#6E6A64]"
                                 />
                                 <input
                                     type="text"
@@ -1624,7 +1774,7 @@ export default function CustomerOrder({
                                         setSearchQuery(e.target.value)
                                     }
                                     placeholder="Cari kopi, pastry, atau cemilan..."
-                                    className="flex-1 bg-transparent text-xs font-medium text-[#1A1A1A] outline-none placeholder:text-[#8C857B]"
+                                    className="flex-1 bg-transparent text-[11.5px] font-medium text-[#1A1A1A] outline-none placeholder:text-[#8C857B]"
                                 />
                                 {searchQuery ? (
                                     <button
@@ -1632,28 +1782,25 @@ export default function CustomerOrder({
                                         onClick={() => setSearchQuery('')}
                                         className="cursor-pointer text-[#6E6A64] hover:text-[#1A1A1A]"
                                     >
-                                        <PhX
-                                            weight="bold"
-                                            className="size-3.5"
-                                        />
+                                        <PhX weight="bold" className="size-3" />
                                     </button>
                                 ) : (
                                     <PhSlidersHorizontal
                                         weight="bold"
-                                        className="size-4 shrink-0 text-[#8C857B]"
+                                        className="size-3.5 shrink-0 text-[#8C857B]"
                                     />
                                 )}
                             </div>
                         </div>
 
                         {/* 4. HORIZONTAL CATEGORY PILLS NAVBAR */}
-                        <div className="px-4 pb-2.5">
-                            <div className="no-scrollbar flex items-center gap-2 overflow-x-auto py-0.5">
+                        <div className="px-3 pb-2 sm:px-4">
+                            <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto py-0.5 sm:gap-2">
                                 {/* Tombol Semua */}
                                 <button
                                     type="button"
                                     onClick={() => setSelectedCategory('all')}
-                                    className={`shrink-0 cursor-pointer rounded-lg px-3.5 py-2 text-[11px] leading-none font-semibold whitespace-nowrap transition-all ${
+                                    className={`shrink-0 cursor-pointer rounded-lg px-2.5 py-1.5 text-[10.5px] leading-none font-semibold whitespace-nowrap transition-all sm:px-3 sm:text-[11px] ${
                                         selectedCategory === 'all'
                                             ? 'flex items-center gap-1.5 bg-[#1A1A1A] text-white shadow-2xs'
                                             : 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#3F3A34] hover:bg-[#EAE3D5]'
@@ -1676,7 +1823,7 @@ export default function CustomerOrder({
                                             onClick={() =>
                                                 setSelectedCategory(cat.id)
                                             }
-                                            className={`shrink-0 cursor-pointer rounded-lg px-3.5 py-2 text-[11px] leading-none font-semibold whitespace-nowrap transition-all ${
+                                            className={`shrink-0 cursor-pointer rounded-lg px-2.5 py-1.5 text-[10.5px] leading-none font-semibold whitespace-nowrap transition-all sm:px-3 sm:text-[11px] ${
                                                 isSelected
                                                     ? 'flex items-center gap-1.5 bg-[#1A1A1A] text-white shadow-2xs'
                                                     : 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#3F3A34] hover:bg-[#EAE3D5]'
@@ -1694,48 +1841,45 @@ export default function CustomerOrder({
                     </div>
 
                     {/* 5. AREA DAFTAR MENU (HANYA BAGIAN INI YANG BISA DI-SCROLL) */}
-                    <main className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 pt-3.5 pb-6">
+                    <main className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 pt-2.5 pb-5 sm:space-y-4 sm:px-4 sm:pt-3 sm:pb-6">
                         {displayedCategories.length === 0 ? (
-                            <div className="space-y-2 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-7 text-center text-[#6E6A64]">
+                            <div className="space-y-1.5 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-6 text-center text-[#6E6A64]">
                                 <PhCoffee
                                     weight="duotone"
-                                    className="mx-auto size-9 text-[#8C857B]"
+                                    className="mx-auto size-8 text-[#8C857B]"
                                 />
-                                <p className="text-sm font-bold text-[#1A1A1A]">
+                                <p className="text-xs font-bold text-[#1A1A1A] sm:text-sm">
                                     Menu tidak ditemukan
                                 </p>
-                                <p className="text-xs text-[#6E6A64]">
+                                <p className="text-[11px] text-[#6E6A64]">
                                     Coba cari dengan kata kunci lain.
                                 </p>
                             </div>
                         ) : (
-                            <div className="space-y-5">
+                            <div className="space-y-4 sm:space-y-5">
                                 {displayedCategories.map((cat, catIdx) => (
-                                    <section
-                                        key={cat.id}
-                                        className="space-y-2.5"
-                                    >
+                                    <section key={cat.id} className="space-y-2">
                                         {/* Penanda / Pembatas Antar Kategori Menu */}
                                         <div
                                             className={cn(
-                                                'flex items-center gap-2.5 px-0.5',
-                                                catIdx > 0 && 'pt-1.5',
+                                                'flex items-center gap-2 px-0.5',
+                                                catIdx > 0 && 'pt-1',
                                             )}
                                         >
                                             <div className="flex shrink-0 items-center gap-1.5">
-                                                <span className="size-2 rounded-full bg-[#C52828]" />
-                                                <h3 className="text-xs font-bold tracking-wider text-[#1A1A1A] uppercase">
+                                                <span className="size-1.5 rounded-full bg-[#C52828]" />
+                                                <h3 className="text-[11px] font-bold tracking-wider text-[#1A1A1A] uppercase">
                                                     {cat.name}
                                                 </h3>
                                             </div>
                                             <div className="h-px flex-1 bg-[#E8E2D8]" />
-                                            <span className="shrink-0 rounded-[4px] border border-[#E6DFD3] bg-[#F3EFE6] px-2.5 py-0.5 text-[10px] font-semibold text-[#4A2C18]">
+                                            <span className="shrink-0 rounded-[4px] border border-[#E6DFD3] bg-[#F3EFE6] px-2 py-0.5 text-[9.5px] font-semibold text-[#4A2C18]">
                                                 {cat.menus.length} Menu
                                             </span>
                                         </div>
 
                                         {/* Daftar Card Menu dalam Kategori Ini */}
-                                        <div className="space-y-2.5">
+                                        <div className="space-y-2">
                                             {cat.menus.map((menu) => {
                                                 const menuCartItems =
                                                     cart.filter(
@@ -1776,7 +1920,7 @@ export default function CustomerOrder({
                                                     <div
                                                         key={menu.id}
                                                         className={cn(
-                                                            'group relative flex items-center gap-3 rounded-xl border p-3 transition-all duration-200',
+                                                            'group relative flex items-center gap-2.5 rounded-xl border p-2.5 transition-all duration-200 sm:gap-3 sm:p-3',
                                                             outOfStock
                                                                 ? 'border-[#E8E2D9] bg-[#F7F4EE]/80 opacity-85'
                                                                 : cartQty > 0
@@ -1784,10 +1928,10 @@ export default function CustomerOrder({
                                                                   : 'border-[#E8E2D9] bg-[#FFFDFB] shadow-[0_2px_8px_rgba(26,26,26,0.02)] hover:border-[#DCD4C6]',
                                                         )}
                                                     >
-                                                        {/* Kiri: Foto Produk Persegi Compact */}
+                                                        {/* Kiri: Foto Produk Compact (Utuh / Tidak Terpotong) */}
                                                         <div
                                                             className={cn(
-                                                                'relative size-[78px] shrink-0 overflow-hidden rounded-lg bg-[#EFECE6] sm:size-[84px]',
+                                                                'relative h-[72px] w-[60px] shrink-0 overflow-hidden rounded-lg border border-[#EAE2D6] bg-[#EFECE6] sm:h-[80px] sm:w-[68px]',
                                                                 outOfStock
                                                                     ? 'cursor-not-allowed'
                                                                     : 'cursor-pointer',
@@ -1809,9 +1953,16 @@ export default function CustomerOrder({
                                                         >
                                                             <img
                                                                 src={imageSrc}
+                                                                alt=""
+                                                                aria-hidden="true"
+                                                                className="pointer-events-none absolute inset-0 size-full scale-110 object-cover opacity-30 blur-md"
+                                                                loading="lazy"
+                                                            />
+                                                            <img
+                                                                src={imageSrc}
                                                                 alt={menu.name}
                                                                 className={cn(
-                                                                    'size-full object-cover transition-transform duration-300',
+                                                                    'relative z-10 size-full object-contain transition-transform duration-300',
                                                                     outOfStock
                                                                         ? 'opacity-65 grayscale'
                                                                         : 'group-hover:scale-105',
@@ -1820,50 +1971,18 @@ export default function CustomerOrder({
                                                             />
 
                                                             {outOfStock && (
-                                                                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-[#1A1A1A]/40">
-                                                                    <span className="rounded-[4px] bg-[#1A1A1A]/90 px-2 py-0.5 text-[10px] font-extrabold tracking-wider text-white uppercase shadow-xs">
+                                                                <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-[#1A1A1A]/45">
+                                                                    <span className="rounded-[4px] bg-[#1A1A1A]/90 px-1.5 py-0.5 text-[9px] font-extrabold tracking-wider text-white uppercase shadow-xs">
                                                                         Habis
                                                                     </span>
                                                                 </div>
                                                             )}
-
-                                                            {/* Label Diskon Promo di Kiri Atas Foto */}
-                                                            {!outOfStock &&
-                                                                menu.is_discount_active &&
-                                                                (menu.discount_amount ||
-                                                                    0) > 0 && (
-                                                                    <span className="pointer-events-none absolute top-1.5 left-1.5 z-10 inline-flex items-center gap-0.5 rounded-[4px] bg-[#C52828] px-1.5 py-0.5 text-[9px] leading-none font-extrabold text-white shadow-xs">
-                                                                        <Flame
-                                                                            weight="fill"
-                                                                            className="size-2.5 shrink-0 text-white"
-                                                                        />
-                                                                        {menu.discount_type ===
-                                                                        'percent'
-                                                                            ? `${parseFloat(String(menu.discount_value))}% OFF`
-                                                                            : `HEMAT ${formatRupiah(menu.discount_value || 0)}`}
-                                                                    </span>
-                                                                )}
-
-                                                            {/* Badge Jumlah di Pesanan pada Kanan Atas Foto */}
-                                                            {cartQty > 0 && (
-                                                                <span className="absolute top-1.5 right-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-[4px] bg-[#C52828] px-1.5 text-[10px] font-bold text-white tabular-nums shadow-xs">
-                                                                    {cartQty}x
-                                                                </span>
-                                                            )}
-
-                                                            {/* Label Varian di Kanan Bawah Foto */}
-                                                            {!outOfStock &&
-                                                                menuHasVariants && (
-                                                                    <span className="pointer-events-none absolute right-1.5 bottom-1.5 z-10 rounded-[4px] bg-[#1A1A1A]/85 px-2 py-0.5 text-[9px] leading-none font-semibold text-white backdrop-blur-xs">
-                                                                        Ukuran
-                                                                    </span>
-                                                                )}
                                                         </div>
 
-                                                        {/* Kanan: Judul + Badge di Pesanan, Deskripsi, Harga & Tombol + Tambah */}
+                                                        {/* Kanan: Judul + Badge, Deskripsi, Harga & Tombol + Tambah */}
                                                         <div className="flex min-w-0 flex-1 flex-col justify-between">
                                                             <div>
-                                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                                <div className="flex flex-wrap items-center gap-1">
                                                                     <h4
                                                                         onClick={() => {
                                                                             if (
@@ -1875,7 +1994,7 @@ export default function CustomerOrder({
                                                                             }
                                                                         }}
                                                                         className={cn(
-                                                                            'text-[14px] leading-snug font-bold tracking-tight transition-colors sm:text-[15px]',
+                                                                            'text-[13px] leading-snug font-bold tracking-tight transition-colors sm:text-[13.5px]',
                                                                             outOfStock
                                                                                 ? 'cursor-not-allowed text-[#6E6A64]'
                                                                                 : 'cursor-pointer text-[#1A1A1A] hover:text-[#C52828]',
@@ -1890,23 +2009,33 @@ export default function CustomerOrder({
                                                                         (menu.discount_amount ||
                                                                             0) >
                                                                             0 && (
-                                                                            <span className="inline-flex items-center gap-0.5 rounded-[4px] border border-[#F5C2C0] bg-[#FDECEB] px-1.5 py-0.5 text-[9.5px] leading-none font-extrabold text-[#C52828]">
+                                                                            <span className="inline-flex items-center gap-0.5 rounded-[4px] border border-[#F5C2C0] bg-[#FDECEB] px-1.5 py-0.5 text-[8.5px] leading-none font-extrabold text-[#C52828]">
                                                                                 <Flame
                                                                                     weight="fill"
                                                                                     className="size-2.5 shrink-0 text-[#C52828]"
                                                                                 />
-                                                                                PROMO
+                                                                                {menu.discount_type ===
+                                                                                'percent'
+                                                                                    ? `${parseFloat(String(menu.discount_value))}% OFF`
+                                                                                    : `HEMAT ${formatRupiah(menu.discount_value || 0)}`}
+                                                                            </span>
+                                                                        )}
+
+                                                                    {!outOfStock &&
+                                                                        menuHasVariants && (
+                                                                            <span className="inline-flex items-center rounded-[4px] border border-[#E6DFD3] bg-[#F5EFE6] px-1.5 py-0.5 text-[8.5px] leading-none font-semibold text-[#5C544B]">
+                                                                                Varian
                                                                             </span>
                                                                         )}
 
                                                                     {outOfStock ? (
-                                                                        <span className="inline-flex items-center rounded-[4px] border border-[#DFD8CD] bg-[#EFECE6] px-1.5 py-0.5 text-[9.5px] leading-none font-bold text-[#6E6A64]">
+                                                                        <span className="inline-flex items-center rounded-[4px] border border-[#DFD8CD] bg-[#EFECE6] px-1.5 py-0.5 text-[8.5px] leading-none font-bold text-[#6E6A64]">
                                                                             Habis
                                                                         </span>
                                                                     ) : menu.is_limited_stock ? (
                                                                         <span
                                                                             className={cn(
-                                                                                'inline-flex items-center rounded-[4px] border px-1.5 py-0.5 text-[9.5px] leading-none font-bold tabular-nums',
+                                                                                'inline-flex items-center rounded-[4px] border px-1.5 py-0.5 text-[8.5px] leading-none font-bold tabular-nums',
                                                                                 stockQty <=
                                                                                     5
                                                                                     ? 'border-amber-300 bg-amber-50 text-amber-800'
@@ -1915,8 +2044,8 @@ export default function CustomerOrder({
                                                                         >
                                                                             {stockQty <=
                                                                             5
-                                                                                ? `Stok Terbatas • Sisa ${stockQty}`
-                                                                                : `Sisa ${stockQty}`}
+                                                                                ? `Sisa ${stockQty}`
+                                                                                : `Stok ${stockQty}`}
                                                                         </span>
                                                                     ) : null}
 
@@ -1938,7 +2067,7 @@ export default function CustomerOrder({
                                                                                     );
                                                                                 }
                                                                             }}
-                                                                            className="inline-flex cursor-pointer items-center rounded-[4px] bg-[#FDECEB] px-2 py-0.5 text-[10px] leading-none font-semibold text-[#C52828] transition hover:bg-[#FADCD9]"
+                                                                            className="inline-flex cursor-pointer items-center rounded-[4px] bg-[#C52828] px-1.5 py-0.5 text-[8.5px] leading-none font-bold text-white transition hover:bg-[#B02222]"
                                                                             title="Klik untuk ubah pesanan ini"
                                                                         >
                                                                             {
@@ -1951,7 +2080,7 @@ export default function CustomerOrder({
                                                                 </div>
 
                                                                 {menu.description && (
-                                                                    <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-[#6E6A64]">
+                                                                    <p className="mt-0.5 line-clamp-2 text-[10.5px] leading-snug text-[#6E6A64]">
                                                                         {
                                                                             menu.description
                                                                         }
@@ -1960,9 +2089,9 @@ export default function CustomerOrder({
                                                             </div>
 
                                                             {/* Baris Bawah: MULAI DARI + Harga di Kiri, Tombol + Tambah / + Tambah Lagi di Kanan */}
-                                                            <div className="mt-2.5 flex items-end justify-between gap-2">
-                                                                <div>
-                                                                    <span className="block text-[9px] leading-none font-semibold tracking-wider text-[#8C857B] uppercase">
+                                                            <div className="mt-2 flex items-end justify-between gap-1.5">
+                                                                <div className="min-w-0">
+                                                                    <span className="block text-[8px] leading-none font-semibold tracking-wider text-[#8C857B] uppercase">
                                                                         MULAI
                                                                         DARI
                                                                     </span>
@@ -1970,21 +2099,21 @@ export default function CustomerOrder({
                                                                     (menu.discount_amount ||
                                                                         0) >
                                                                         0 ? (
-                                                                        <div className="mt-0.5 flex flex-wrap items-baseline gap-1.5">
-                                                                            <span className="text-[14px] leading-tight font-extrabold text-[#C52828] tabular-nums sm:text-[15px]">
+                                                                        <div className="mt-0.5 flex flex-wrap items-baseline gap-1">
+                                                                            <span className="text-[13px] leading-tight font-extrabold whitespace-nowrap text-[#C52828] tabular-nums sm:text-[13.5px]">
                                                                                 {formatRupiah(
                                                                                     menu.final_price ??
                                                                                         menu.base_price,
                                                                                 )}
                                                                             </span>
-                                                                            <s className="text-[11px] leading-none font-medium text-[#8C857B]">
+                                                                            <s className="text-[10px] leading-none font-medium whitespace-nowrap text-[#8C857B]">
                                                                                 {formatRupiah(
                                                                                     menu.base_price,
                                                                                 )}
                                                                             </s>
                                                                         </div>
                                                                     ) : (
-                                                                        <span className="mt-0.5 block text-[14px] leading-tight font-bold text-[#C52828] tabular-nums sm:text-[15px]">
+                                                                        <span className="mt-0.5 block text-[13px] leading-tight font-bold whitespace-nowrap text-[#C52828] tabular-nums sm:text-[13.5px]">
                                                                             {formatRupiah(
                                                                                 menu.base_price,
                                                                             )}
@@ -2004,7 +2133,7 @@ export default function CustomerOrder({
                                                                         )
                                                                     }
                                                                     className={cn(
-                                                                        'inline-flex shrink-0 items-center justify-center rounded-lg px-3.5 py-1.5 text-[11.5px] font-bold transition',
+                                                                        'inline-flex shrink-0 items-center justify-center rounded-lg px-2.5 py-1 text-[10.5px] font-bold whitespace-nowrap transition sm:px-3 sm:py-1.5 sm:text-[11px]',
                                                                         outOfStock
                                                                             ? 'cursor-not-allowed bg-[#E5DFD5] text-[#7D766D] shadow-none'
                                                                             : stockReachedLimit
@@ -2016,10 +2145,10 @@ export default function CustomerOrder({
                                                                         {outOfStock
                                                                             ? 'Stok Habis'
                                                                             : stockReachedLimit
-                                                                              ? 'Maks. di Keranjang'
+                                                                              ? 'Maks.'
                                                                               : cartQty >
                                                                                   0
-                                                                                ? '+ Tambah Lagi'
+                                                                                ? '+ Lagi'
                                                                                 : '+ Tambah'}
                                                                     </span>
                                                                 </button>
@@ -2035,14 +2164,14 @@ export default function CustomerOrder({
                         )}
 
                         {/* 6. BANNER ALERGI & CATATAN KHUSUS */}
-                        <div className="mt-2 flex items-start gap-2.5 rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] p-3.5 text-xs text-[#3F3A34]">
-                            <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-[#FDECEB] text-[#C52828]">
+                        <div className="mt-2 flex items-start gap-2 rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] p-2.5 text-[10.5px] text-[#3F3A34] sm:p-3">
+                            <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md bg-[#FDECEB] text-[#C52828]">
                                 <PencilSimpleLine
                                     weight="bold"
-                                    className="size-3.5"
+                                    className="size-3"
                                 />
                             </div>
-                            <p className="text-[11.5px] leading-relaxed text-[#5E5850]">
+                            <p className="text-[10.5px] leading-relaxed text-[#5E5850]">
                                 Ada permintaan takaran gula, es, atau alergi
                                 tertentu? Kamu bisa menambahkan{' '}
                                 <strong className="font-semibold text-[#1A1A1A]">
@@ -2055,13 +2184,13 @@ export default function CustomerOrder({
 
                     {/* 7. STICKY BOTTOM CHECKOUT BAR (DIAM DI BAWAH) */}
                     {cart.length > 0 && (
-                        <div className="sticky right-0 bottom-0 left-0 z-30 shrink-0 bg-gradient-to-t from-[#FAF8F4] via-[#FAF8F4]/95 to-transparent px-3.5 pt-2 pb-3.5">
-                            <div className="flex items-center justify-between rounded-xl border border-[#2E2C29] bg-[#1A1A1A] p-3 pl-4 text-white shadow-2xl">
-                                <div>
-                                    <span className="block text-[10px] font-semibold tracking-wider text-[#A39E95] uppercase">
+                        <div className="sticky right-0 bottom-0 left-0 z-30 shrink-0 bg-gradient-to-t from-[#FAF8F4] via-[#FAF8F4]/95 to-transparent px-3 pt-1.5 pb-2.5 sm:px-3.5 sm:pb-3.5">
+                            <div className="flex items-center justify-between gap-2 rounded-xl border border-[#2E2C29] bg-[#1A1A1A] p-2.5 pl-3 text-white shadow-2xl sm:p-3 sm:pl-4">
+                                <div className="min-w-0">
+                                    <span className="block text-[8.5px] font-semibold tracking-wider text-[#A39E95] uppercase sm:text-[9.5px]">
                                         RINGKASAN KERANJANG
                                     </span>
-                                    <div className="text-[13px] font-bold text-white tabular-nums sm:text-sm">
+                                    <div className="truncate text-xs font-bold text-white tabular-nums sm:text-[13px]">
                                         {totalCartItems} Item &bull;{' '}
                                         {formatRupiah(totalCartPrice)}
                                     </div>
@@ -2070,16 +2199,16 @@ export default function CustomerOrder({
                                 <button
                                     type="button"
                                     onClick={() => setIsCartOpen(true)}
-                                    className="flex cursor-pointer items-center gap-2 rounded-xl bg-[#C52828] px-4 py-2.5 text-xs font-bold text-white shadow-[0_4px_14px_rgba(197,40,40,0.35)] transition hover:bg-[#B02222] active:scale-95 sm:text-[13px]"
+                                    className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-[#C52828] px-3 py-2 text-[11px] font-bold text-white shadow-[0_4px_14px_rgba(197,40,40,0.35)] transition hover:bg-[#B02222] active:scale-95 sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-xs"
                                 >
                                     <ShoppingCart
                                         weight="fill"
-                                        className="size-4"
+                                        className="size-3.5"
                                     />
                                     <span>Keranjang ({totalCartItems})</span>
                                     <PhArrowRight
                                         weight="bold"
-                                        className="size-3.5"
+                                        className="size-3"
                                     />
                                 </button>
                             </div>
@@ -2098,331 +2227,296 @@ export default function CustomerOrder({
                             }
                         }}
                     >
-                        <DialogContent className="flex max-h-[88dvh] w-[calc(100%-1.5rem)] max-w-[390px] flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-[420px] [&>button:last-child]:hidden">
-                            {activeMenu && (
-                                <div className="flex h-full max-h-[88dvh] flex-col overflow-hidden">
-                                    {/* Scrollable Body: Image + Title + Options + Notes */}
-                                    <div className="flex-1 overflow-x-hidden overflow-y-auto">
-                                        {/* Image Header with proportional height */}
-                                        <div className="relative h-40 w-full shrink-0 overflow-hidden bg-[#EFECE6] sm:h-44">
-                                            <img
-                                                src={
-                                                    activeMenu.image_path
-                                                        ? `/storage/${activeMenu.image_path}`
-                                                        : getMenuFallbackImage(
-                                                              activeMenu.name,
-                                                              '',
-                                                          )
-                                                }
-                                                alt={activeMenu.name}
-                                                className="size-full object-cover"
-                                            />
+                        <DialogContent className="flex max-h-[86dvh] w-[calc(100%-1.5rem)] max-w-[356px] flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-[390px] [&>button:last-child]:hidden">
+                            {activeMenu &&
+                                (() => {
+                                    const modalImageSrc = activeMenu.image_path
+                                        ? `/storage/${activeMenu.image_path}`
+                                        : getMenuFallbackImage(
+                                              activeMenu.name,
+                                              '',
+                                          );
+                                    const unitPrice =
+                                        calculateCustomUnitPrice();
 
-                                            {/* Close Button Top-Right */}
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setIsCustomizeOpen(false);
-                                                    setEditingCartId(null);
-                                                }}
-                                                aria-label="Tutup detail produk"
-                                                className="absolute top-2.5 right-2.5 z-10 flex size-8 cursor-pointer items-center justify-center rounded-full bg-black/45 text-white shadow-sm backdrop-blur-md transition hover:bg-black/65 active:scale-95"
-                                            >
-                                                <PhX
-                                                    weight="bold"
-                                                    className="size-3.5"
-                                                />
-                                            </button>
+                                    return (
+                                        <div className="flex h-full max-h-[86dvh] flex-col overflow-hidden">
+                                            {/* Scrollable Body: Compact Header + Photo + Options + Notes */}
+                                            <div className="flex-1 overflow-x-hidden overflow-y-auto">
+                                                <div className="relative space-y-3 bg-[#FAF8F4] p-3.5 sm:p-4">
+                                                    {/* Close Button Top-Right */}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setIsCustomizeOpen(
+                                                                false,
+                                                            );
+                                                            setEditingCartId(
+                                                                null,
+                                                            );
+                                                        }}
+                                                        aria-label="Tutup detail produk"
+                                                        className="absolute top-3 right-3 z-20 flex size-7 cursor-pointer items-center justify-center rounded-full bg-[#EFECE6] text-[#1A1A1A] transition hover:bg-[#E5E0D6] active:scale-95"
+                                                    >
+                                                        <PhX
+                                                            weight="bold"
+                                                            className="size-3.5"
+                                                        />
+                                                    </button>
 
-                                            {editingCartId !== null && (
-                                                <div className="absolute top-2.5 left-2.5 z-10">
-                                                    <span className="rounded-full bg-[#1A1A1A]/90 px-2.5 py-0.5 text-[10px] font-bold tracking-wide text-white shadow-xs backdrop-blur-md">
-                                                        Ubah Item Keranjang
-                                                    </span>
-                                                </div>
-                                            )}
-                                        </div>
+                                                    {/* Header: Foto Compact Utuh + Judul + Harga + Deskripsi */}
+                                                    <DialogHeader className="space-y-2 text-left">
+                                                        <div className="flex items-start gap-3">
+                                                            {/* Framed Compact Image (uncropped across portrait/square/landscape ratios) */}
+                                                            <div className="relative h-24 w-20 shrink-0 overflow-hidden rounded-xl border border-[#E6DFD3] bg-[#EFECE6] sm:h-26 sm:w-22">
+                                                                <img
+                                                                    src={
+                                                                        modalImageSrc
+                                                                    }
+                                                                    alt=""
+                                                                    aria-hidden="true"
+                                                                    className="pointer-events-none absolute inset-0 size-full scale-110 object-cover opacity-30 blur-md"
+                                                                />
+                                                                <img
+                                                                    src={
+                                                                        modalImageSrc
+                                                                    }
+                                                                    alt={
+                                                                        activeMenu.name
+                                                                    }
+                                                                    className="relative z-10 size-full object-contain"
+                                                                />
+                                                            </div>
 
-                                        {/* Clean Warm Cream Content Area */}
-                                        <div className="space-y-3.5 bg-[#FAF8F4] p-4 sm:p-5">
-                                            {/* Product Name & Price in One Row + Short Description */}
-                                            <DialogHeader className="space-y-1 text-left">
-                                                <div className="flex items-baseline justify-between gap-2">
-                                                    <div className="flex flex-wrap items-center gap-1.5">
-                                                        <DialogTitle className="text-[17px] leading-snug font-bold tracking-tight text-[#1A1A1A] sm:text-lg">
-                                                            {activeMenu.name}
-                                                        </DialogTitle>
-                                                        {activeMenu.is_discount_active &&
-                                                            (activeMenu.discount_amount ||
-                                                                0) > 0 && (
-                                                                <span className="inline-flex items-center gap-0.5 rounded-[4px] border border-[#F5C2C0] bg-[#FDECEB] px-1.5 py-0.5 text-[9.5px] leading-none font-extrabold text-[#C52828]">
-                                                                    <Flame
-                                                                        weight="fill"
-                                                                        className="size-2.5 shrink-0 text-[#C52828]"
-                                                                    />
-                                                                    {activeMenu.discount_type ===
-                                                                    'percent'
-                                                                        ? `Diskon ${parseFloat(String(activeMenu.discount_value))}%`
-                                                                        : `Diskon ${formatRupiah(activeMenu.discount_value || 0)}`}
-                                                                </span>
-                                                            )}
-                                                        {activeMenu.is_limited_stock && (
-                                                            <span
-                                                                className={cn(
-                                                                    'inline-flex items-center rounded-[4px] border px-1.5 py-0.5 text-[9.5px] leading-none font-bold tabular-nums',
-                                                                    activeRemainingStock <=
-                                                                        0
-                                                                        ? 'border-[#DFD8CD] bg-[#EFECE6] text-[#6E6A64]'
-                                                                        : (activeMenu.stock_quantity ??
-                                                                                0) <=
-                                                                            5
-                                                                          ? 'border-amber-300 bg-amber-50 text-amber-800'
-                                                                          : 'border-[#E6DFD3] bg-[#F5EFE6] text-[#5C544B]',
+                                                            <div className="min-w-0 flex-1 pr-7">
+                                                                {editingCartId !==
+                                                                    null && (
+                                                                    <span className="mb-1 inline-block rounded-md bg-[#1A1A1A] px-2 py-0.5 text-[9px] font-bold tracking-wide text-white">
+                                                                        Ubah
+                                                                        Item
+                                                                        Keranjang
+                                                                    </span>
                                                                 )}
-                                                            >
-                                                                {activeRemainingStock <=
-                                                                0
-                                                                    ? 'Batas stok tercapai'
-                                                                    : `Tersisa ${activeMenu.stock_quantity ?? 0} porsi • Maks. ${activeRemainingStock}`}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    <div className="flex shrink-0 flex-col items-end">
-                                                        <span className="text-[15px] leading-snug font-extrabold text-[#C52828] tabular-nums sm:text-base">
-                                                            {formatRupiah(
-                                                                calculateCustomUnitPrice(),
-                                                            )}
-                                                        </span>
-                                                        {activeMenu.is_discount_active &&
-                                                            (activeMenu.discount_amount ||
-                                                                0) > 0 && (
-                                                                <s className="text-[10.5px] leading-none text-[#8C857B]">
-                                                                    {formatRupiah(
-                                                                        (parseFloat(
-                                                                            activeMenu.base_price,
-                                                                        ) ||
-                                                                            0) +
-                                                                            (calculateCustomUnitPrice() -
-                                                                                (parseFloat(
-                                                                                    String(
-                                                                                        activeMenu.final_price ??
-                                                                                            activeMenu.base_price,
-                                                                                    ),
-                                                                                ) ||
-                                                                                    0)),
-                                                                    )}
-                                                                </s>
-                                                            )}
-                                                    </div>
-                                                </div>
-                                                {activeMenu.description && (
-                                                    <DialogDescription className="text-xs leading-relaxed text-[#6E6A64]">
-                                                        {activeMenu.description}
-                                                    </DialogDescription>
-                                                )}
-                                            </DialogHeader>
 
-                                            <div className="h-px w-full bg-[#EBE5DC]" />
+                                                                <DialogTitle className="text-[15px] leading-snug font-bold tracking-tight text-[#1A1A1A] sm:text-base">
+                                                                    {
+                                                                        activeMenu.name
+                                                                    }
+                                                                </DialogTitle>
 
-                                            {/* Grup Opsi Kustomisasi (Ukuran Horizontal + Opsi Tambahan) */}
-                                            {activeMenu.option_groups &&
-                                                activeMenu.option_groups
-                                                    .length > 0 && (
-                                                    <div className="space-y-3.5">
-                                                        {activeMenu.option_groups.map(
-                                                            (group) => {
-                                                                const isSingle =
-                                                                    isSingleSelectGroup(
-                                                                        group,
-                                                                    );
-                                                                const baseMenuPrice =
-                                                                    parseFloat(
-                                                                        String(
-                                                                            activeMenu.final_price ??
-                                                                                activeMenu.base_price,
-                                                                        ),
-                                                                    ) || 0;
-                                                                const activeItems =
-                                                                    group.option_items.filter(
-                                                                        (
-                                                                            item,
-                                                                        ) =>
-                                                                            item.is_active,
-                                                                    );
-                                                                const cleanGroupTitle =
-                                                                    group.name
-                                                                        .trim()
-                                                                        .toLowerCase()
-                                                                        .startsWith(
-                                                                            'pilih',
-                                                                        )
-                                                                        ? group.name.trim()
-                                                                        : `Pilih ${group.name.trim()}`;
+                                                                <div className="mt-1 flex flex-wrap items-baseline gap-1.5">
+                                                                    <span className="text-sm leading-tight font-extrabold whitespace-nowrap text-[#C52828] tabular-nums sm:text-[15px]">
+                                                                        {formatRupiah(
+                                                                            unitPrice,
+                                                                        )}
+                                                                    </span>
+                                                                    {activeMenu.is_discount_active &&
+                                                                        (activeMenu.discount_amount ||
+                                                                            0) >
+                                                                            0 && (
+                                                                            <s className="text-[10.5px] leading-none whitespace-nowrap text-[#8C857B]">
+                                                                                {formatRupiah(
+                                                                                    (parseFloat(
+                                                                                        activeMenu.base_price,
+                                                                                    ) ||
+                                                                                        0) +
+                                                                                        (unitPrice -
+                                                                                            (parseFloat(
+                                                                                                String(
+                                                                                                    activeMenu.final_price ??
+                                                                                                        activeMenu.base_price,
+                                                                                                ),
+                                                                                            ) ||
+                                                                                                0)),
+                                                                                )}
+                                                                            </s>
+                                                                        )}
+                                                                </div>
 
-                                                                return (
-                                                                    <div
-                                                                        key={
-                                                                            group.id
-                                                                        }
-                                                                        className="space-y-2"
-                                                                    >
-                                                                        <div className="flex items-center justify-between gap-2">
-                                                                            <div className="flex items-center gap-1.5">
-                                                                                <CupHeaderPhosphorIcon className="size-4 text-[#4A2C18]" />
-                                                                                <span className="text-xs font-bold text-[#1A1A1A]">
-                                                                                    {
-                                                                                        cleanGroupTitle
-                                                                                    }
-                                                                                </span>
-                                                                            </div>
-
-                                                                            {isSingle ? (
-                                                                                <span className="inline-flex items-center gap-1 rounded-md bg-[#FDECEB] px-2 py-0.5 text-[10px] font-semibold text-[#C52828]">
+                                                                {(activeMenu.is_discount_active ||
+                                                                    activeMenu.is_limited_stock) && (
+                                                                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                                                                        {activeMenu.is_discount_active &&
+                                                                            (activeMenu.discount_amount ||
+                                                                                0) >
+                                                                                0 && (
+                                                                                <span className="inline-flex items-center gap-0.5 rounded-[4px] border border-[#F5C2C0] bg-[#FDECEB] px-1.5 py-0.5 text-[8.5px] leading-none font-extrabold text-[#C52828]">
                                                                                     <Flame
                                                                                         weight="fill"
-                                                                                        className="size-3 text-[#C52828]"
+                                                                                        className="size-2.5 shrink-0 text-[#C52828]"
                                                                                     />
-                                                                                    <span>
-                                                                                        Paling
-                                                                                        Favorit
-                                                                                    </span>
-                                                                                </span>
-                                                                            ) : (
-                                                                                <span className="rounded-md bg-[#EFEADF] px-2 py-0.5 text-[10px] font-medium text-[#5E5850]">
-                                                                                    Bisa
-                                                                                    Banyak
-                                                                                    {group.is_required &&
-                                                                                        ' • Wajib'}
+                                                                                    {activeMenu.discount_type ===
+                                                                                    'percent'
+                                                                                        ? `Diskon ${parseFloat(String(activeMenu.discount_value))}%`
+                                                                                        : `Hemat ${formatRupiah(activeMenu.discount_value || 0)}`}
                                                                                 </span>
                                                                             )}
-                                                                        </div>
-
-                                                                        {isSingle ? (
-                                                                            <div
+                                                                        {activeMenu.is_limited_stock && (
+                                                                            <span
                                                                                 className={cn(
-                                                                                    'grid gap-2',
-                                                                                    activeItems.length ===
-                                                                                        1
-                                                                                        ? 'grid-cols-1'
-                                                                                        : activeItems.length ===
-                                                                                            2
-                                                                                          ? 'grid-cols-2'
-                                                                                          : 'grid-cols-3',
+                                                                                    'inline-flex items-center rounded-[4px] border px-1.5 py-0.5 text-[8.5px] leading-none font-bold tabular-nums',
+                                                                                    activeRemainingStock <=
+                                                                                        0
+                                                                                        ? 'border-[#DFD8CD] bg-[#EFECE6] text-[#6E6A64]'
+                                                                                        : (activeMenu.stock_quantity ??
+                                                                                                0) <=
+                                                                                            5
+                                                                                          ? 'border-amber-300 bg-amber-50 text-amber-800'
+                                                                                          : 'border-[#E6DFD3] bg-[#F5EFE6] text-[#5C544B]',
                                                                                 )}
                                                                             >
-                                                                                {activeItems.map(
-                                                                                    (
-                                                                                        item,
-                                                                                        itemIdx,
-                                                                                    ) => {
-                                                                                        const isChecked =
-                                                                                            selectedOptionIds.includes(
-                                                                                                item.id,
-                                                                                            );
-                                                                                        const addPrice =
-                                                                                            parseFloat(
-                                                                                                item.additional_price,
-                                                                                            ) ||
-                                                                                            0;
-                                                                                        const fullSizePrice =
-                                                                                            baseMenuPrice +
-                                                                                            addPrice;
+                                                                                {activeRemainingStock <=
+                                                                                0
+                                                                                    ? 'Batas stok tercapai'
+                                                                                    : `Tersisa ${activeMenu.stock_quantity ?? 0} • Maks. ${activeRemainingStock}`}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
 
-                                                                                        return (
-                                                                                            <button
-                                                                                                key={
-                                                                                                    item.id
-                                                                                                }
-                                                                                                type="button"
-                                                                                                onClick={() =>
-                                                                                                    handleToggleOption(
-                                                                                                        group,
-                                                                                                        item,
-                                                                                                    )
-                                                                                                }
-                                                                                                className={cn(
-                                                                                                    'relative flex cursor-pointer items-center gap-2 rounded-xl p-2.5 text-left transition-all',
-                                                                                                    isChecked
-                                                                                                        ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
-                                                                                                        : 'border border-[#E8E2D9] bg-[#F5F1E9]/85 hover:bg-[#EFEADF]',
-                                                                                                )}
-                                                                                            >
-                                                                                                {isChecked && (
-                                                                                                    <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
-                                                                                                        <Check
-                                                                                                            weight="bold"
-                                                                                                            className="size-2"
-                                                                                                        />
-                                                                                                    </span>
-                                                                                                )}
+                                                        {activeMenu.description && (
+                                                            <DialogDescription className="text-[11px] leading-relaxed text-[#6E6A64]">
+                                                                {
+                                                                    activeMenu.description
+                                                                }
+                                                            </DialogDescription>
+                                                        )}
+                                                    </DialogHeader>
 
-                                                                                                <SizeOptionIcon
-                                                                                                    icon={
-                                                                                                        item.icon
-                                                                                                    }
-                                                                                                    name={
-                                                                                                        item.name
-                                                                                                    }
-                                                                                                    index={
-                                                                                                        itemIdx
-                                                                                                    }
-                                                                                                />
+                                                    <div className="h-px w-full bg-[#EBE5DC]" />
 
-                                                                                                <div className="min-w-0 flex-1 pr-1">
-                                                                                                    <span className="block truncate text-[11px] leading-tight font-medium text-[#3F3A34]">
-                                                                                                        {
-                                                                                                            item.name
+                                                    {/* Grup Opsi Kustomisasi (Grid 2 Kolom Rapi + Opsi Tambahan) */}
+                                                    {activeMenu.option_groups &&
+                                                        activeMenu.option_groups
+                                                            .length > 0 && (
+                                                            <div className="space-y-3">
+                                                                {activeMenu.option_groups.map(
+                                                                    (group) => {
+                                                                        const isSingle =
+                                                                            isSingleSelectGroup(
+                                                                                group,
+                                                                            );
+                                                                        const baseMenuPrice =
+                                                                            parseFloat(
+                                                                                String(
+                                                                                    activeMenu.final_price ??
+                                                                                        activeMenu.base_price,
+                                                                                ),
+                                                                            ) ||
+                                                                            0;
+                                                                        const activeItems =
+                                                                            group.option_items.filter(
+                                                                                (
+                                                                                    item,
+                                                                                ) =>
+                                                                                    item.is_active,
+                                                                            );
+                                                                        const cleanGroupTitle =
+                                                                            group.name
+                                                                                .trim()
+                                                                                .toLowerCase()
+                                                                                .startsWith(
+                                                                                    'pilih',
+                                                                                )
+                                                                                ? group.name.trim()
+                                                                                : `Pilih ${group.name.trim()}`;
+
+                                                                        return (
+                                                                            <div
+                                                                                key={
+                                                                                    group.id
+                                                                                }
+                                                                                className="space-y-1.5"
+                                                                            >
+                                                                                <div className="flex items-center justify-between gap-2">
+                                                                                    <div className="flex min-w-0 items-center gap-1.5">
+                                                                                        <CupHeaderPhosphorIcon className="size-3.5 shrink-0 text-[#4A2C18]" />
+                                                                                        <span className="truncate text-[11.5px] font-bold text-[#1A1A1A]">
+                                                                                            {
+                                                                                                cleanGroupTitle
+                                                                                            }
+                                                                                        </span>
+                                                                                    </div>
+
+                                                                                    {isSingle ? (
+                                                                                        <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[#FDECEB] px-1.5 py-0.5 text-[9.5px] font-semibold text-[#C52828]">
+                                                                                            <Flame
+                                                                                                weight="fill"
+                                                                                                className="size-2.5 text-[#C52828]"
+                                                                                            />
+                                                                                            <span>
+                                                                                                Paling
+                                                                                                Favorit
+                                                                                            </span>
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        <span className="shrink-0 rounded-md bg-[#EFEADF] px-1.5 py-0.5 text-[9.5px] font-medium text-[#5E5850]">
+                                                                                            Bisa
+                                                                                            Banyak
+                                                                                            {group.is_required &&
+                                                                                                ' • Wajib'}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
+
+                                                                                {isSingle ? (
+                                                                                    <div
+                                                                                        className={cn(
+                                                                                            'grid gap-1.5 sm:gap-2',
+                                                                                            activeItems.length ===
+                                                                                                1
+                                                                                                ? 'grid-cols-1'
+                                                                                                : 'grid-cols-2',
+                                                                                        )}
+                                                                                    >
+                                                                                        {activeItems.map(
+                                                                                            (
+                                                                                                item,
+                                                                                                itemIdx,
+                                                                                            ) => {
+                                                                                                const isChecked =
+                                                                                                    selectedOptionIds.includes(
+                                                                                                        item.id,
+                                                                                                    );
+                                                                                                const addPrice =
+                                                                                                    parseFloat(
+                                                                                                        item.additional_price,
+                                                                                                    ) ||
+                                                                                                    0;
+                                                                                                const fullSizePrice =
+                                                                                                    baseMenuPrice +
+                                                                                                    addPrice;
+
+                                                                                                return (
+                                                                                                    <button
+                                                                                                        key={
+                                                                                                            item.id
                                                                                                         }
-                                                                                                    </span>
-                                                                                                    <span className="mt-0.5 block text-xs leading-tight font-bold text-[#1A1A1A] tabular-nums">
-                                                                                                        {formatRupiah(
-                                                                                                            fullSizePrice,
+                                                                                                        type="button"
+                                                                                                        onClick={() =>
+                                                                                                            handleToggleOption(
+                                                                                                                group,
+                                                                                                                item,
+                                                                                                            )
+                                                                                                        }
+                                                                                                        className={cn(
+                                                                                                            'relative flex cursor-pointer items-center gap-1.5 rounded-xl px-2.5 py-2 pr-5 text-left transition-all',
+                                                                                                            isChecked
+                                                                                                                ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
+                                                                                                                : 'border border-[#E8E2D9] bg-[#F5F1E9]/85 hover:bg-[#EFEADF]',
                                                                                                         )}
-                                                                                                    </span>
-                                                                                                </div>
-                                                                                            </button>
-                                                                                        );
-                                                                                    },
-                                                                                )}
-                                                                            </div>
-                                                                        ) : (
-                                                                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                                                                {activeItems.map(
-                                                                                    (
-                                                                                        item,
-                                                                                        itemIdx,
-                                                                                    ) => {
-                                                                                        const isChecked =
-                                                                                            selectedOptionIds.includes(
-                                                                                                item.id,
-                                                                                            );
-                                                                                        const addPrice =
-                                                                                            parseFloat(
-                                                                                                item.additional_price,
-                                                                                            ) ||
-                                                                                            0;
+                                                                                                    >
+                                                                                                        {isChecked && (
+                                                                                                            <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
+                                                                                                                <Check
+                                                                                                                    weight="bold"
+                                                                                                                    className="size-2"
+                                                                                                                />
+                                                                                                            </span>
+                                                                                                        )}
 
-                                                                                        return (
-                                                                                            <button
-                                                                                                key={
-                                                                                                    item.id
-                                                                                                }
-                                                                                                type="button"
-                                                                                                onClick={() =>
-                                                                                                    handleToggleOption(
-                                                                                                        group,
-                                                                                                        item,
-                                                                                                    )
-                                                                                                }
-                                                                                                className={cn(
-                                                                                                    'relative flex cursor-pointer items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left transition-all',
-                                                                                                    isChecked
-                                                                                                        ? 'border-[1.5px] border-[#C52828] bg-white'
-                                                                                                        : 'border border-[#E8E2D9] bg-[#F5F1E9]/85 hover:bg-[#EFEADF]',
-                                                                                                )}
-                                                                                            >
-                                                                                                <div className="flex min-w-0 items-center gap-2">
-                                                                                                    {item.icon ? (
                                                                                                         <SizeOptionIcon
                                                                                                             icon={
                                                                                                                 item.icon
@@ -2433,179 +2527,257 @@ export default function CustomerOrder({
                                                                                                             index={
                                                                                                                 itemIdx
                                                                                                             }
-                                                                                                            containerClassName="size-5 items-center"
-                                                                                                            className="size-4"
+                                                                                                            containerClassName="size-7 origin-center scale-[0.8] items-center"
                                                                                                         />
-                                                                                                    ) : (
-                                                                                                        <Checkbox
-                                                                                                            checked={
-                                                                                                                isChecked
-                                                                                                            }
-                                                                                                            className="pointer-events-none rounded-md"
-                                                                                                        />
-                                                                                                    )}
-                                                                                                    <span className="truncate text-[11px] font-semibold text-[#1A1A1A]">
-                                                                                                        {
-                                                                                                            item.name
+
+                                                                                                        <div className="min-w-0 flex-1">
+                                                                                                            <span className="line-clamp-2 text-[10.5px] leading-tight font-semibold text-[#3F3A34]">
+                                                                                                                {
+                                                                                                                    item.name
+                                                                                                                }
+                                                                                                            </span>
+                                                                                                            <span className="mt-0.5 block text-[11px] leading-tight font-bold whitespace-nowrap text-[#1A1A1A] tabular-nums">
+                                                                                                                {formatRupiah(
+                                                                                                                    fullSizePrice,
+                                                                                                                )}
+                                                                                                            </span>
+                                                                                                        </div>
+                                                                                                    </button>
+                                                                                                );
+                                                                                            },
+                                                                                        )}
+                                                                                    </div>
+                                                                                ) : (
+                                                                                    <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                                                                                        {activeItems.map(
+                                                                                            (
+                                                                                                item,
+                                                                                                itemIdx,
+                                                                                            ) => {
+                                                                                                const isChecked =
+                                                                                                    selectedOptionIds.includes(
+                                                                                                        item.id,
+                                                                                                    );
+                                                                                                const addPrice =
+                                                                                                    parseFloat(
+                                                                                                        item.additional_price,
+                                                                                                    ) ||
+                                                                                                    0;
+
+                                                                                                return (
+                                                                                                    <button
+                                                                                                        key={
+                                                                                                            item.id
                                                                                                         }
-                                                                                                    </span>
-                                                                                                </div>
-                                                                                                <span className="shrink-0 text-[11px] font-bold text-[#C52828] tabular-nums">
-                                                                                                    {addPrice >
-                                                                                                    0
-                                                                                                        ? `+${formatRupiah(addPrice)}`
-                                                                                                        : 'Gratis'}
-                                                                                                </span>
-                                                                                            </button>
-                                                                                        );
-                                                                                    },
+                                                                                                        type="button"
+                                                                                                        onClick={() =>
+                                                                                                            handleToggleOption(
+                                                                                                                group,
+                                                                                                                item,
+                                                                                                            )
+                                                                                                        }
+                                                                                                        className={cn(
+                                                                                                            'relative flex cursor-pointer items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left transition-all',
+                                                                                                            isChecked
+                                                                                                                ? 'border-[1.5px] border-[#C52828] bg-white'
+                                                                                                                : 'border border-[#E8E2D9] bg-[#F5F1E9]/85 hover:bg-[#EFEADF]',
+                                                                                                        )}
+                                                                                                    >
+                                                                                                        <div className="flex min-w-0 items-center gap-2">
+                                                                                                            {item.icon ? (
+                                                                                                                <SizeOptionIcon
+                                                                                                                    icon={
+                                                                                                                        item.icon
+                                                                                                                    }
+                                                                                                                    name={
+                                                                                                                        item.name
+                                                                                                                    }
+                                                                                                                    index={
+                                                                                                                        itemIdx
+                                                                                                                    }
+                                                                                                                    containerClassName="size-5 items-center"
+                                                                                                                    className="size-3.5"
+                                                                                                                />
+                                                                                                            ) : (
+                                                                                                                <Checkbox
+                                                                                                                    checked={
+                                                                                                                        isChecked
+                                                                                                                    }
+                                                                                                                    className="pointer-events-none rounded-md"
+                                                                                                                />
+                                                                                                            )}
+                                                                                                            <span className="truncate text-[10.5px] font-semibold text-[#1A1A1A]">
+                                                                                                                {
+                                                                                                                    item.name
+                                                                                                                }
+                                                                                                            </span>
+                                                                                                        </div>
+                                                                                                        <span className="shrink-0 text-[10.5px] font-bold whitespace-nowrap text-[#C52828] tabular-nums">
+                                                                                                            {addPrice >
+                                                                                                            0
+                                                                                                                ? `+${formatRupiah(addPrice)}`
+                                                                                                                : 'Gratis'}
+                                                                                                        </span>
+                                                                                                    </button>
+                                                                                                );
+                                                                                            },
+                                                                                        )}
+                                                                                    </div>
                                                                                 )}
                                                                             </div>
-                                                                        )}
-                                                                    </div>
-                                                                );
-                                                            },
+                                                                        );
+                                                                    },
+                                                                )}
+                                                            </div>
                                                         )}
+
+                                                    {/* Catatan Khusus (Opsional) */}
+                                                    <div className="space-y-1.5">
+                                                        <div className="flex items-center gap-1.5">
+                                                            <PencilSimpleLine
+                                                                weight="regular"
+                                                                className="size-3.5 text-[#4A2C18]"
+                                                            />
+                                                            <Label
+                                                                htmlFor="cust_notes"
+                                                                className="cursor-pointer text-[11.5px] font-bold text-[#1A1A1A]"
+                                                            >
+                                                                Catatan Khusus
+                                                                (Opsional)
+                                                            </Label>
+                                                        </div>
+                                                        <input
+                                                            id="cust_notes"
+                                                            type="text"
+                                                            value={
+                                                                customizeNotes
+                                                            }
+                                                            onChange={(e) =>
+                                                                setCustomizeNotes(
+                                                                    e.target
+                                                                        .value,
+                                                                )
+                                                            }
+                                                            placeholder="Misal: Less ice, jangan terlalu manis..."
+                                                            className="h-9 w-full rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-3 text-[11.5px] font-normal text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
+                                                        />
                                                     </div>
-                                                )}
-
-                                            {/* Catatan Khusus (Opsional) */}
-                                            <div className="space-y-1.5">
-                                                <div className="flex items-center gap-1.5">
-                                                    <PencilSimpleLine
-                                                        weight="regular"
-                                                        className="size-4 text-[#4A2C18]"
-                                                    />
-                                                    <Label
-                                                        htmlFor="cust_notes"
-                                                        className="cursor-pointer text-xs font-bold text-[#1A1A1A]"
-                                                    >
-                                                        Catatan Khusus
-                                                        (Opsional)
-                                                    </Label>
                                                 </div>
-                                                <input
-                                                    id="cust_notes"
-                                                    type="text"
-                                                    value={customizeNotes}
-                                                    onChange={(e) =>
-                                                        setCustomizeNotes(
-                                                            e.target.value,
-                                                        )
-                                                    }
-                                                    placeholder="Misal: Less ice, jangan terlalu manis..."
-                                                    className="h-10 w-full rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-3.5 text-xs font-normal text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Sticky Footer Action Bar: never cut off, never overlapping */}
-                                    <div className="sticky bottom-0 z-20 shrink-0 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 p-3 backdrop-blur-md sm:p-3.5">
-                                        <div className="flex items-center gap-2">
-                                            {editingCartId !== null && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        removeCartItem(
-                                                            editingCartId,
-                                                        );
-                                                        setEditingCartId(null);
-                                                        setIsCustomizeOpen(
-                                                            false,
-                                                        );
-                                                        toast.success(
-                                                            'Item dihapus dari keranjang.',
-                                                        );
-                                                    }}
-                                                    className="flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 active:scale-95"
-                                                    title="Hapus item dari keranjang"
-                                                >
-                                                    <Trash
-                                                        weight="bold"
-                                                        className="size-4"
-                                                    />
-                                                </button>
-                                            )}
-
-                                            {/* Compact Stepper */}
-                                            <div className="flex h-10 shrink-0 items-center rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-1">
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        setCustomizeQty(
-                                                            Math.max(
-                                                                1,
-                                                                customizeQty -
-                                                                    1,
-                                                            ),
-                                                        )
-                                                    }
-                                                    aria-label="Kurangi jumlah"
-                                                    className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-[#3F3A34] transition hover:bg-[#E7E0D3] active:scale-90"
-                                                >
-                                                    <PhMinus
-                                                        weight="bold"
-                                                        className="size-3"
-                                                    />
-                                                </button>
-                                                <span className="w-6 text-center text-xs font-bold text-[#1A1A1A] tabular-nums sm:text-sm">
-                                                    {customizeQty}
-                                                </span>
-                                                <button
-                                                    type="button"
-                                                    disabled={
-                                                        customizeQty >=
-                                                        Math.min(
-                                                            50,
-                                                            activeRemainingStock,
-                                                        )
-                                                    }
-                                                    onClick={() =>
-                                                        setCustomizeQty(
-                                                            Math.min(
-                                                                50,
-                                                                activeRemainingStock,
-                                                                customizeQty +
-                                                                    1,
-                                                            ),
-                                                        )
-                                                    }
-                                                    aria-label="Tambah jumlah"
-                                                    className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-[#3F3A34] transition hover:bg-[#E7E0D3] active:scale-90 disabled:cursor-not-allowed disabled:opacity-40"
-                                                >
-                                                    <PhPlus
-                                                        weight="bold"
-                                                        className="size-3"
-                                                    />
-                                                </button>
                                             </div>
 
-                                            {/* Tombol Simpan / Tambah */}
-                                            <button
-                                                type="button"
-                                                disabled={
-                                                    activeRemainingStock <= 0
-                                                }
-                                                onClick={handleSaveFromModal}
-                                                className="flex h-10 min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-xl bg-[#C52828] px-3.5 font-semibold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
-                                            >
-                                                <span className="truncate text-xs font-bold">
-                                                    {editingCartId !== null
-                                                        ? 'Simpan Perubahan'
-                                                        : 'Tambah ke Keranjang'}
-                                                </span>
-                                                <span className="shrink-0 text-xs font-extrabold tabular-nums">
-                                                    {formatRupiah(
-                                                        calculateCustomUnitPrice() *
-                                                            customizeQty,
+                                            {/* Sticky Footer Action Bar */}
+                                            <div className="sticky bottom-0 z-20 shrink-0 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 p-2.5 backdrop-blur-md sm:p-3">
+                                                <div className="flex items-center gap-2">
+                                                    {editingCartId !== null && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                removeCartItem(
+                                                                    editingCartId,
+                                                                );
+                                                                setEditingCartId(
+                                                                    null,
+                                                                );
+                                                                setIsCustomizeOpen(
+                                                                    false,
+                                                                );
+                                                                toast.success(
+                                                                    'Item dihapus dari keranjang.',
+                                                                );
+                                                            }}
+                                                            className="flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 active:scale-95"
+                                                            title="Hapus item dari keranjang"
+                                                        >
+                                                            <Trash
+                                                                weight="bold"
+                                                                className="size-3.5"
+                                                            />
+                                                        </button>
                                                     )}
-                                                </span>
-                                            </button>
+
+                                                    {/* Compact Stepper */}
+                                                    <div className="flex h-9 shrink-0 items-center rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-1">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                setCustomizeQty(
+                                                                    Math.max(
+                                                                        1,
+                                                                        customizeQty -
+                                                                            1,
+                                                                    ),
+                                                                )
+                                                            }
+                                                            aria-label="Kurangi jumlah"
+                                                            className="flex size-6 cursor-pointer items-center justify-center rounded-lg text-[#3F3A34] transition hover:bg-[#E7E0D3] active:scale-90"
+                                                        >
+                                                            <PhMinus
+                                                                weight="bold"
+                                                                className="size-2.5"
+                                                            />
+                                                        </button>
+                                                        <span className="w-5 text-center text-xs font-bold text-[#1A1A1A] tabular-nums">
+                                                            {customizeQty}
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            disabled={
+                                                                customizeQty >=
+                                                                Math.min(
+                                                                    50,
+                                                                    activeRemainingStock,
+                                                                )
+                                                            }
+                                                            onClick={() =>
+                                                                setCustomizeQty(
+                                                                    Math.min(
+                                                                        50,
+                                                                        activeRemainingStock,
+                                                                        customizeQty +
+                                                                            1,
+                                                                    ),
+                                                                )
+                                                            }
+                                                            aria-label="Tambah jumlah"
+                                                            className="flex size-6 cursor-pointer items-center justify-center rounded-lg text-[#3F3A34] transition hover:bg-[#E7E0D3] active:scale-90 disabled:cursor-not-allowed disabled:opacity-40"
+                                                        >
+                                                            <PhPlus
+                                                                weight="bold"
+                                                                className="size-2.5"
+                                                            />
+                                                        </button>
+                                                    </div>
+
+                                                    {/* Tombol Simpan / Tambah */}
+                                                    <button
+                                                        type="button"
+                                                        disabled={
+                                                            activeRemainingStock <=
+                                                            0
+                                                        }
+                                                        onClick={
+                                                            handleSaveFromModal
+                                                        }
+                                                        className="flex h-9 min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-xl bg-[#C52828] px-3 font-semibold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        <span className="truncate text-[11.5px] font-bold">
+                                                            {editingCartId !==
+                                                            null
+                                                                ? 'Simpan'
+                                                                : 'Tambah ke Keranjang'}
+                                                        </span>
+                                                        <span className="shrink-0 text-[11.5px] font-extrabold whitespace-nowrap tabular-nums">
+                                                            {formatRupiah(
+                                                                unitPrice *
+                                                                    customizeQty,
+                                                            )}
+                                                        </span>
+                                                    </button>
+                                                </div>
+                                            </div>
                                         </div>
-                                    </div>
-                                </div>
-                            )}
+                                    );
+                                })()}
                         </DialogContent>
                     </Dialog>
 
@@ -2613,29 +2785,29 @@ export default function CustomerOrder({
                     {/* MODAL 2: KERANJANG BELANJA & CHECKOUT PESANAN                             */}
                     {/* ========================================================================= */}
                     <Dialog open={isCartOpen} onOpenChange={setIsCartOpen}>
-                        <DialogContent className="flex max-h-[88dvh] w-[calc(100%-1.5rem)] max-w-[390px] flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-[430px] [&>button:last-child]:hidden">
+                        <DialogContent className="flex max-h-[86dvh] w-[calc(100%-1.5rem)] max-w-[356px] flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-[400px] [&>button:last-child]:hidden">
                             <form
                                 onSubmit={handleCheckout}
-                                className="flex h-full max-h-[88dvh] flex-col overflow-hidden"
+                                className="flex h-full max-h-[86dvh] flex-col overflow-hidden"
                             >
                                 {/* Header Modal Keranjang (Sticky Top) */}
-                                <div className="z-20 flex shrink-0 items-start justify-between gap-3 border-b border-[#EBE5DC] bg-[#FAF8F4] px-4 pt-4 pb-3 sm:px-5">
-                                    <DialogHeader className="space-y-1 text-left">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <div className="flex size-7 items-center justify-center rounded-lg bg-[#FDECEB] text-[#C52828]">
+                                <div className="z-20 flex shrink-0 items-start justify-between gap-2.5 border-b border-[#EBE5DC] bg-[#FAF8F4] px-3.5 pt-3.5 pb-2.5 sm:px-4">
+                                    <DialogHeader className="space-y-0.5 text-left">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                            <div className="flex size-6.5 items-center justify-center rounded-lg bg-[#FDECEB] text-[#C52828]">
                                                 <ShoppingBagOpen
                                                     weight="duotone"
-                                                    className="size-4"
+                                                    className="size-3.5"
                                                 />
                                             </div>
-                                            <DialogTitle className="text-[17px] font-bold tracking-tight text-[#1A1A1A] sm:text-lg">
+                                            <DialogTitle className="text-[15px] font-bold tracking-tight text-[#1A1A1A] sm:text-base">
                                                 Rincian Pesanan
                                             </DialogTitle>
-                                            <span className="rounded-md bg-[#1A1A1A] px-2 py-0.5 text-[10px] font-bold text-white">
+                                            <span className="rounded-md bg-[#1A1A1A] px-1.5 py-0.5 text-[9px] font-bold text-white">
                                                 MEJA {table.table_number}
                                             </span>
                                         </div>
-                                        <DialogDescription className="text-xs leading-relaxed font-normal text-[#6E6A64]">
+                                        <DialogDescription className="text-[11px] leading-snug font-normal text-[#6E6A64]">
                                             Periksa kembali ukuran, jumlah, dan
                                             catatan sebelum pesanan diteruskan
                                             ke barista.
@@ -2646,7 +2818,7 @@ export default function CustomerOrder({
                                         type="button"
                                         onClick={() => setIsCartOpen(false)}
                                         aria-label="Tutup keranjang"
-                                        className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-lg bg-[#EFECE6] text-[#1A1A1A] transition hover:bg-[#E5E0D6] active:scale-95"
+                                        className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg bg-[#EFECE6] text-[#1A1A1A] transition hover:bg-[#E5E0D6] active:scale-95"
                                     >
                                         <PhX
                                             weight="bold"
@@ -2656,22 +2828,22 @@ export default function CustomerOrder({
                                 </div>
 
                                 {/* Body Konten Keranjang & Checkout (Scrollable) */}
-                                <div className="flex-1 space-y-3.5 overflow-x-hidden overflow-y-auto p-4 sm:p-5">
+                                <div className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto p-3.5 sm:p-4">
                                     {/* Daftar Item di Keranjang */}
-                                    <div className="space-y-2">
+                                    <div className="space-y-1.5">
                                         <div className="flex items-center justify-between">
                                             <div className="flex items-center gap-1.5">
-                                                <CupHeaderPhosphorIcon className="size-4 text-[#4A2C18]" />
-                                                <span className="text-xs font-bold text-[#1A1A1A]">
+                                                <CupHeaderPhosphorIcon className="size-3.5 text-[#4A2C18]" />
+                                                <span className="text-[11.5px] font-bold text-[#1A1A1A]">
                                                     Daftar Menu Dipesan
                                                 </span>
                                             </div>
-                                            <span className="rounded-full bg-[#FDECEB] px-2 py-0.5 text-[10px] font-semibold text-[#C52828]">
+                                            <span className="rounded-full bg-[#FDECEB] px-2 py-0.5 text-[9.5px] font-semibold text-[#C52828]">
                                                 {totalCartItems} Item
                                             </span>
                                         </div>
 
-                                        <div className="space-y-2">
+                                        <div className="space-y-1.5">
                                             {cart.map((item) => {
                                                 const variantNames =
                                                     item.selected_options
@@ -2694,11 +2866,11 @@ export default function CustomerOrder({
                                                 return (
                                                     <div
                                                         key={item.cart_id}
-                                                        className="space-y-2 rounded-xl border border-[#E8E2D9] bg-white p-3 shadow-xs transition hover:border-[#DECFC0]"
+                                                        className="space-y-1.5 rounded-xl border border-[#E8E2D9] bg-white p-2.5 shadow-xs transition hover:border-[#DECFC0]"
                                                     >
                                                         <div className="flex items-start justify-between gap-2">
                                                             <div className="min-w-0 flex-1">
-                                                                <h4 className="text-[13px] leading-snug font-bold tracking-tight text-[#1A1A1A]">
+                                                                <h4 className="text-xs leading-snug font-bold tracking-tight text-[#1A1A1A]">
                                                                     {
                                                                         item.menu_name
                                                                     }
@@ -2707,7 +2879,7 @@ export default function CustomerOrder({
                                                                         : ''}
                                                                 </h4>
                                                                 <div className="flex flex-wrap items-center gap-1.5">
-                                                                    <span className="text-[11px] font-medium text-[#7C756B] tabular-nums">
+                                                                    <span className="text-[10.5px] font-medium text-[#7C756B] tabular-nums">
                                                                         {
                                                                             item.quantity
                                                                         }{' '}
@@ -2717,7 +2889,7 @@ export default function CustomerOrder({
                                                                         )}
                                                                     </span>
                                                                     {menuForCart?.is_limited_stock && (
-                                                                        <span className="rounded-[4px] border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[9.5px] leading-none font-bold text-amber-800 tabular-nums">
+                                                                        <span className="rounded-[4px] border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[9px] leading-none font-bold text-amber-800 tabular-nums">
                                                                             Sisa{' '}
                                                                             {menuForCart.stock_quantity ??
                                                                                 0}{' '}
@@ -2726,7 +2898,7 @@ export default function CustomerOrder({
                                                                     )}
                                                                 </div>
                                                             </div>
-                                                            <span className="shrink-0 text-[13.5px] font-bold text-[#C52828] tabular-nums">
+                                                            <span className="shrink-0 text-xs font-bold whitespace-nowrap text-[#C52828] tabular-nums">
                                                                 {formatRupiah(
                                                                     item.unit_price *
                                                                         item.quantity,
@@ -2743,7 +2915,7 @@ export default function CustomerOrder({
                                                                             key={
                                                                                 o.option_item_id
                                                                             }
-                                                                            className="inline-flex items-center rounded-md border border-[#E8E2D9] bg-[#F8F5EE] px-2 py-0.5 text-[9.5px] font-medium text-[#4A4036]"
+                                                                            className="inline-flex items-center rounded-md border border-[#E8E2D9] bg-[#F8F5EE] px-1.5 py-0.5 text-[9px] font-medium text-[#4A4036]"
                                                                         >
                                                                             {
                                                                                 o.group_name
@@ -2763,7 +2935,7 @@ export default function CustomerOrder({
                                                         )}
 
                                                         {item.customer_notes && (
-                                                            <div className="flex items-start gap-1.5 rounded-lg border border-[#EBE3D6] bg-[#F8F5EE] px-2.5 py-1 text-[10.5px] text-[#5E5850]">
+                                                            <div className="flex items-start gap-1.5 rounded-lg border border-[#EBE3D6] bg-[#F8F5EE] px-2 py-1 text-[10px] text-[#5E5850]">
                                                                 <PencilSimpleLine
                                                                     weight="regular"
                                                                     className="mt-0.5 size-3 shrink-0 text-[#4A2C18]"
@@ -2778,8 +2950,8 @@ export default function CustomerOrder({
                                                             </div>
                                                         )}
 
-                                                        <div className="flex items-center justify-between border-t border-[#F2ECE3] pt-2">
-                                                            <div className="flex items-center gap-1.5">
+                                                        <div className="flex items-center justify-between border-t border-[#F2ECE3] pt-1.5">
+                                                            <div className="flex items-center gap-1">
                                                                 <button
                                                                     type="button"
                                                                     onClick={() =>
@@ -2787,7 +2959,7 @@ export default function CustomerOrder({
                                                                             item,
                                                                         )
                                                                     }
-                                                                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#F5EFE6] px-2.5 py-1 text-[11px] font-semibold text-[#3F3A34] transition hover:bg-[#EBE2D4] active:scale-95"
+                                                                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg bg-[#F5EFE6] px-2 py-1 text-[10.5px] font-semibold text-[#3F3A34] transition hover:bg-[#EBE2D4] active:scale-95"
                                                                 >
                                                                     <NotePencil
                                                                         weight="bold"
@@ -2810,7 +2982,7 @@ export default function CustomerOrder({
                                                                             item.cart_id,
                                                                         )
                                                                     }
-                                                                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-[#C52828] transition hover:bg-red-50 active:scale-95"
+                                                                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[10.5px] font-semibold text-[#C52828] transition hover:bg-red-50 active:scale-95"
                                                                 >
                                                                     <Trash
                                                                         weight="bold"
@@ -2823,7 +2995,7 @@ export default function CustomerOrder({
                                                             </div>
 
                                                             {/* Compact Stepper */}
-                                                            <div className="flex h-7 items-center rounded-lg border border-[#E4DCD0] bg-[#F7F4EE] px-1">
+                                                            <div className="flex h-6.5 items-center rounded-lg border border-[#E4DCD0] bg-[#F7F4EE] px-1">
                                                                 <button
                                                                     type="button"
                                                                     onClick={() =>
@@ -2839,7 +3011,7 @@ export default function CustomerOrder({
                                                                         className="size-2.5"
                                                                     />
                                                                 </button>
-                                                                <span className="w-5 text-center text-xs font-bold text-[#1A1A1A] tabular-nums">
+                                                                <span className="w-5 text-center text-[11px] font-bold text-[#1A1A1A] tabular-nums">
                                                                     {
                                                                         item.quantity
                                                                     }
@@ -2874,11 +3046,11 @@ export default function CustomerOrder({
                                     <div className="h-px w-full bg-[#EBE5DC]" />
 
                                     {/* Form Identitas Pemesan & Catatan Meja */}
-                                    <div className="space-y-3">
-                                        <div className="space-y-1.5">
+                                    <div className="space-y-2.5">
+                                        <div className="space-y-1">
                                             <label
                                                 htmlFor="cust_name"
-                                                className="flex items-center gap-1.5 text-xs font-bold text-[#1A1A1A]"
+                                                className="flex items-center gap-1.5 text-[11.5px] font-bold text-[#1A1A1A]"
                                             >
                                                 <PhUser
                                                     weight="bold"
@@ -2903,18 +3075,18 @@ export default function CustomerOrder({
                                                 placeholder="Contoh: Budi, Titan, dsb."
                                                 required
                                                 autoFocus
-                                                className="h-10 w-full rounded-xl border border-[#E4DCD0] bg-[#F7F4EE] px-3.5 text-xs font-medium text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
+                                                className="h-9 w-full rounded-xl border border-[#E4DCD0] bg-[#F7F4EE] px-3 text-[11.5px] font-medium text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
                                             />
-                                            <p className="pl-1 text-[10.5px] text-[#7C756B]">
+                                            <p className="pl-0.5 text-[10px] text-[#7C756B]">
                                                 Nama ini akan dipanggil saat
                                                 pesanan siap disajikan.
                                             </p>
                                         </div>
 
-                                        <div className="space-y-1.5">
+                                        <div className="space-y-1">
                                             <label
                                                 htmlFor="order_notes"
-                                                className="flex items-center gap-1.5 text-xs font-bold text-[#1A1A1A]"
+                                                className="flex items-center gap-1.5 text-[11.5px] font-bold text-[#1A1A1A]"
                                             >
                                                 <PencilSimpleLine
                                                     weight="regular"
@@ -2935,7 +3107,7 @@ export default function CustomerOrder({
                                                     )
                                                 }
                                                 placeholder="Misal: Sendok garpu dipisah, sedotan kertas..."
-                                                className="h-10 w-full rounded-xl border border-[#E4DCD0] bg-[#F7F4EE] px-3.5 text-xs font-normal text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
+                                                className="h-9 w-full rounded-xl border border-[#E4DCD0] bg-[#F7F4EE] px-3 text-[11.5px] font-normal text-[#1A1A1A] transition outline-none placeholder:text-[#8C857B] focus:border-[#C52828] focus:bg-white"
                                             />
                                         </div>
                                     </div>
@@ -2943,132 +3115,172 @@ export default function CustomerOrder({
                                     <div className="h-px w-full bg-[#EBE5DC]" />
 
                                     {/* PILIHAN METODE PEMBAYARAN */}
-                                    <div className="space-y-2.5">
+                                    <div className="space-y-2">
                                         <div className="flex items-center justify-between">
-                                            <Label className="text-xs font-bold text-[#1A1A1A]">
-                                                Pilih Metode Pembayaran
+                                            <Label className="text-[11px] font-bold text-[#1A1A1A]">
+                                                Metode Pembayaran
                                             </Label>
-                                            <span className="rounded-md bg-[#FDECEB] px-2 py-0.5 text-[10px] font-semibold text-[#C52828]">
-                                                Pilih 1 Metode
+                                            <span className="rounded-md bg-[#FDECEB] px-1.5 py-0.5 text-[9.5px] font-semibold text-[#C52828]">
+                                                {paymentPolicy.allow_xendit &&
+                                                paymentPolicy.allow_cash
+                                                    ? 'Pilih 1 Metode'
+                                                    : paymentPolicy.allow_xendit ||
+                                                        paymentPolicy.allow_cash
+                                                      ? 'Tersedia 1 Metode'
+                                                      : 'Nonaktif'}
                                             </span>
                                         </div>
 
-                                        <div className="grid grid-cols-2 gap-2">
-                                            {/* Opsi 1: QRIS */}
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    setPaymentMethod('qris')
-                                                }
+                                        {!paymentPolicy.allow_xendit &&
+                                        !paymentPolicy.allow_cash ? (
+                                            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-[#C52828]">
+                                                Semua metode pembayaran sedang
+                                                dinonaktifkan oleh pengelola
+                                                kafe. Silakan hubungi kasir.
+                                            </div>
+                                        ) : (
+                                            <div
                                                 className={cn(
-                                                    'relative flex cursor-pointer flex-col justify-between rounded-xl p-3 text-left transition-all',
-                                                    paymentMethod === 'qris'
-                                                        ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
-                                                        : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
+                                                    'grid gap-1.5 sm:gap-2',
+                                                    paymentPolicy.allow_xendit &&
+                                                        paymentPolicy.allow_cash
+                                                        ? 'grid-cols-2'
+                                                        : 'grid-cols-1',
                                                 )}
                                             >
-                                                {paymentMethod === 'qris' && (
-                                                    <span className="absolute top-2 right-2 flex size-4 items-center justify-center rounded-full bg-[#C52828] text-white">
-                                                        <Check
-                                                            weight="bold"
-                                                            className="size-2.5"
-                                                        />
-                                                    </span>
-                                                )}
-
-                                                <div className="flex items-center gap-2 pr-4">
-                                                    <div
+                                                {/* Opsi 1: QRIS */}
+                                                {paymentPolicy.allow_xendit && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setPaymentMethod(
+                                                                'qris',
+                                                            )
+                                                        }
                                                         className={cn(
-                                                            'flex size-7.5 shrink-0 items-center justify-center rounded-lg transition-colors',
+                                                            'relative flex cursor-pointer flex-col justify-between rounded-xl p-2.5 text-left transition-all',
                                                             paymentMethod ===
                                                                 'qris'
-                                                                ? 'bg-[#C52828] text-white'
-                                                                : 'bg-[#E8E2D8] text-[#4A2C18]',
+                                                                ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
+                                                                : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
                                                         )}
                                                     >
-                                                        <PhQrCode
-                                                            weight="bold"
-                                                            className="size-4"
-                                                        />
-                                                    </div>
-                                                    <div className="min-w-0">
-                                                        <div className="text-xs leading-tight font-bold text-[#1A1A1A]">
-                                                            QRIS
+                                                        {paymentMethod ===
+                                                            'qris' && (
+                                                            <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
+                                                                <Check
+                                                                    weight="bold"
+                                                                    className="size-2"
+                                                                />
+                                                            </span>
+                                                        )}
+
+                                                        <div className="flex items-center gap-1.5 pr-4">
+                                                            <div
+                                                                className={cn(
+                                                                    'flex size-6.5 shrink-0 items-center justify-center rounded-lg transition-colors',
+                                                                    paymentMethod ===
+                                                                        'qris'
+                                                                        ? 'bg-[#C52828] text-white'
+                                                                        : 'bg-[#E8E2D8] text-[#4A2C18]',
+                                                                )}
+                                                            >
+                                                                <PhQrCode
+                                                                    weight="bold"
+                                                                    className="size-3.5"
+                                                                />
+                                                            </div>
+                                                            <div className="min-w-0">
+                                                                <div className="text-[11.5px] leading-tight font-bold text-[#1A1A1A]">
+                                                                    QRIS
+                                                                </div>
+                                                                <div className="mt-0.5 truncate text-[9.5px] font-medium text-[#7C756B]">
+                                                                    Batas waktu:{' '}
+                                                                    {
+                                                                        paymentPolicy.expiry_minutes
+                                                                    }{' '}
+                                                                    mnt
+                                                                </div>
+                                                            </div>
                                                         </div>
-                                                        <div className="mt-0.5 text-[10px] font-medium text-[#7C756B]">
-                                                            Via Xendit Gateway
-                                                        </div>
-                                                    </div>
-                                                </div>
 
-                                                <p className="mt-2 text-[10px] leading-tight text-[#7C756B]">
-                                                    GoPay, OVO, Dana, BCA,
-                                                    Mandiri dsb.
-                                                </p>
-                                            </button>
-
-                                            {/* Opsi 2: Tunai Kasir */}
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    setPaymentMethod('cash')
-                                                }
-                                                className={cn(
-                                                    'relative flex cursor-pointer flex-col justify-between rounded-xl p-3 text-left transition-all',
-                                                    paymentMethod === 'cash'
-                                                        ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
-                                                        : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
-                                                )}
-                                            >
-                                                {paymentMethod === 'cash' && (
-                                                    <span className="absolute top-2 right-2 flex size-4 items-center justify-center rounded-full bg-[#C52828] text-white">
-                                                        <Check
-                                                            weight="bold"
-                                                            className="size-2.5"
-                                                        />
-                                                    </span>
+                                                        <p className="mt-1.5 text-[9.5px] leading-tight text-[#7C756B]">
+                                                            GoPay, OVO, Dana,
+                                                            BCA, Mandiri dsb.
+                                                        </p>
+                                                    </button>
                                                 )}
 
-                                                <div className="flex items-center gap-2 pr-4">
-                                                    <div
+                                                {/* Opsi 2: Tunai Kasir */}
+                                                {paymentPolicy.allow_cash && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setPaymentMethod(
+                                                                'cash',
+                                                            )
+                                                        }
                                                         className={cn(
-                                                            'flex size-7.5 shrink-0 items-center justify-center rounded-lg transition-colors',
+                                                            'relative flex cursor-pointer flex-col justify-between rounded-xl p-2.5 text-left transition-all',
                                                             paymentMethod ===
                                                                 'cash'
-                                                                ? 'bg-[#C52828] text-white'
-                                                                : 'bg-[#E8E2D8] text-[#4A2C18]',
+                                                                ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
+                                                                : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
                                                         )}
                                                     >
-                                                        <Money
-                                                            weight="bold"
-                                                            className="size-4"
-                                                        />
-                                                    </div>
-                                                    <div className="min-w-0">
-                                                        <div className="text-xs leading-tight font-bold text-[#1A1A1A]">
-                                                            Tunai
-                                                        </div>
-                                                        <div className="mt-0.5 text-[10px] font-medium text-[#7C756B]">
-                                                            Bayar di Kasir
-                                                        </div>
-                                                    </div>
-                                                </div>
+                                                        {paymentMethod ===
+                                                            'cash' && (
+                                                            <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
+                                                                <Check
+                                                                    weight="bold"
+                                                                    className="size-2"
+                                                                />
+                                                            </span>
+                                                        )}
 
-                                                <p className="mt-2 text-[10px] leading-tight text-[#7C756B]">
-                                                    Kirim sekarang, bayar cash
-                                                    di kasir.
-                                                </p>
-                                            </button>
-                                        </div>
+                                                        <div className="flex items-center gap-1.5 pr-4">
+                                                            <div
+                                                                className={cn(
+                                                                    'flex size-6.5 shrink-0 items-center justify-center rounded-lg transition-colors',
+                                                                    paymentMethod ===
+                                                                        'cash'
+                                                                        ? 'bg-[#C52828] text-white'
+                                                                        : 'bg-[#E8E2D8] text-[#4A2C18]',
+                                                                )}
+                                                            >
+                                                                <Money
+                                                                    weight="bold"
+                                                                    className="size-3.5"
+                                                                />
+                                                            </div>
+                                                            <div className="min-w-0">
+                                                                <div className="text-[11.5px] leading-tight font-bold text-[#1A1A1A]">
+                                                                    Tunai
+                                                                </div>
+                                                                <div className="mt-0.5 truncate text-[9.5px] font-medium text-[#7C756B]">
+                                                                    Bayar di
+                                                                    Kasir
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        <p className="mt-1.5 text-[9.5px] leading-tight text-[#7C756B]">
+                                                            Kirim sekarang,
+                                                            bayar cash di kasir.
+                                                        </p>
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
 
                                         {/* Info Box */}
-                                        <div className="rounded-xl border border-[#E6DFD3] bg-[#F7F4EE] p-2.5 text-[11px] text-[#3F3A34]">
+                                        <div className="rounded-xl border border-[#E6DFD3] bg-[#F7F4EE] p-2 text-[10.5px] text-[#3F3A34]">
                                             <div className="flex items-center gap-1.5 font-bold text-[#1A1A1A]">
                                                 {paymentMethod === 'qris' ? (
                                                     <>
                                                         <PhQrCode
                                                             weight="bold"
-                                                            className="size-3.5 text-[#C52828]"
+                                                            className="size-3 text-[#C52828]"
                                                         />
                                                         <span>
                                                             {activeOrder
@@ -3080,7 +3292,7 @@ export default function CustomerOrder({
                                                     <>
                                                         <Money
                                                             weight="bold"
-                                                            className="size-3.5 text-[#4A2C18]"
+                                                            className="size-3 text-[#4A2C18]"
                                                         />
                                                         <span>
                                                             {activeOrder
@@ -3090,7 +3302,7 @@ export default function CustomerOrder({
                                                     </>
                                                 )}
                                             </div>
-                                            <p className="mt-0.5 text-[10.5px] leading-snug text-[#7C756B]">
+                                            <p className="mt-0.5 text-[10px] leading-snug text-[#7C756B]">
                                                 {paymentMethod === 'qris'
                                                     ? 'Setelah kirim, kode QRIS otomatis tampil di layar HP untuk di-scan.'
                                                     : 'Setelah kirim, silakan sebutkan nama pemesan di meja kasir untuk membayar.'}
@@ -3100,9 +3312,9 @@ export default function CustomerOrder({
                                 </div>
 
                                 {/* Sticky Footer Checkout Action Bar */}
-                                <div className="z-20 shrink-0 space-y-2 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 p-3 shadow-[0_-4px_16px_rgba(0,0,0,0.04)] backdrop-blur-md sm:p-3.5">
+                                <div className="z-20 shrink-0 space-y-1.5 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 p-2.5 shadow-[0_-4px_16px_rgba(0,0,0,0.04)] backdrop-blur-md sm:p-3">
                                     {activeOrder && (
-                                        <div className="space-y-1 rounded-xl border border-[#E8E2D9] bg-white p-2.5 text-xs">
+                                        <div className="space-y-1 rounded-xl border border-[#E8E2D9] bg-white p-2 text-[11px]">
                                             <div className="flex items-center justify-between text-[#7C756B]">
                                                 <span>
                                                     Tagihan Sebelumnya (#
@@ -3126,9 +3338,9 @@ export default function CustomerOrder({
                                                     )}
                                                 </span>
                                             </div>
-                                            <div className="flex items-center justify-between border-t border-[#EBE5DC] pt-1 text-xs font-bold text-[#1A1A1A]">
+                                            <div className="flex items-center justify-between border-t border-[#EBE5DC] pt-1 text-[11.5px] font-bold text-[#1A1A1A]">
                                                 <span>Total Gabungan</span>
-                                                <span className="text-sm font-bold text-[#C52828] tabular-nums">
+                                                <span className="text-xs font-bold text-[#C52828] tabular-nums sm:text-[13px]">
                                                     {formatRupiah(
                                                         activeOrder.total_amount +
                                                             totalCartPrice,
@@ -3136,7 +3348,7 @@ export default function CustomerOrder({
                                                 </span>
                                             </div>
                                             {activeOrder.settled_amount > 0 && (
-                                                <div className="space-y-0.5 border-t border-dashed border-[#E6DFD3] pt-1 text-[11px]">
+                                                <div className="space-y-0.5 border-t border-dashed border-[#E6DFD3] pt-1 text-[10.5px]">
                                                     <div className="flex items-center justify-between font-semibold text-emerald-700">
                                                         <span>
                                                             Sudah Dibayar
@@ -3168,15 +3380,15 @@ export default function CustomerOrder({
                                         </div>
                                     )}
 
-                                    <div className="flex items-center gap-2.5">
+                                    <div className="flex items-center gap-2">
                                         <div className="min-w-0 pr-1">
-                                            <span className="block text-[9.5px] font-bold tracking-wider text-[#7C756B] uppercase">
+                                            <span className="block text-[9px] font-bold tracking-wider text-[#7C756B] uppercase">
                                                 {activeOrder &&
                                                 activeOrder.settled_amount > 0
                                                     ? 'Sisa Bayar'
                                                     : 'Total'}
                                             </span>
-                                            <span className="block text-base leading-tight font-black text-[#C52828] tabular-nums">
+                                            <span className="block text-sm leading-tight font-black whitespace-nowrap text-[#C52828] tabular-nums sm:text-[15px]">
                                                 {formatRupiah(
                                                     activeOrder &&
                                                         activeOrder.settled_amount >
@@ -3196,9 +3408,11 @@ export default function CustomerOrder({
                                             type="submit"
                                             disabled={
                                                 isSubmitting ||
-                                                cart.length === 0
+                                                cart.length === 0 ||
+                                                (!paymentPolicy.allow_xendit &&
+                                                    !paymentPolicy.allow_cash)
                                             }
-                                            className="flex h-10 min-w-0 flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-3.5 text-xs font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-50"
+                                            className="flex h-9 min-w-0 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-xl bg-[#C52828] px-3 text-[11.5px] font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-50"
                                         >
                                             {isSubmitting ? (
                                                 <span>Mengirim Pesanan...</span>
@@ -3208,12 +3422,12 @@ export default function CustomerOrder({
                                                     'qris' ? (
                                                         <PhQrCode
                                                             weight="bold"
-                                                            className="size-4 shrink-0"
+                                                            className="size-3.5 shrink-0"
                                                         />
                                                     ) : (
                                                         <Money
                                                             weight="bold"
-                                                            className="size-4 shrink-0"
+                                                            className="size-3.5 shrink-0"
                                                         />
                                                     )}
                                                     <span className="truncate">
@@ -3226,7 +3440,7 @@ export default function CustomerOrder({
                                                     </span>
                                                     <PhArrowRight
                                                         weight="bold"
-                                                        className="size-3.5 shrink-0"
+                                                        className="size-3 shrink-0"
                                                     />
                                                 </>
                                             )}

@@ -36,12 +36,15 @@ class MenuRequest extends FormRequest
             'description' => ['nullable', 'string'],
             'image' => ['nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'], // Max 2MB
             'base_price' => ['required', 'numeric', 'min:0'],
+            'cost_price' => ['nullable', 'numeric', 'min:0'],
             'is_discount_active' => ['nullable', 'boolean'],
             'discount_type' => ['nullable', 'string', 'in:percent,fixed'],
             'discount_value' => ['nullable', 'numeric', 'min:0'],
             'is_active' => ['boolean'],
             'is_limited_stock' => ['nullable', 'boolean'],
             'stock_quantity' => ['nullable', 'integer', 'min:0', 'max:100000'],
+            'stock_valid_days' => ['nullable', 'integer', 'min:1', 'max:365'],
+            'refresh_stock_timestamp' => ['nullable', 'boolean'],
 
             // Validasi Opsi Kustomisasi (Ukuran / Topping)
             'option_groups' => ['nullable', 'array'],

@@ -2,13 +2,13 @@ import { Link, router, usePage } from '@inertiajs/react';
 import {
     ClipboardList,
     Coffee,
-    Layers,
     LayoutGrid,
     LogOut,
-    MapPin,
     QrCode,
+    SlidersHorizontal,
     UserCheck,
     Users,
+    Wallet,
 } from 'lucide-react';
 import AppLogo from '@/components/app-logo';
 import { NavMain, type ExtendedNavItem } from '@/components/nav-main';
@@ -24,60 +24,66 @@ import {
 import { dashboard } from '@/routes';
 import type { User } from '@/types';
 
-interface RoleNavItem extends ExtendedNavItem {
-    roles?: ('admin' | 'cashier')[];
+interface NavGroupConfig {
+    label: string;
+    roles: ('admin' | 'cashier')[];
+    items: ExtendedNavItem[];
 }
 
-const allNavItems: RoleNavItem[] = [
+const navGroups: NavGroupConfig[] = [
     {
-        title: 'Ringkasan & Keuangan',
-        href: dashboard(),
-        icon: LayoutGrid,
+        label: 'Keuangan & Analitik',
         roles: ['admin'],
+        items: [
+            {
+                title: 'Ringkasan',
+                href: dashboard(),
+                icon: LayoutGrid,
+            },
+            {
+                title: 'Pengelolaan Keuangan',
+                href: '/admin/financial-reports',
+                icon: Wallet,
+            },
+        ],
     },
     {
-        title: 'Pesanan Masuk',
-        href: '/admin/orders',
-        icon: ClipboardList,
-        badge: '+Baru',
+        label: 'Manajemen Sistem & Master',
         roles: ['admin'],
+        items: [
+            {
+                title: 'Menu & Kategori',
+                href: '/admin/menus',
+                icon: Coffee,
+            },
+            {
+                title: 'Meja & QR Code',
+                href: '/admin/tables',
+                icon: QrCode,
+            },
+            {
+                title: 'Staf & Hak Akses',
+                href: '/admin/users',
+                icon: Users,
+            },
+            {
+                title: 'Manajemen Sistem',
+                href: '/admin/location-settings',
+                icon: SlidersHorizontal,
+            },
+        ],
     },
     {
-        title: 'Pesanan Masuk',
-        href: '/cashier/orders',
-        icon: ClipboardList,
-        badge: '+Baru',
+        label: 'Operasional Kasir',
         roles: ['cashier'],
-    },
-    {
-        title: 'Kelola Kasir & Staf',
-        href: '/admin/users',
-        icon: Users,
-        roles: ['admin'],
-    },
-    {
-        title: 'Menu & Produk',
-        href: '/admin/menus',
-        icon: Coffee,
-        roles: ['admin'],
-    },
-    {
-        title: 'Kategori Menu',
-        href: '/admin/categories',
-        icon: Layers,
-        roles: ['admin'],
-    },
-    {
-        title: 'Meja & QR Code',
-        href: '/admin/tables',
-        icon: QrCode,
-        roles: ['admin'],
-    },
-    {
-        title: 'Lokasi & Radius Kafe',
-        href: '/admin/location-settings',
-        icon: MapPin,
-        roles: ['admin'],
+        items: [
+            {
+                title: 'Pesanan Masuk',
+                href: '/cashier/orders',
+                icon: ClipboardList,
+                badge: '+Baru',
+            },
+        ],
     },
 ];
 
@@ -86,8 +92,8 @@ export function AppSidebar() {
     const userRole = auth?.user?.role ?? 'cashier';
     const homeLink = userRole === 'cashier' ? '/cashier/orders' : dashboard();
 
-    const filteredNavItems = allNavItems.filter(
-        (item) => !item.roles || item.roles.includes(userRole),
+    const visibleGroups = navGroups.filter((group) =>
+        group.roles.includes(userRole),
     );
 
     const handleLogout = () => {
@@ -118,11 +124,15 @@ export function AppSidebar() {
             </SidebarHeader>
 
             {/* Menu Navigasi Utama */}
-            <SidebarContent className="!bg-[#FAF6EC] py-3">
-                <div className="px-4 pb-2 text-[10px] font-extrabold tracking-widest text-[#8C7A6B] uppercase group-data-[collapsible=icon]:hidden">
-                    Menu Operasional
-                </div>
-                <NavMain items={filteredNavItems} />
+            <SidebarContent className="gap-4 !bg-[#FAF6EC] py-3">
+                {visibleGroups.map((group) => (
+                    <div key={group.label}>
+                        <div className="px-4 pb-1.5 text-[10px] font-extrabold tracking-widest text-[#8C7A6B] uppercase group-data-[collapsible=icon]:hidden">
+                            {group.label}
+                        </div>
+                        <NavMain items={group.items} />
+                    </div>
+                ))}
             </SidebarContent>
 
             {/* Footer Navigasi: Profil & Logout */}

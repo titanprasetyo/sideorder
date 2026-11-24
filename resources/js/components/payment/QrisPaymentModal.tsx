@@ -6,17 +6,33 @@ import {
     Clock,
     Copy,
     DownloadSimple,
+    Lock,
+    Money,
     QrCode,
     Receipt,
     Sparkle,
     WarningCircle,
 } from '@phosphor-icons/react';
 import QRCode from 'qrcode';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
 import { toast } from 'sonner';
 
+import { notifyRealtimeSync } from '@/lib/realtime-sync';
 import { downloadDataUrlSafely } from '@/lib/safe-download';
 import { cn } from '@/lib/utils';
+
+const computeSecondsRemaining = (iso?: string | null): number | null => {
+    if (!iso) return null;
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return null;
+    return Math.max(0, Math.floor((ms - Date.now()) / 1000));
+};
 
 export interface QrisPaymentViewProps {
     orderNumber: string;
@@ -31,10 +47,14 @@ export interface QrisPaymentViewProps {
     showSimulator?: boolean;
     paymentGateway?: string | null;
     paymentGatewayLabel?: string | null;
+    paymentGatewayMode?: string | null;
     paymentChannel?: string | null;
     paymentReference?: string | null;
     checkoutUrl?: string | null;
     qrString?: string | null;
+    expiredAt?: string | null;
+    paymentStatus?: string | null;
+    orderPaymentStatus?: string | null;
 }
 
 export function QrisPaymentView({
@@ -50,18 +70,54 @@ export function QrisPaymentView({
     showSimulator = false,
     paymentGateway,
     paymentGatewayLabel,
+    paymentGatewayMode,
     paymentChannel,
     paymentReference,
     qrString,
+    expiredAt,
+    paymentStatus,
+    orderPaymentStatus,
 }: QrisPaymentViewProps) {
+    const isInitiallyExpired = useMemo(() => {
+        if (orderPaymentStatus === 'paid') return false;
+        if (
+            orderPaymentStatus === 'failed' ||
+            paymentStatus === 'expired' ||
+            paymentStatus === 'failed'
+        ) {
+            return true;
+        }
+        const remaining = computeSecondsRemaining(expiredAt);
+        return remaining !== null && remaining <= 0;
+    }, []); // Evaluasi awal saat komponen dibuka
+
     const [qrDataUrl, setQrDataUrl] = useState<string>('');
-    const [isGeneratingQr, setIsGeneratingQr] = useState(true);
-    const [timeLeftSeconds, setTimeLeftSeconds] = useState(expiryMinutes * 60);
+    const [isInitiating, setIsInitiating] = useState(
+        () =>
+            !isInitiallyExpired &&
+            orderPaymentStatus !== 'paid' &&
+            !(qrString && qrString.trim() !== ''),
+    );
+    const [gatewayError, setGatewayError] = useState<string | null>(null);
+    const [retryTrigger, setRetryTrigger] = useState(0);
+    const [isGeneratingQr, setIsGeneratingQr] = useState(!isInitiallyExpired);
+    const [isExpired, setIsExpired] = useState(isInitiallyExpired);
+    const [isResettingQris, setIsResettingQris] = useState(false);
+    const [effectiveExpiredAt, setEffectiveExpiredAt] = useState<string | null>(
+        expiredAt || null,
+    );
+    const [timeLeftSeconds, setTimeLeftSeconds] = useState<number>(() => {
+        if (isInitiallyExpired) return 0;
+        const remaining = computeSecondsRemaining(expiredAt);
+        return remaining !== null ? remaining : expiryMinutes * 60;
+    });
     const [isSimulating, setIsSimulating] = useState(false);
     const [isCheckingStatus, setIsCheckingStatus] = useState(false);
     const [isCopiedAmount, setIsCopiedAmount] = useState(false);
     const [isCopiedOrder, setIsCopiedOrder] = useState(false);
-    const [paymentSuccess, setPaymentSuccess] = useState(false);
+    const [paymentSuccess, setPaymentSuccess] = useState(
+        orderPaymentStatus === 'paid',
+    );
     const [gatewayMeta, setGatewayMeta] = useState<{
         gateway: string;
         label: string;
@@ -71,12 +127,14 @@ export function QrisPaymentView({
         mode: string;
     }>({
         gateway: paymentGateway || 'xendit',
-        label: paymentGatewayLabel || 'Xendit Payment Gateway',
+        label: paymentGatewayLabel || 'Pembayaran Digital',
         channel: paymentChannel || 'QRIS',
         reference: paymentReference || null,
         qrString: qrString || null,
-        mode: 'sandbox_slot',
+        mode: paymentGatewayMode || 'sandbox_slot',
     });
+
+    const syncedExpiredRefFor = useRef<string | null>(null);
 
     const formatRupiah = (val: number) => {
         return `Rp ${new Intl.NumberFormat('id-ID', {
@@ -85,9 +143,81 @@ export function QrisPaymentView({
         }).format(val || 0)}`;
     };
 
-    // Inisiasi sesi Xendit Payment Gateway pada slot backend (idempoten, fallback aman ke QRIS standar)
+    const syncExpiredOnServer = useCallback(async () => {
+        const refKey = gatewayMeta.reference || orderNumber;
+        if (syncedExpiredRefFor.current === refKey) return;
+        syncedExpiredRefFor.current = refKey;
+
+        try {
+            const res = await fetch(`/order/check-payment/${orderNumber}`, {
+                headers: {
+                    Accept: 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+            });
+            const data = await res.json().catch(() => null);
+            if (data?.is_paid) {
+                setPaymentSuccess(true);
+                setIsExpired(false);
+                if (onSimulateSuccess) onSimulateSuccess();
+                return;
+            }
+            if (onSimulateSuccess) onSimulateSuccess();
+        } catch {
+            // Biarkan state expired tetap tampil di UI
+        }
+    }, [gatewayMeta.reference, orderNumber, onSimulateSuccess]);
+
+    // Sinkronkan bila parent prop berubah ke lunas atau kedaluwarsa untuk transaksi yang sama
     useEffect(() => {
+        if (orderPaymentStatus === 'paid') {
+            setPaymentSuccess(true);
+            setIsExpired(false);
+        }
+    }, [orderPaymentStatus]);
+
+    useEffect(() => {
+        if (paymentSuccess) {
+            notifyRealtimeSync('qris-paid');
+        }
+    }, [paymentSuccess]);
+
+    useEffect(() => {
+        if (isResettingQris || orderPaymentStatus === 'paid') return;
+        const matchesPropRef =
+            !paymentReference ||
+            !gatewayMeta.reference ||
+            paymentReference === gatewayMeta.reference;
+        if (
+            matchesPropRef &&
+            (paymentStatus === 'expired' ||
+                paymentStatus === 'failed' ||
+                orderPaymentStatus === 'failed')
+        ) {
+            setIsExpired(true);
+            setTimeLeftSeconds(0);
+        }
+    }, [
+        paymentStatus,
+        orderPaymentStatus,
+        paymentReference,
+        gatewayMeta.reference,
+        isResettingQris,
+    ]);
+
+    // Inisiasi sesi pembayaran QRIS pada slot backend (idempoten, TIDAK auto-reset jika sudah kedaluwarsa)
+    useEffect(() => {
+        if (isInitiallyExpired || orderPaymentStatus === 'paid') {
+            if (isInitiallyExpired && paymentStatus === 'pending') {
+                void syncExpiredOnServer();
+            }
+            setIsInitiating(false);
+            return;
+        }
+
         let cancelled = false;
+        setIsInitiating(true);
+        setGatewayError(null);
         const csrfToken = document
             .querySelector('meta[name="csrf-token"]')
             ?.getAttribute('content');
@@ -106,13 +236,45 @@ export function QrisPaymentView({
                 channel: paymentChannel || 'QRIS',
             }),
         })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data) => {
-                if (cancelled || !data?.success) return;
-                if (data.already_paid) {
-                    setPaymentSuccess(true);
+            .then(async (res) => {
+                const data = await res.json().catch(() => null);
+                return { ok: res.ok, data };
+            })
+            .then(({ ok, data }) => {
+                if (cancelled) return;
+
+                if (!ok || !data?.success) {
+                    const errMsg =
+                        typeof data?.message === 'string' &&
+                        data.message.trim() !== ''
+                            ? data.message
+                            : 'Gagal menginisiasi pembayaran QRIS dari payment gateway. Silakan coba lagi atau bayar tunai di kasir.';
+                    setGatewayError(errMsg);
+                    setIsInitiating(false);
+                    setIsGeneratingQr(false);
+                    toast.error(errMsg);
                     return;
                 }
+
+                if (data.already_paid) {
+                    setPaymentSuccess(true);
+                    setIsExpired(false);
+                    setGatewayError(null);
+                    setIsInitiating(false);
+                    return;
+                }
+
+                const resolvedMode =
+                    data.payment?.mode ||
+                    data.gateway?.mode ||
+                    paymentGatewayMode ||
+                    'sandbox_slot';
+                const resolvedQrString =
+                    typeof data.payment?.qr_string === 'string' &&
+                    data.payment.qr_string.trim() !== ''
+                        ? data.payment.qr_string
+                        : null;
+
                 if (data.payment) {
                     setGatewayMeta((prev) => ({
                         gateway: data.payment.gateway || prev.gateway,
@@ -123,34 +285,179 @@ export function QrisPaymentView({
                         channel: data.payment.channel || prev.channel,
                         reference:
                             data.payment.payment_reference || prev.reference,
-                        qrString: data.payment.qr_string || prev.qrString,
-                        mode:
-                            data.payment.mode ||
-                            data.gateway?.mode ||
-                            prev.mode,
+                        qrString: resolvedQrString ?? prev.qrString,
+                        mode: resolvedMode,
                     }));
+                    if (data.payment.expired_at) {
+                        setEffectiveExpiredAt(data.payment.expired_at);
+                    }
                 }
+                if (data.is_expired) {
+                    setIsExpired(true);
+                    setTimeLeftSeconds(0);
+                    setIsInitiating(false);
+                    setIsGeneratingQr(false);
+                    if (onSimulateSuccess) onSimulateSuccess();
+                    return;
+                }
+                if (data.payment?.expired_at) {
+                    const rem = computeSecondsRemaining(
+                        data.payment.expired_at,
+                    );
+                    if (rem !== null) {
+                        setTimeLeftSeconds(rem);
+                        if (rem <= 0) {
+                            setIsExpired(true);
+                        }
+                    }
+                }
+
+                if (
+                    resolvedMode !== 'sandbox_slot' &&
+                    !resolvedQrString &&
+                    !qrString
+                ) {
+                    setGatewayError(
+                        'Kode QRIS dari payment gateway belum tersedia. Silakan coba muat ulang atau bayar tunai di kasir.',
+                    );
+                }
+
+                setIsInitiating(false);
             })
             .catch(() => {
-                // Tetap tampilkan EMVCo QR fallback tanpa mengganggu pelanggan
+                if (cancelled) return;
+                const errMsg =
+                    'Gagal terhubung ke server payment gateway. Pastikan koneksi internet stabil lalu coba lagi.';
+                setGatewayError(errMsg);
+                setIsInitiating(false);
+                setIsGeneratingQr(false);
+                toast.error(errMsg);
             });
 
         return () => {
             cancelled = true;
         };
-    }, [orderNumber, paymentGateway, paymentChannel]);
+    }, [orderNumber, paymentGateway, paymentChannel, retryTrigger]);
 
-    // Gunakan qr_string resmi dari Xendit bila tersedia, atau payload EMVCo/QRIS deterministik
+    // Tombol eksplisit Reset / Buat Kode QRIS Baru (hanya dijalankan saat pengguna menekan tombol Reset)
+    const handleResetQris = async () => {
+        if (isResettingQris) return;
+        setIsResettingQris(true);
+        try {
+            const csrfToken = document
+                .querySelector('meta[name="csrf-token"]')
+                ?.getAttribute('content');
+
+            const res = await fetch(
+                `/payments/orders/${orderNumber}/initiate`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Accept: 'application/json',
+                        'X-CSRF-TOKEN': csrfToken || '',
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    body: JSON.stringify({
+                        payment_method: 'qris',
+                        gateway:
+                            gatewayMeta.gateway || paymentGateway || 'xendit',
+                        channel:
+                            gatewayMeta.channel || paymentChannel || 'QRIS',
+                        force_new: true,
+                    }),
+                },
+            );
+
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data?.success) {
+                throw new Error(
+                    data?.message || 'Gagal membuat kode QRIS baru.',
+                );
+            }
+
+            if (data.already_paid) {
+                setPaymentSuccess(true);
+                setIsExpired(false);
+                toast.success('Pesanan sudah lunas!');
+                if (onSimulateSuccess) onSimulateSuccess();
+                return;
+            }
+
+            if (data.payment) {
+                setGatewayMeta((prev) => ({
+                    gateway: data.payment.gateway || prev.gateway,
+                    label:
+                        data.payment.gateway_label ||
+                        data.gateway?.label ||
+                        prev.label,
+                    channel: data.payment.channel || prev.channel,
+                    reference: data.payment.payment_reference || null,
+                    qrString: data.payment.qr_string || null,
+                    mode: data.payment.mode || data.gateway?.mode || prev.mode,
+                }));
+                const nextExpiry = data.payment.expired_at || null;
+                setEffectiveExpiredAt(nextExpiry);
+                const rem = computeSecondsRemaining(nextExpiry);
+                setTimeLeftSeconds(
+                    rem !== null ? rem : Math.max(60, expiryMinutes * 60),
+                );
+            } else {
+                setTimeLeftSeconds(expiryMinutes * 60);
+            }
+
+            syncedExpiredRefFor.current = null;
+            setGatewayError(null);
+            setIsInitiating(false);
+            setIsExpired(false);
+            toast.success('Kode QRIS baru berhasil dibuat!');
+            if (onSimulateSuccess) onSimulateSuccess();
+        } catch (err: unknown) {
+            const message =
+                err instanceof Error
+                    ? err.message
+                    : 'Gagal membuat kode QRIS baru.';
+            toast.error(message);
+        } finally {
+            setIsResettingQris(false);
+        }
+    };
+
+    // Gunakan qr_string resmi dari payment gateway. Fallback preview EMVCo hanya aktif di mode sandbox_slot (lokal/dev)
     const qrisPayload = useMemo(() => {
+        if (isInitiating || gatewayError) {
+            return '';
+        }
         if (gatewayMeta.qrString && gatewayMeta.qrString.trim() !== '') {
             return gatewayMeta.qrString;
         }
+        if (gatewayMeta.mode !== 'sandbox_slot') {
+            return '';
+        }
         const cleanAmount = Math.round(totalAmount);
         return `00020101021226670016ID.CO.SIDELINE.WWW01189360099900000000010215ID10243928192010303UME51440014ID.LINKAJA.WWW01189360099900000000010215ID10243928192010303UME5204581253033605407${cleanAmount}5802ID5916SIDE LINE COFFEE6007BANDUNG61054011562200116${orderNumber}6304`;
-    }, [gatewayMeta.qrString, totalAmount, orderNumber]);
+    }, [
+        isInitiating,
+        gatewayError,
+        gatewayMeta.qrString,
+        gatewayMeta.mode,
+        totalAmount,
+        orderNumber,
+    ]);
 
-    // Generate QR Code Data URL saat halaman dibuka
+    // Generate QR Code Data URL saat halaman aktif & belum kedaluwarsa
     useEffect(() => {
+        if (isExpired || paymentSuccess || gatewayError) {
+            setIsGeneratingQr(false);
+            setQrDataUrl('');
+            return;
+        }
+
+        if (isInitiating || qrisPayload === '') {
+            setIsGeneratingQr(true);
+            return;
+        }
+
         setIsGeneratingQr(true);
 
         QRCode.toDataURL(qrisPayload, {
@@ -170,24 +477,56 @@ export function QrisPaymentView({
                 console.error('Failed to generate QR code', err);
                 setIsGeneratingQr(false);
             });
-    }, [qrisPayload]);
+    }, [qrisPayload, isExpired, paymentSuccess, isInitiating, gatewayError]);
 
-    // Countdown Timer
+    // Countdown Timer berbasis timestamp nyata + visibilitychange agar akurat meski tab ditinggal tidur
     useEffect(() => {
-        if (paymentSuccess || timeLeftSeconds <= 0) return;
+        if (paymentSuccess || isExpired || gatewayError) return;
 
-        const timer = setInterval(() => {
+        const syncRemaining = () => {
+            if (effectiveExpiredAt) {
+                const rem = computeSecondsRemaining(effectiveExpiredAt);
+                if (rem !== null) {
+                    setTimeLeftSeconds(rem);
+                    if (rem <= 0) {
+                        setIsExpired(true);
+                        void syncExpiredOnServer();
+                    }
+                    return;
+                }
+            }
             setTimeLeftSeconds((prev) => {
                 if (prev <= 1) {
-                    clearInterval(timer);
+                    setIsExpired(true);
+                    void syncExpiredOnServer();
                     return 0;
                 }
                 return prev - 1;
             });
-        }, 1000);
+        };
 
-        return () => clearInterval(timer);
-    }, [paymentSuccess, timeLeftSeconds]);
+        const timer = setInterval(syncRemaining, 1000);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+                syncRemaining();
+            }
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
+        return () => {
+            clearInterval(timer);
+            document.removeEventListener(
+                'visibilitychange',
+                onVisibilityChange,
+            );
+        };
+    }, [
+        paymentSuccess,
+        isExpired,
+        gatewayError,
+        effectiveExpiredAt,
+        syncExpiredOnServer,
+    ]);
 
     const formattedTimer = useMemo(() => {
         const minutes = Math.floor(timeLeftSeconds / 60);
@@ -196,14 +535,14 @@ export function QrisPaymentView({
     }, [timeLeftSeconds]);
 
     const handleCopyAmount = () => {
-        navigator.clipboard.writeText(String(Math.round(totalAmount)));
+        void navigator.clipboard.writeText(String(Math.round(totalAmount)));
         setIsCopiedAmount(true);
         toast.success('Nominal tagihan disalin ke clipboard!');
         setTimeout(() => setIsCopiedAmount(false), 2000);
     };
 
     const handleCopyOrder = () => {
-        navigator.clipboard.writeText(orderNumber);
+        void navigator.clipboard.writeText(orderNumber);
         setIsCopiedOrder(true);
         toast.success('Nomor pesanan disalin ke clipboard!');
         setTimeout(() => setIsCopiedOrder(false), 2000);
@@ -212,10 +551,7 @@ export function QrisPaymentView({
     const handleDownloadQr = async () => {
         if (!qrDataUrl) return;
         try {
-            await downloadDataUrlSafely(
-                qrDataUrl,
-                `QRIS-XENDIT-${orderNumber}.png`,
-            );
+            await downloadDataUrlSafely(qrDataUrl, `QRIS-${orderNumber}.png`);
             toast.success('Gambar QRIS berhasil diunduh!');
         } catch {
             toast.error('Gagal mengunduh gambar QRIS.');
@@ -238,26 +574,38 @@ export function QrisPaymentView({
                     ...prev,
                     reference:
                         data.latest_payment.payment_reference || prev.reference,
+                    qrString: data.latest_payment.qr_string || prev.qrString,
                     label: data.payment_gateway_label || prev.label,
                 }));
+                if (data.latest_payment.expired_at) {
+                    setEffectiveExpiredAt(data.latest_payment.expired_at);
+                }
             }
 
             if (data.is_paid) {
                 setPaymentSuccess(true);
-                toast.success('Pembayaran Xendit QRIS lunas terverifikasi!');
+                setIsExpired(false);
+                toast.success('Pembayaran QRIS lunas terverifikasi!');
                 if (onSimulateSuccess) {
                     setTimeout(() => {
                         onSimulateSuccess();
                         onBackToStatus();
                     }, 900);
                 }
-            } else if (data.payment_status === 'failed') {
+            } else if (
+                data.is_expired ||
+                data.payment_status === 'failed' ||
+                data.latest_payment?.status === 'expired'
+            ) {
+                setIsExpired(true);
+                setTimeLeftSeconds(0);
+                if (onSimulateSuccess) onSimulateSuccess();
                 toast.error(
-                    'Pembayaran gagal atau kedaluwarsa. Silakan coba lagi atau bayar tunai di kasir.',
+                    'Kode QRIS sudah kedaluwarsa. Tekan tombol Reset QRIS untuk membuat kode baru atau bayar tunai di kasir.',
                 );
             } else {
                 toast.info(
-                    'Belum ada dana masuk via Xendit. Silakan selesaikan scan di e-wallet atau mobile banking Anda.',
+                    'Belum ada dana masuk via QRIS. Silakan selesaikan scan di e-wallet atau mobile banking Anda.',
                 );
             }
         } catch {
@@ -294,6 +642,7 @@ export function QrisPaymentView({
             if (res.ok && data?.success) {
                 if (status === 'paid') {
                     setPaymentSuccess(true);
+                    setIsExpired(false);
                     toast.success(
                         data.message || 'Pembayaran berhasil dikonfirmasi!',
                     );
@@ -304,12 +653,16 @@ export function QrisPaymentView({
                         }, 900);
                     }
                 } else if (status === 'failed') {
+                    setIsExpired(true);
+                    setTimeLeftSeconds(0);
                     toast.error(
                         'Simulasi: Pembayaran gagal atau ditolak oleh gateway.',
                     );
                     if (onSimulateSuccess) onSimulateSuccess();
                     onBackToStatus();
                 } else if (status === 'expire') {
+                    setIsExpired(true);
+                    setTimeLeftSeconds(0);
                     toast.warning('Simulasi: Batas waktu QRIS kedaluwarsa.');
                     if (onSimulateSuccess) onSimulateSuccess();
                     onBackToStatus();
@@ -474,7 +827,10 @@ export function QrisPaymentView({
                                             SIDE LINE COFFEE
                                         </h1>
                                         <p className="truncate text-[11px] font-normal text-[#B8B0A4] tabular-nums">
-                                            NMID: ID1024392819201 &bull;{' '}
+                                            {gatewayMeta.mode === 'sandbox_slot'
+                                                ? 'Mode Sandbox'
+                                                : 'QRIS Dinamis'}{' '}
+                                            &bull;{' '}
                                             {gatewayMeta.reference
                                                 ? `Ref: ${gatewayMeta.reference}`
                                                 : gatewayMeta.label}
@@ -528,66 +884,224 @@ export function QrisPaymentView({
                             </div>
                         </div>
 
-                        {/* KARTU 2: Area Kode QRIS & Tombol Unduh */}
+                        {/* KARTU 2: Area Kode QRIS vs State Kedaluwarsa */}
                         <div className="flex flex-col items-center rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
-                            {/* Countdown Pill */}
-                            <div className="mb-4 inline-flex items-center gap-1.5 rounded-[4px] bg-[#FDECEB] px-3.5 py-1.5 text-xs font-semibold text-[#C52828]">
-                                <Clock
-                                    weight="fill"
-                                    className="size-4 text-[#C52828]"
-                                />
-                                <span>Selesaikan pembayaran dalam</span>
-                                <span className="font-bold tabular-nums">
-                                    {formattedTimer}
-                                </span>
-                            </div>
-
-                            {/* QR Code Frame */}
-                            <div className="relative rounded-xl border border-[#E8E2D9] bg-white p-3.5 shadow-2xs">
-                                {isGeneratingQr ? (
-                                    <div className="flex size-60 flex-col items-center justify-center gap-2 text-[#6E6A64] sm:size-64">
-                                        <ArrowsClockwise className="size-8 animate-spin text-[#C52828]" />
-                                        <span className="text-xs font-semibold">
-                                            Menyiapkan kode QRIS...
-                                        </span>
-                                    </div>
-                                ) : (
-                                    <div className="relative">
-                                        <img
-                                            src={qrDataUrl}
-                                            alt={`QRIS ${orderNumber}`}
-                                            className="size-60 rounded-lg object-contain sm:size-64"
+                            {/* Countdown / Expired Pill */}
+                            <div
+                                className={cn(
+                                    'mb-4 inline-flex items-center gap-1.5 rounded-[4px] px-3.5 py-1.5 text-xs font-semibold',
+                                    isExpired || gatewayError
+                                        ? 'border border-[#F5C2C0] bg-[#FDECEB] text-[#C52828]'
+                                        : 'bg-[#FDECEB] text-[#C52828]',
+                                )}
+                            >
+                                {gatewayError && !isExpired ? (
+                                    <>
+                                        <WarningCircle
+                                            weight="fill"
+                                            className="size-4 text-[#C52828]"
                                         />
-                                        {/* Center QRIS Emblem */}
-                                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                                            <div className="flex size-10 items-center justify-center rounded-lg border border-[#E8E2D9] bg-[#FFFDFB] shadow-sm">
-                                                <QrCode
-                                                    weight="duotone"
-                                                    className="size-5.5 text-[#C52828]"
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
+                                        <span>Gateway QRIS Belum Tersedia</span>
+                                    </>
+                                ) : isExpired ? (
+                                    <>
+                                        <Lock
+                                            weight="fill"
+                                            className="size-4 text-[#C52828]"
+                                        />
+                                        <span>Batas Waktu QRIS Habis</span>
+                                        <span className="font-bold tabular-nums">
+                                            00:00
+                                        </span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Clock
+                                            weight="fill"
+                                            className="size-4 text-[#C52828]"
+                                        />
+                                        <span>Selesaikan pembayaran dalam</span>
+                                        <span className="font-bold tabular-nums">
+                                            {formattedTimer}
+                                        </span>
+                                    </>
                                 )}
                             </div>
 
-                            <p className="mt-3.5 max-w-xs text-center text-[12.5px] leading-relaxed font-normal text-[#6E6A64]">
-                                Pindai kode QR di atas menggunakan aplikasi
-                                E-Wallet atau Mobile Banking pilihan Anda.
-                            </p>
+                            {gatewayError && !isExpired ? (
+                                <div className="w-full space-y-4 rounded-xl border border-dashed border-[#E5B8B6] bg-[#FDF7F7] p-5 text-center">
+                                    <div className="mx-auto flex size-16 items-center justify-center rounded-full border border-[#F5C2C0] bg-[#FDECEB] text-[#C52828]">
+                                        <WarningCircle
+                                            weight="duotone"
+                                            className="size-9"
+                                        />
+                                    </div>
 
-                            {/* Action Button: Unduh QR */}
-                            <button
-                                type="button"
-                                onClick={handleDownloadQr}
-                                className="mt-4 inline-flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-4 text-xs font-semibold text-[#1A1A1A] transition hover:bg-[#EAE3D5]"
-                            >
-                                <DownloadSimple
-                                    weight="bold"
-                                    className="size-4 text-[#4A2C18]"
-                                />
-                                <span>Unduh Gambar QR</span>
-                            </button>
+                                    <div className="space-y-1.5">
+                                        <h2 className="text-base font-bold text-[#1A1A1A]">
+                                            Kode QRIS Tidak Dapat Dimuat
+                                        </h2>
+                                        <p className="mx-auto max-w-xs text-xs leading-relaxed text-[#6E6A64]">
+                                            {gatewayError}
+                                        </p>
+                                    </div>
+
+                                    <div className="space-y-2 pt-1">
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                setRetryTrigger((c) => c + 1)
+                                            }
+                                            disabled={isInitiating}
+                                            className="flex h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-5 text-sm font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-60"
+                                        >
+                                            <ArrowsClockwise
+                                                weight="bold"
+                                                className={cn(
+                                                    'size-4.5',
+                                                    isInitiating &&
+                                                        'animate-spin',
+                                                )}
+                                            />
+                                            <span>
+                                                {isInitiating
+                                                    ? 'Menghubungkan Gateway...'
+                                                    : 'Coba Muat Ulang QRIS'}
+                                            </span>
+                                        </button>
+
+                                        {onSwitchToCash && (
+                                            <button
+                                                type="button"
+                                                onClick={onSwitchToCash}
+                                                disabled={isInitiating}
+                                                className="flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-semibold text-[#1A1A1A] transition hover:bg-[#F3EFE6] disabled:opacity-60"
+                                            >
+                                                <Money
+                                                    weight="bold"
+                                                    className="size-4 text-[#4A2C18]"
+                                                />
+                                                <span>
+                                                    Bayar Tunai di Kasir
+                                                </span>
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : isExpired ? (
+                                <div className="w-full space-y-4 rounded-xl border border-dashed border-[#E5B8B6] bg-[#FDF7F7] p-5 text-center">
+                                    <div className="mx-auto flex size-16 items-center justify-center rounded-full border border-[#F5C2C0] bg-[#FDECEB] text-[#C52828]">
+                                        <WarningCircle
+                                            weight="duotone"
+                                            className="size-9"
+                                        />
+                                    </div>
+
+                                    <div className="space-y-1.5">
+                                        <h2 className="text-base font-bold text-[#1A1A1A]">
+                                            Kode QRIS Sudah Kedaluwarsa
+                                        </h2>
+                                        <p className="mx-auto max-w-xs text-xs leading-relaxed text-[#6E6A64]">
+                                            Kode QR di atas melewati batas waktu
+                                            pembayaran ({expiryMinutes} menit)
+                                            sehingga tidak dapat dipindai lagi.
+                                            Tekan tombol reset untuk membuat
+                                            QRIS baru.
+                                        </p>
+                                    </div>
+
+                                    <div className="space-y-2 pt-1">
+                                        <button
+                                            type="button"
+                                            onClick={handleResetQris}
+                                            disabled={isResettingQris}
+                                            className="flex h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-5 text-sm font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-60"
+                                        >
+                                            <ArrowsClockwise
+                                                weight="bold"
+                                                className={cn(
+                                                    'size-4.5',
+                                                    isResettingQris &&
+                                                        'animate-spin',
+                                                )}
+                                            />
+                                            <span>
+                                                {isResettingQris
+                                                    ? 'Membuat Kode QRIS Baru...'
+                                                    : 'Reset / Buat Kode QRIS Baru'}
+                                            </span>
+                                        </button>
+
+                                        {onSwitchToCash && (
+                                            <button
+                                                type="button"
+                                                onClick={onSwitchToCash}
+                                                disabled={isResettingQris}
+                                                className="flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-semibold text-[#1A1A1A] transition hover:bg-[#F3EFE6] disabled:opacity-60"
+                                            >
+                                                <Money
+                                                    weight="bold"
+                                                    className="size-4 text-[#4A2C18]"
+                                                />
+                                                <span>
+                                                    Bayar Tunai di Kasir
+                                                </span>
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* QR Code Frame */}
+                                    <div className="relative rounded-xl border border-[#E8E2D9] bg-white p-3.5 shadow-2xs">
+                                        {isGeneratingQr ? (
+                                            <div className="flex size-60 flex-col items-center justify-center gap-2 text-[#6E6A64] sm:size-64">
+                                                <ArrowsClockwise className="size-8 animate-spin text-[#C52828]" />
+                                                <span className="text-xs font-semibold">
+                                                    Menyiapkan kode QRIS...
+                                                </span>
+                                            </div>
+                                        ) : (
+                                            <div className="relative">
+                                                <img
+                                                    src={qrDataUrl}
+                                                    alt={`QRIS ${orderNumber}`}
+                                                    className="size-60 rounded-lg object-contain sm:size-64"
+                                                />
+                                                {/* Center QRIS Emblem */}
+                                                <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                                                    <div className="flex size-10 items-center justify-center rounded-lg border border-[#E8E2D9] bg-[#FFFDFB] shadow-sm">
+                                                        <QrCode
+                                                            weight="duotone"
+                                                            className="size-5.5 text-[#C52828]"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <p className="mt-3.5 max-w-xs text-center text-[12.5px] leading-relaxed font-normal text-[#6E6A64]">
+                                        Pindai kode QR di atas menggunakan
+                                        aplikasi E-Wallet atau Mobile Banking
+                                        pilihan Anda.
+                                    </p>
+
+                                    {/* Action Button: Unduh QR */}
+                                    <button
+                                        type="button"
+                                        onClick={handleDownloadQr}
+                                        disabled={isGeneratingQr || !qrDataUrl}
+                                        className="mt-4 inline-flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-4 text-xs font-semibold text-[#1A1A1A] transition hover:bg-[#EAE3D5] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        <DownloadSimple
+                                            weight="bold"
+                                            className="size-4 text-[#4A2C18]"
+                                        />
+                                        <span>Unduh Gambar QR</span>
+                                    </button>
+                                </>
+                            )}
                         </div>
 
                         {/* KARTU 4: Simulator Payment Gateway (Hanya muncul di Sandbox Dev / Staf Terautentikasi) */}
@@ -621,8 +1135,8 @@ export function QrisPaymentView({
                                         onClick={() =>
                                             handleSimulateStatus('paid')
                                         }
-                                        disabled={isSimulating}
-                                        className="inline-flex h-9.5 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#157F3D] px-3 text-xs font-bold text-white shadow-2xs transition hover:bg-[#126B33] disabled:opacity-50"
+                                        disabled={isSimulating || isExpired}
+                                        className="inline-flex h-9.5 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#157F3D] px-3 text-xs font-bold text-white shadow-2xs transition hover:bg-[#126B33] disabled:cursor-not-allowed disabled:opacity-50"
                                     >
                                         <CheckCircle
                                             weight="bold"
@@ -681,27 +1195,49 @@ export function QrisPaymentView({
 
                         {/* TOMBOL AKSI UTAMA BAWAH */}
                         <div className="space-y-2.5 pt-1">
-                            <button
-                                type="button"
-                                onClick={handleCheckPayment}
-                                disabled={isCheckingStatus}
-                                className={cn(
-                                    'flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-5 text-[14px] font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-60',
-                                )}
-                            >
-                                <ArrowsClockwise
-                                    weight="bold"
+                            {!isExpired ? (
+                                <button
+                                    type="button"
+                                    onClick={handleCheckPayment}
+                                    disabled={isCheckingStatus}
                                     className={cn(
-                                        'size-4.5',
-                                        isCheckingStatus && 'animate-spin',
+                                        'flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] px-5 text-[14px] font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-60',
                                     )}
-                                />
-                                <span>
-                                    {isCheckingStatus
-                                        ? 'Memeriksa Status Pembayaran...'
-                                        : 'Cek Status Pembayaran'}
-                                </span>
-                            </button>
+                                >
+                                    <ArrowsClockwise
+                                        weight="bold"
+                                        className={cn(
+                                            'size-4.5',
+                                            isCheckingStatus && 'animate-spin',
+                                        )}
+                                    />
+                                    <span>
+                                        {isCheckingStatus
+                                            ? 'Memeriksa Status Pembayaran...'
+                                            : 'Cek Status Pembayaran'}
+                                    </span>
+                                </button>
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={handleCheckPayment}
+                                    disabled={isCheckingStatus}
+                                    className="flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-4 text-xs font-semibold text-[#3F3A34] transition hover:bg-[#EAE3D5] disabled:opacity-60"
+                                >
+                                    <ArrowsClockwise
+                                        weight="bold"
+                                        className={cn(
+                                            'size-3.5',
+                                            isCheckingStatus && 'animate-spin',
+                                        )}
+                                    />
+                                    <span>
+                                        {isCheckingStatus
+                                            ? 'Memeriksa Pembayaran Masuk...'
+                                            : 'Periksa Pembayaran Masuk'}
+                                    </span>
+                                </button>
+                            )}
 
                             <div className="w-full">
                                 <button

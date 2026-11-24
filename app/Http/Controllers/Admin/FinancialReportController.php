@@ -4,43 +4,52 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\FinancialReportFilterRequest;
+use App\Models\Expense;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\OrderItemOption;
 use App\Models\OrderStatusHistory;
 use App\Services\ExcelReportService;
+use App\Services\Payments\PaymentService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Response as HttpResponse;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Inertia\Inertia;
+use Inertia\Response as InertiaResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class FinancialReportController extends Controller
 {
     private const TIMEZONE = 'Asia/Jakarta';
 
+    private const PERIOD_FILTER_SESSION_KEY = 'sideline.admin_report_period_filter';
+
     /**
-     * Tampilkan halaman Laporan Keuangan & Analitik Pendapatan Admin (dialihkan ke Dashboard Terpadu).
+     * Tampilkan halaman Pengelolaan Keuangan & Analitik Profitabilitas Admin.
      */
-    public function index(FinancialReportFilterRequest $request): RedirectResponse
+    public function index(FinancialReportFilterRequest $request, PaymentService $paymentService): InertiaResponse
     {
-        return redirect()->route('dashboard', $request->query());
+        $paymentService->expireOverduePendingPayments();
+
+        return Inertia::render('admin/financial-reports/index', $this->buildReportData($request));
     }
 
     /**
      * Endpoint JSON untuk sinkronisasi data laporan keuangan secara real-time / on-demand.
      */
-    public function sync(FinancialReportFilterRequest $request): JsonResponse
+    public function sync(FinancialReportFilterRequest $request, PaymentService $paymentService): JsonResponse
     {
+        $paymentService->expireOverduePendingPayments();
         $reportData = $this->buildReportData($request);
 
         return response()->json($reportData);
     }
 
     /**
-     * Ekspor Laporan Keuangan ke format Excel (.xlsx) 7 sheet terpisah.
+     * Ekspor Laporan Keuangan ke format Excel (.xlsx) 6 sheet terpisah.
      */
     public function exportExcel(FinancialReportFilterRequest $request, ExcelReportService $excelService): StreamedResponse
     {
@@ -131,7 +140,7 @@ class FinancialReportController extends Controller
             fputcsv($handle, []);
 
             // Bagian 1: Ringkasan Eksekutif Periode
-            fputcsv($handle, ['=== RINGKASAN PENDAPATAN & OPERASIONAL PERIODE TERPILIH ===']);
+            fputcsv($handle, ['=== RINGKASAN REKAP PENDAPATAN & OPERASIONAL PERIODE TERPILIH ===']);
             fputcsv($handle, ['Metrik', 'Nilai / Jumlah', 'Format Rupiah / Keterangan']);
             fputcsv($handle, [
                 'Total Pendapatan Bersih Terealisasi (Periode Filter)',
@@ -205,8 +214,8 @@ class FinancialReportController extends Controller
             ]);
             fputcsv($handle, []);
 
-            // Bagian 2: Rincian Payment Gateway (Xendit & Kasir POS)
-            fputcsv($handle, ['=== REKAPITULASI PAYMENT GATEWAY (XENDIT INTEGRATION SLOT) ===']);
+            // Bagian 2: Rincian Payment Gateway (Digital & Kasir POS)
+            fputcsv($handle, ['=== REKAPITULASI PAYMENT GATEWAY ===']);
             fputcsv($handle, ['Gateway', 'Transaksi Lunas', 'Omzet Bersih (Rp)', 'Pangsa Omzet (%)', 'Menunggu Bayar', 'Batal / Gagal']);
             foreach ($summary['payment_gateways'] as $gw) {
                 fputcsv($handle, [
@@ -465,7 +474,7 @@ class FinancialReportController extends Controller
         $lines[] = sprintf('   - Total Bruto Transaksi Lunas        : %s', $this->formatRupiah($summary['period']['gross_revenue']));
         $lines[] = sprintf('   - Rata-rata Nilai Transaksi (AOV)    : %s', $this->formatRupiah($summary['period']['average_order_value']));
         $lines[] = sprintf('   - Total Porsi Menu Terjual           : %d porsi', $summary['period']['items_sold']);
-        $lines[] = sprintf('   - Xendit Payment Gateway (Digital)   : %d lunas (%s)', $xenditRow['transactions_count'] ?? 0, $this->formatRupiah((float) ($xenditRow['net_revenue'] ?? 0)));
+        $lines[] = sprintf('   - Pembayaran Digital (QRIS / VA)   : %d lunas (%s)', $xenditRow['transactions_count'] ?? 0, $this->formatRupiah((float) ($xenditRow['net_revenue'] ?? 0)));
         $lines[] = sprintf('   - Pembayaran Tunai Kasir (Manual)    : %d lunas (%s)', $manualRow['transactions_count'] ?? 0, $this->formatRupiah((float) ($manualRow['net_revenue'] ?? 0)));
         $lines[] = sprintf('   - Menunggu Pembayaran (Unpaid)       : %d pesanan (%s - Belum Terealisasi)', $summary['period']['pending_payments_count'], $this->formatRupiah($summary['period']['pending_payments_amount']));
         $lines[] = sprintf('   - Pesanan Dibatalkan / Item Ditolak  : %d batal (%s) | %d item ditolak (%s)', $summary['period']['cancelled_orders_count'], $this->formatRupiah($summary['period']['cancelled_amount']), $ops['pipeline']['rejected_items_count'], $this->formatRupiah($ops['pipeline']['rejected_items_amount']));
@@ -477,30 +486,32 @@ class FinancialReportController extends Controller
         $lines[] = sprintf('   - Pendapatan Bulan Ini               : %s', $this->formatRupiah($summary['this_month_revenue']));
         $lines[] = str_repeat('-', 95);
         $lines[] = '2. REKAPITULASI HARIAN PERIODE TERPILIH';
-        $lines[] = sprintf('%-14s | %-10s | %-10s | %-18s | %-18s', 'Tanggal', 'Pesanan', 'Lunas', 'Belum Bayar', 'Pendapatan Bersih');
+        $lines[] = sprintf('%-12s | %-7s | %-7s | %-18s | %-16s | %-16s', 'Tanggal', 'Lunas', 'Porsi', 'Omzet Bersih', 'Belum Bayar', 'Rata-rata AOV');
         $lines[] = str_repeat('-', 95);
 
         foreach ($recaps['daily']['rows'] as $row) {
             if ($row['total_orders'] > 0 || count($recaps['daily']['rows']) <= 14) {
                 $lines[] = sprintf(
-                    '%-14s | %-10d | %-10d | %-18s | %-18s',
+                    '%-12s | %-7d | %-7d | %-18s | %-16s | %-16s',
                     $row['date'],
-                    $row['total_orders'],
                     $row['paid_orders_count'],
+                    $row['items_sold'],
+                    $this->formatRupiah($row['net_revenue']),
                     $this->formatRupiah($row['unpaid_amount']),
-                    $this->formatRupiah($row['net_revenue'])
+                    $this->formatRupiah($row['average_order_value'])
                 );
             }
         }
 
         $lines[] = str_repeat('-', 95);
         $lines[] = sprintf(
-            '%-14s | %-10d | %-10d | %-18s | %-18s',
-            'TOTAL PERIODE',
-            $recaps['daily']['totals']['total_orders'],
+            '%-12s | %-7d | %-7d | %-18s | %-16s | %-16s',
+            'TOTAL',
             $recaps['daily']['totals']['paid_orders_count'],
+            $recaps['daily']['totals']['items_sold'],
+            $this->formatRupiah($recaps['daily']['totals']['net_revenue']),
             $this->formatRupiah($recaps['daily']['totals']['unpaid_amount']),
-            $this->formatRupiah($recaps['daily']['totals']['net_revenue'])
+            $this->formatRupiah($recaps['daily']['totals']['average_order_value'])
         );
         $lines[] = str_repeat('-', 95);
         $lines[] = '3. DAFTAR TRANSAKSI TERFILTER';
@@ -511,7 +522,7 @@ class FinancialReportController extends Controller
         foreach ($transactions as $tx) {
             $totalTableNet += $tx['net_revenue'];
             $gatewayTag = match ($tx['payment_gateway']) {
-                'xendit' => 'Xendit',
+                'xendit' => 'Digital',
                 'midtrans' => 'Midtrn',
                 default => 'Kasir',
             };
@@ -532,7 +543,7 @@ class FinancialReportController extends Controller
             $transactions->count(),
             $this->formatRupiah($totalTableNet)
         );
-        $lines[] = 'Catatan: Angka pendapatan di atas adalah Pendapatan Penjualan Bersih (Omzet Terealisasi), bukan Laba Bersih.';
+        $lines[] = 'Catatan: Pendapatan Bersih = transaksi berstatus paid & non-cancelled (WIB).';
 
         $pdfBinary = $this->renderNativePdfDocument($lines);
         $dispositionType = $request->boolean('inline') ? 'inline' : 'attachment';
@@ -557,7 +568,7 @@ class FinancialReportController extends Controller
         $summary = $this->computeSummaryMetrics($resolved);
         $recaps = $this->computePeriodRecaps($resolved['start'], $resolved['end_exclusive']);
 
-        $requestedAggregation = (string) $request->query('aggregation', 'auto');
+        $requestedAggregation = $this->resolveRequestedAggregation($request);
         $chartAggregation = $this->resolveChartAggregation($requestedAggregation, $resolved['days_count']);
         $chart = $this->buildChartSeries($resolved['start'], $resolved['end_exclusive'], $chartAggregation, $recaps, $resolved);
 
@@ -597,34 +608,13 @@ class FinancialReportController extends Controller
             ->first();
 
         $paginated = $transactionsQuery->paginate($perPage)->withQueryString();
-        $paginated->setPath('/dashboard');
+        $paginated->setPath($request->routeIs('dashboard*') ? '/dashboard' : '/admin/financial-reports');
         $paginated->through(fn (Order $order): array => $this->formatOrderRecord($order));
 
+        $expensesAnalytics = $this->computeExpensesAnalytics($resolved['start'], $resolved['end_inclusive']);
+
         return [
-            'filters' => [
-                'period' => $resolved['preset'],
-                'preset' => $resolved['preset'],
-                'start_date' => $resolved['start']->format('Y-m-d'),
-                'end_date' => $resolved['end_inclusive']->format('Y-m-d'),
-                'period_label' => $resolved['label'],
-                'compare_mode' => $resolved['compare_mode'],
-                'compare_start_date' => $resolved['prev_start'] ? $resolved['prev_start']->format('Y-m-d') : '',
-                'compare_end_date' => $resolved['prev_end_exclusive'] ? $resolved['prev_end_exclusive']->copy()->subDay()->format('Y-m-d') : '',
-                'compare_label' => $resolved['prev_label'],
-                'filter_date' => (string) $request->query('filter_date', ''),
-                'menu_id' => $request->filled('menu_id') ? (int) $request->query('menu_id') : null,
-                'aggregation' => $requestedAggregation,
-                'effective_aggregation' => $chartAggregation,
-                'recap_view' => $recapView,
-                'search' => (string) $request->query('search', ''),
-                'payment_status' => (string) $request->query('payment_status', 'all'),
-                'order_status' => (string) $request->query('order_status', 'all'),
-                'payment_method' => (string) $request->query('payment_method', 'all'),
-                'payment_gateway' => (string) $request->query('payment_gateway', 'all'),
-                'sort_by' => (string) $request->query('sort_by', 'transaction_date'),
-                'sort_dir' => (string) $request->query('sort_dir', 'desc'),
-                'per_page' => $perPage,
-            ],
+            'filters' => $this->buildFilterPayload($request, $resolved, $requestedAggregation, $chartAggregation, $recapView, $perPage),
             'available_menus' => $availableMenus,
             'summary' => $summary,
             'recaps' => $recaps,
@@ -639,21 +629,184 @@ class FinancialReportController extends Controller
             ],
             'product_analytics' => $productAnalytics,
             'operational_analytics' => $operationalAnalytics,
+            'expenses' => $expensesAnalytics,
             'calculation_rules' => [
                 'timezone' => 'Asia/Jakarta (WIB)',
                 'week_definition' => 'Senin 00:00:00 WIB sampai Minggu 23:59:59 WIB (sebelum Senin 00:00:00 WIB berikutnya)',
-                'authoritative_source' => 'Tabel orders & ledger payments (1 baris order = 1 transaksi unik, pembayaran digital diproses melalui slot Xendit Payment Gateway)',
+                'authoritative_source' => 'Tabel orders, order_items, dan payments sebagai sumber rekap pendapatan pesanan SideOrder.',
                 'transaction_date_basis' => 'Menggunakan waktu pembayaran berhasil (paid_at) untuk pesanan lunas, dengan fallback ke waktu pembuatan pesanan (created_at) untuk data historis atau pesanan belum dibayar.',
-                'realized_revenue_formula' => 'Pendapatan Bersih = SUM(total_amount) untuk pesanan dengan payment_status = "paid" dan order_status != "cancelled". Pesanan yang sudah dibayar bersifat final dan tidak mendukung pembatalan maupun refund.',
+                'realized_revenue_formula' => 'Pendapatan Bersih = SUM(total_amount - refunded_amount) untuk pesanan dengan payment_status = "paid" dan order_status != "cancelled".',
                 'unpaid_policy' => 'Pesanan dengan payment_status = "unpaid" dicatat terpisah sebagai Pembayaran Menunggu dan bernilai Rp 0 pada Pendapatan Terealisasi.',
-                'cancelled_and_failed_policy' => 'Pesanan yang dibatalkan sebelum dibayar (cancelled) atau pembayaran gagal (failed) tidak dihitung sebagai pendapatan terealisasi. Penolakan menu setelah pembayaran tercatat untuk audit dapur tanpa mengurangi setoran lunas.',
-                'cogs_status' => 'Belum Tercatat di Database (Sistem saat ini belum memiliki tabel/kolom HPP resep modal bahan baku).',
-                'operational_costs_status' => 'Belum Tercatat di Database (Sistem saat ini belum memiliki modul pencatatan pengeluaran operasional).',
-                'discount_support' => 'Belum Didukung pada level faktur order (diskon item sudah terhitung pada subtotal masing-masing menu).',
-                'additional_fees_support' => 'Belum Didukung (skema database saat ini belum memiliki pajak/service charge tambahan; total_amount = subtotal item aktif).',
-                'profit_disclaimer' => 'Angka yang ditampilkan adalah Omzet / Pendapatan Penjualan Bersih (Realized Revenue), BUKAN Laba Bersih karena Harga Pokok Penjualan (HPP) dan beban operasional belum dicatat pada sistem database.',
+                'cancelled_and_failed_policy' => 'Pesanan yang dibatalkan sebelum dibayar (cancelled) atau pembayaran gagal (failed) tidak dihitung sebagai pendapatan terealisasi. Penolakan menu tercatat untuk audit dapur tanpa mengurangi setoran lunas.',
+                'discount_support' => 'Diskon per menu sudah terhitung pada harga jual final item; tidak ada diskon terpisah di level faktur.',
+                'additional_fees_support' => 'Pajak/service charge tidak dipisahkan pada skema saat ini; total_amount = subtotal item aktif.',
+                'profit_disclaimer' => 'Laporan ini berfokus pada rekapitulasi pendapatan transaksi pesanan online QR dan kasir POS SideOrder.',
             ],
             'synced_at' => Carbon::now(self::TIMEZONE)->format('d M Y, H:i:s').' WIB',
+        ];
+    }
+
+    /**
+     * Payload ringkas berkecepatan tinggi khusus untuk halaman Ringkasan Eksekutif (/dashboard & polling real-time).
+     *
+     * @return array<string, mixed>
+     */
+    public function buildDashboardData(FinancialReportFilterRequest $request): array
+    {
+        $resolved = $this->resolveDateRange($request);
+        $summary = $this->computeSummaryMetrics($resolved, false);
+        $recaps = $this->computePeriodRecaps($resolved['start'], $resolved['end_exclusive'], false);
+
+        $requestedAggregation = $this->resolveRequestedAggregation($request);
+        $chartAggregation = $this->resolveChartAggregation($requestedAggregation, $resolved['days_count']);
+        $chart = $this->buildChartSeries($resolved['start'], $resolved['end_exclusive'], $chartAggregation, $recaps, $resolved, false);
+
+        $topMenus = $this->computeTopSellingMenus(
+            $resolved['start'],
+            $resolved['end_exclusive'],
+            (int) ($summary['period']['items_sold'] ?? 0),
+            5,
+        );
+
+        $hourlyTracking = in_array($resolved['preset'], ['today', 'yesterday'], true)
+            ? $this->computeHourlyTracking($resolved['start'], $resolved['end_exclusive'])
+            : null;
+
+        return [
+            'filters' => $this->buildFilterPayload($request, $resolved, $requestedAggregation, $chartAggregation),
+            'summary' => $summary,
+            'chart' => $chart,
+            'hourly_tracking' => $hourlyTracking,
+            'top_menus' => $topMenus,
+            'synced_at' => Carbon::now(self::TIMEZONE)->format('d M Y, H:i:s').' WIB',
+        ];
+    }
+
+    private function resolveRequestedAggregation(FinancialReportFilterRequest $request): string
+    {
+        $hasExplicitPeriod = $request->filled('preset')
+            || $request->filled('period')
+            || $request->filled('start_date')
+            || $request->filled('end_date');
+        $savedSession = $request->hasSession() ? $request->session()->get(self::PERIOD_FILTER_SESSION_KEY) : null;
+        $savedAgg = is_array($savedSession) && is_string($savedSession['aggregation'] ?? null)
+            ? $savedSession['aggregation']
+            : 'auto';
+
+        return $request->filled('aggregation')
+            ? (string) $request->query('aggregation', 'auto')
+            : ($hasExplicitPeriod ? 'auto' : $savedAgg);
+    }
+
+    /**
+     * @param  array<string, mixed>  $resolved
+     * @return array<string, mixed>
+     */
+    private function buildFilterPayload(
+        FinancialReportFilterRequest $request,
+        array $resolved,
+        string $requestedAggregation,
+        string $chartAggregation,
+        string $recapView = 'daily',
+        int $perPage = 15,
+    ): array {
+        return [
+            'period' => $resolved['preset'],
+            'preset' => $resolved['preset'],
+            'start_date' => $resolved['start']->format('Y-m-d'),
+            'end_date' => $resolved['end_inclusive']->format('Y-m-d'),
+            'period_label' => $resolved['label'],
+            'compare_mode' => $resolved['compare_mode'],
+            'compare_start_date' => $resolved['prev_start'] ? $resolved['prev_start']->format('Y-m-d') : '',
+            'compare_end_date' => $resolved['prev_end_exclusive'] ? $resolved['prev_end_exclusive']->copy()->subDay()->format('Y-m-d') : '',
+            'compare_label' => $resolved['prev_label'],
+            'filter_date' => (string) $request->query('filter_date', ''),
+            'menu_id' => $request->filled('menu_id') ? (int) $request->query('menu_id') : null,
+            'aggregation' => $requestedAggregation,
+            'effective_aggregation' => $chartAggregation,
+            'recap_view' => $recapView,
+            'search' => (string) $request->query('search', ''),
+            'payment_status' => (string) $request->query('payment_status', 'all'),
+            'order_status' => (string) $request->query('order_status', 'all'),
+            'payment_method' => (string) $request->query('payment_method', 'all'),
+            'payment_gateway' => (string) $request->query('payment_gateway', 'all'),
+            'sort_by' => (string) $request->query('sort_by', 'transaction_date'),
+            'sort_dir' => (string) $request->query('sort_dir', 'desc'),
+            'per_page' => $perPage,
+        ];
+    }
+
+    /**
+     * Ambil daftar lengkap & rekap pengeluaran operasional kafe pada rentang tanggal terpilih.
+     *
+     * @return array<string, mixed>
+     */
+    private function computeExpensesAnalytics(Carbon $start, Carbon $endInclusive): array
+    {
+        $startStr = $start->format('Y-m-d');
+        $endStr = $endInclusive->format('Y-m-d');
+        $expDateExpr = DB::connection()->getDriverName() === 'pgsql'
+            ? 'expense_date::text'
+            : 'substr(expense_date, 1, 10)';
+
+        $rows = Expense::query()
+            ->with('recordedByUser:id,name')
+            ->whereRaw("{$expDateExpr} BETWEEN ? AND ?", [$startStr, $endStr])
+            ->orderByDesc('expense_date')
+            ->orderByDesc('id')
+            ->get();
+
+        $totalAmount = (float) $rows->sum('amount');
+        $cashAmount = (float) $rows->where('payment_source', 'cash')->sum('amount');
+        $bankAmount = (float) $rows->whereIn('payment_source', ['bank', 'xendit_balance'])->sum('amount');
+
+        $byCategory = [];
+        foreach (Expense::CATEGORIES as $catKey => $catLabel) {
+            $catRows = $rows->where('category', $catKey);
+            $catAmount = (float) $catRows->sum('amount');
+            $byCategory[] = [
+                'category' => $catKey,
+                'label' => $catLabel,
+                'count' => $catRows->count(),
+                'amount' => $catAmount,
+                'share_percent' => $totalAmount > 0 ? round(($catAmount / $totalAmount) * 100, 1) : 0.0,
+            ];
+        }
+
+        usort($byCategory, fn (array $a, array $b): int => $b['amount'] <=> $a['amount']);
+
+        $items = $rows->map(function (Expense $exp): array {
+            $expDate = $exp->expense_date instanceof Carbon
+                ? $exp->expense_date
+                : Carbon::parse((string) $exp->expense_date, self::TIMEZONE);
+
+            return [
+                'id' => $exp->id,
+                'expense_date' => $expDate->format('Y-m-d'),
+                'expense_date_formatted' => $this->formatIndoDate($expDate),
+                'category' => $exp->category,
+                'category_label' => Expense::CATEGORIES[$exp->category] ?? ucfirst((string) $exp->category),
+                'title' => $exp->title,
+                'amount' => (float) $exp->amount,
+                'payment_source' => $exp->payment_source,
+                'payment_source_label' => Expense::PAYMENT_SOURCES[$exp->payment_source] ?? ucfirst((string) $exp->payment_source),
+                'notes' => $exp->notes,
+                'recorded_by_name' => $exp->recordedByUser?->name ?? 'Admin',
+                'created_at_formatted' => $exp->created_at
+                    ? $this->formatIndoDateTime(Carbon::parse($exp->created_at)->timezone(self::TIMEZONE))
+                    : '-',
+            ];
+        })->values()->all();
+
+        return [
+            'count' => count($items),
+            'total_amount' => $totalAmount,
+            'cash_amount' => $cashAmount,
+            'bank_amount' => $bankAmount,
+            'by_category' => $byCategory,
+            'items' => $items,
+            'categories' => Expense::CATEGORIES,
+            'payment_sources' => Expense::PAYMENT_SOURCES,
         ];
     }
 
@@ -666,15 +819,37 @@ class FinancialReportController extends Controller
      */
     private function resolveDateRange(FinancialReportFilterRequest $request): array
     {
-        $now = Carbon::now(self::TIMEZONE);
-        $preset = (string) $request->query('preset', '');
-        $startDateParam = $request->query('start_date');
-        $endDateParam = $request->query('end_date');
+        $hasExplicitPeriod = $request->filled('preset')
+            || $request->filled('period')
+            || $request->filled('start_date')
+            || $request->filled('end_date');
 
-        if ($preset === '' && ($startDateParam || $endDateParam)) {
-            $preset = 'custom';
-        } elseif ($preset === '') {
-            $preset = 'this_month';
+        $savedRaw = (! $hasExplicitPeriod && $request->hasSession())
+            ? $request->session()->get(self::PERIOD_FILTER_SESSION_KEY)
+            : null;
+        $savedFilter = is_array($savedRaw) ? $savedRaw : [];
+
+        $now = Carbon::now(self::TIMEZONE);
+        if ($hasExplicitPeriod) {
+            $preset = (string) ($request->query('preset') ?? $request->query('period') ?? '');
+            $startDateParam = $request->query('start_date');
+            $endDateParam = $request->query('end_date');
+
+            if ($preset === '' && ($startDateParam || $endDateParam)) {
+                $preset = 'custom';
+            } elseif ($preset === '') {
+                $preset = 'this_month';
+            }
+        } else {
+            $preset = is_string($savedFilter['preset'] ?? null) && $savedFilter['preset'] !== ''
+                ? $savedFilter['preset']
+                : 'this_month';
+            $startDateParam = is_string($savedFilter['start_date'] ?? null) && $savedFilter['start_date'] !== ''
+                ? $savedFilter['start_date']
+                : null;
+            $endDateParam = is_string($savedFilter['end_date'] ?? null) && $savedFilter['end_date'] !== ''
+                ? $savedFilter['end_date']
+                : null;
         }
 
         switch ($preset) {
@@ -803,10 +978,19 @@ class FinancialReportController extends Controller
         $daysCount = max(1, $daysCount);
 
         // Resolusi Periode Pembanding (Compare Period)
-        $compareMode = (string) $request->query('compare_mode', 'previous_period');
-        if (! in_array($compareMode, ['previous_period', 'previous_month', 'previous_year', 'custom_compare', 'none'], true)) {
-            $compareMode = 'previous_period';
-        }
+        $compareModeRaw = $hasExplicitPeriod
+            ? $request->query('compare_mode', 'previous_period')
+            : ($request->query('compare_mode') ?? ($savedFilter['compare_mode'] ?? 'previous_period'));
+        $compareMode = is_string($compareModeRaw) && in_array($compareModeRaw, ['previous_period', 'previous_month', 'previous_year', 'custom_compare', 'none'], true)
+            ? $compareModeRaw
+            : 'previous_period';
+
+        $compareStartRaw = $hasExplicitPeriod
+            ? $request->query('compare_start_date')
+            : ($request->query('compare_start_date') ?? ($savedFilter['compare_start_date'] ?? null));
+        $compareEndRaw = $hasExplicitPeriod
+            ? $request->query('compare_end_date')
+            : ($request->query('compare_end_date') ?? ($savedFilter['compare_end_date'] ?? null));
 
         if ($compareMode === 'none') {
             $prevStart = null;
@@ -820,9 +1004,9 @@ class FinancialReportController extends Controller
             $prevStart = $start->copy()->subYear()->startOfDay();
             $prevEndExclusive = $endExclusive->copy()->subYear()->startOfDay();
             $prevLabel = 'Tahun Sebelumnya ('.$this->formatIndoDate($prevStart).' - '.$this->formatIndoDate($prevEndExclusive->copy()->subDay()).')';
-        } elseif ($compareMode === 'custom_compare' && $request->filled('compare_start_date') && $request->filled('compare_end_date')) {
-            $prevStart = Carbon::createFromFormat('Y-m-d', (string) $request->query('compare_start_date'), self::TIMEZONE)->startOfDay();
-            $cEnd = Carbon::createFromFormat('Y-m-d', (string) $request->query('compare_end_date'), self::TIMEZONE)->endOfDay();
+        } elseif ($compareMode === 'custom_compare' && is_string($compareStartRaw) && $compareStartRaw !== '' && is_string($compareEndRaw) && $compareEndRaw !== '') {
+            $prevStart = Carbon::createFromFormat('Y-m-d', $compareStartRaw, self::TIMEZONE)->startOfDay();
+            $cEnd = Carbon::createFromFormat('Y-m-d', $compareEndRaw, self::TIMEZONE)->endOfDay();
             $prevEndExclusive = $cEnd->copy()->startOfDay()->addDay();
             $prevLabel = 'Pembanding Kustom ('.$this->formatIndoDate($prevStart).' - '.$this->formatIndoDate($cEnd).')';
         } else {
@@ -870,6 +1054,29 @@ class FinancialReportController extends Controller
             }
         }
 
+        if (($hasExplicitPeriod || $request->filled('aggregation')) && ! $request->expectsJson() && ! $request->routeIs('*.export.*') && $request->hasSession()) {
+            $existingSession = $request->session()->get(self::PERIOD_FILTER_SESSION_KEY);
+            $existingAgg = is_array($existingSession) && is_string($existingSession['aggregation'] ?? null)
+                ? $existingSession['aggregation']
+                : 'auto';
+            $aggInput = $request->filled('aggregation')
+                ? (string) $request->query('aggregation')
+                : ($hasExplicitPeriod ? 'auto' : $existingAgg);
+            if (! in_array($aggInput, ['auto', 'daily', 'weekly', 'monthly'], true)) {
+                $aggInput = 'auto';
+            }
+
+            $request->session()->put(self::PERIOD_FILTER_SESSION_KEY, [
+                'preset' => $preset,
+                'start_date' => $preset === 'custom' ? $start->format('Y-m-d') : '',
+                'end_date' => $preset === 'custom' ? $endInclusive->format('Y-m-d') : '',
+                'compare_mode' => $compareMode,
+                'compare_start_date' => $compareMode === 'custom_compare' && is_string($compareStartRaw) ? $compareStartRaw : '',
+                'compare_end_date' => $compareMode === 'custom_compare' && is_string($compareEndRaw) ? $compareEndRaw : '',
+                'aggregation' => $aggInput,
+            ]);
+        }
+
         return [
             'preset' => $preset,
             'start' => $start,
@@ -890,7 +1097,7 @@ class FinancialReportController extends Controller
      * @param  array<string, mixed>  $resolved
      * @return array<string, mixed>
      */
-    private function computeSummaryMetrics(array $resolved): array
+    private function computeSummaryMetrics(array $resolved, bool $includeExpensesAndMissingCost = true): array
     {
         $now = Carbon::now(self::TIMEZONE);
 
@@ -1035,32 +1242,14 @@ class FinancialReportController extends Controller
             ])
             ->first();
 
-        // Breakdown Metode Pembayaran pada Periode Terpilih (hanya dari sumber otoritatif orders)
-        $methodBreakdownRows = DB::table('orders')
+        // Breakdown Metode Pembayaran & Payment Gateway dalam 1 query gabungan pada Periode Terpilih
+        $paymentChannelBreakdown = DB::table('orders')
             ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [
                 $periodStart->format('Y-m-d H:i:s'),
                 $periodEndExclusive->format('Y-m-d H:i:s'),
             ])
             ->selectRaw("
                 COALESCE(payment_method, 'cash') as method,
-                COUNT(CASE WHEN {$isRealizedExpr} THEN 1 END) as paid_count,
-                COALESCE(SUM(CASE WHEN {$isRealizedExpr} THEN {$netAmountExpr} ELSE 0 END), 0) as paid_net_revenue,
-                COUNT(CASE WHEN orders.payment_status = 'unpaid' AND orders.order_status != 'cancelled' THEN 1 END) as unpaid_count,
-                COALESCE(SUM(CASE WHEN orders.payment_status = 'unpaid' AND orders.order_status != 'cancelled' THEN orders.total_amount ELSE 0 END), 0) as unpaid_amount,
-                COUNT(CASE WHEN orders.order_status = 'cancelled' OR orders.payment_status = 'failed' THEN 1 END) as cancelled_count,
-                COALESCE(SUM(CASE WHEN orders.order_status = 'cancelled' OR orders.payment_status = 'failed' THEN orders.total_amount ELSE 0 END), 0) as cancelled_amount
-            ")
-            ->groupByRaw("COALESCE(payment_method, 'cash')")
-            ->get()
-            ->keyBy('method');
-
-        // Breakdown Payment Gateway (Xendit Slot vs Kasir POS Manual)
-        $gatewayBreakdownRows = DB::table('orders')
-            ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [
-                $periodStart->format('Y-m-d H:i:s'),
-                $periodEndExclusive->format('Y-m-d H:i:s'),
-            ])
-            ->selectRaw("
                 {$effectiveGatewayExpr} as gateway,
                 COUNT(CASE WHEN {$isRealizedExpr} THEN 1 END) as paid_count,
                 COALESCE(SUM(CASE WHEN {$isRealizedExpr} THEN {$netAmountExpr} ELSE 0 END), 0) as paid_net_revenue,
@@ -1069,9 +1258,37 @@ class FinancialReportController extends Controller
                 COUNT(CASE WHEN orders.order_status = 'cancelled' OR orders.payment_status = 'failed' THEN 1 END) as cancelled_count,
                 COALESCE(SUM(CASE WHEN orders.order_status = 'cancelled' OR orders.payment_status = 'failed' THEN orders.total_amount ELSE 0 END), 0) as cancelled_amount
             ")
-            ->groupByRaw($effectiveGatewayExpr)
-            ->get()
-            ->keyBy('gateway');
+            ->groupByRaw("COALESCE(payment_method, 'cash'), {$effectiveGatewayExpr}")
+            ->get();
+
+        $aggregateBucket = static function (Collection $rows, string $groupField): Collection {
+            $buckets = [];
+            foreach ($rows as $row) {
+                $key = (string) $row->{$groupField};
+                if (! isset($buckets[$key])) {
+                    $buckets[$key] = (object) [
+                        $groupField => $key,
+                        'paid_count' => 0,
+                        'paid_net_revenue' => 0.0,
+                        'unpaid_count' => 0,
+                        'unpaid_amount' => 0.0,
+                        'cancelled_count' => 0,
+                        'cancelled_amount' => 0.0,
+                    ];
+                }
+                $buckets[$key]->paid_count += (int) $row->paid_count;
+                $buckets[$key]->paid_net_revenue += (float) $row->paid_net_revenue;
+                $buckets[$key]->unpaid_count += (int) $row->unpaid_count;
+                $buckets[$key]->unpaid_amount += (float) $row->unpaid_amount;
+                $buckets[$key]->cancelled_count += (int) $row->cancelled_count;
+                $buckets[$key]->cancelled_amount += (float) $row->cancelled_amount;
+            }
+
+            return collect($buckets);
+        };
+
+        $methodBreakdownRows = $aggregateBucket($paymentChannelBreakdown, 'method');
+        $gatewayBreakdownRows = $aggregateBucket($paymentChannelBreakdown, 'gateway');
 
         $periodNetRevenue = (float) ($metrics->period_net_revenue ?? 0);
         $periodGrossRevenue = (float) ($metrics->period_gross_revenue ?? 0);
@@ -1081,8 +1298,8 @@ class FinancialReportController extends Controller
         $paymentMethods = [];
         $methodDefinitions = [
             'cash' => 'Tunai (Cash)',
-            'qris' => 'QRIS (Xendit)',
-            'transfer' => 'Transfer Bank / VA (Xendit)',
+            'qris' => 'QRIS',
+            'transfer' => 'Transfer Bank',
             'debit' => 'Kartu Debit / EDC',
         ];
         foreach ($methodDefinitions as $code => $label) {
@@ -1106,9 +1323,9 @@ class FinancialReportController extends Controller
             ];
         }
 
-        $activeDriver = (string) config('services.payment_gateway.driver', 'xendit');
+        $activeDriver = (string) config('services.payment_gateway.default_driver', 'xendit');
         $gatewayDefinitions = [
-            'xendit' => 'Xendit Payment Gateway',
+            'xendit' => 'Pembayaran Digital',
             'manual' => 'Kasir POS (Tunai Manual)',
             'midtrans' => 'Midtrans Snap',
         ];
@@ -1140,7 +1357,7 @@ class FinancialReportController extends Controller
         $xenditConfigured = ! empty(config('services.xendit.secret_key'));
         $xenditProduction = (bool) config('services.xendit.is_production', false);
 
-        // Hitung Kuantitas Item Menu Terjual Aktual (Active Items Only) dalam 1 query gabungan
+        // Hitung Kuantitas Item Menu Terjual Aktual & HPP / COGS Riil dalam 1 query gabungan
         $todayStartStr = $todayStart->format('Y-m-d H:i:s');
         $tomorrowStartStr = $tomorrowStart->format('Y-m-d H:i:s');
         $thisMonthStartStr = $thisMonthStart->format('Y-m-d H:i:s');
@@ -1150,29 +1367,110 @@ class FinancialReportController extends Controller
         $prevPeriodStartStr = $prevPeriodStart ? $prevPeriodStart->format('Y-m-d H:i:s') : '1970-01-01 00:00:00';
         $prevPeriodEndExclusiveStr = $prevPeriodEndExclusive ? $prevPeriodEndExclusive->format('Y-m-d H:i:s') : '1970-01-01 00:00:00';
 
+        $effCostExpr = 'COALESCE(order_items.cost_price, menus.cost_price)';
+
         $itemsSoldStats = DB::table('order_items')
             ->join('orders', 'order_items.order_id', '=', 'orders.id')
+            ->leftJoin('menus', 'order_items.menu_id', '=', 'menus.id')
             ->whereRaw($isRealizedExpr)
             ->where('order_items.status', 'active')
             ->selectRaw("
                 COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? THEN order_items.quantity ELSE 0 END), 0) as period_items_sold,
+                COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? AND {$effCostExpr} IS NOT NULL THEN order_items.quantity ELSE 0 END), 0) as period_cogs_covered_qty,
+                COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? AND {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as period_cogs,
                 COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? THEN order_items.quantity ELSE 0 END), 0) as prev_period_items_sold,
+                COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? AND {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as prev_period_cogs,
                 COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? THEN order_items.quantity ELSE 0 END), 0) as today_items_sold,
-                COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? THEN order_items.quantity ELSE 0 END), 0) as this_month_items_sold
+                COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? AND {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as today_cogs,
+                COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? THEN order_items.quantity ELSE 0 END), 0) as this_month_items_sold,
+                COALESCE(SUM(CASE WHEN {$effDateExpr} >= ? AND {$effDateExpr} < ? AND {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as this_month_cogs
             ", [
                 $periodStartStr, $periodEndExclusiveStr,
+                $periodStartStr, $periodEndExclusiveStr,
+                $periodStartStr, $periodEndExclusiveStr,
+                $prevPeriodStartStr, $prevPeriodEndExclusiveStr,
                 $prevPeriodStartStr, $prevPeriodEndExclusiveStr,
                 $todayStartStr, $tomorrowStartStr,
+                $todayStartStr, $tomorrowStartStr,
+                $thisMonthStartStr, $nextMonthStartStr,
                 $thisMonthStartStr, $nextMonthStartStr,
             ])
             ->first();
 
         $periodItemsSold = (int) ($itemsSoldStats->period_items_sold ?? 0);
+        $periodCogsCoveredQty = (int) ($itemsSoldStats->period_cogs_covered_qty ?? 0);
+        $periodCogsAmount = round((float) ($itemsSoldStats->period_cogs ?? 0), 2);
         $prevPeriodItemsSold = ($prevPeriodStart && $prevPeriodEndExclusive)
             ? (int) ($itemsSoldStats->prev_period_items_sold ?? 0)
             : 0;
+        $prevPeriodCogsAmount = ($prevPeriodStart && $prevPeriodEndExclusive)
+            ? round((float) ($itemsSoldStats->prev_period_cogs ?? 0), 2)
+            : 0.0;
         $todayItemsSold = (int) ($itemsSoldStats->today_items_sold ?? 0);
+        $todayCogsAmount = round((float) ($itemsSoldStats->today_cogs ?? 0), 2);
         $thisMonthItemsSold = (int) ($itemsSoldStats->this_month_items_sold ?? 0);
+        $thisMonthCogsAmount = round((float) ($itemsSoldStats->this_month_cogs ?? 0), 2);
+
+        // Hitung Beban Operasional (Expenses) Riil dalam 1 query gabungan (hanya jika diminta oleh laporan lengkap)
+        $periodExpensesTotal = 0.0;
+        $periodExpensesCount = 0;
+        $periodExpensesCash = 0.0;
+        $periodExpensesBank = 0.0;
+        $prevPeriodExpenses = 0.0;
+        $todayExpenses = 0.0;
+        $thisMonthExpenses = 0.0;
+        $menusMissingCostCount = 0;
+
+        if ($includeExpensesAndMissingCost) {
+            $periodStartDateStr = $periodStart->format('Y-m-d');
+            /** @var Carbon $periodEndInclusive */
+            $periodEndInclusive = $resolved['end_inclusive'];
+            $periodEndDateStr = $periodEndInclusive->format('Y-m-d');
+            $prevStartDateStr = $prevPeriodStart ? $prevPeriodStart->format('Y-m-d') : '1970-01-01';
+            $prevEndDateStr = $prevPeriodEndExclusive ? $prevPeriodEndExclusive->copy()->subDay()->format('Y-m-d') : '1970-01-01';
+            $todayDateStr = $todayStart->format('Y-m-d');
+            $thisMonthStartDateStr = $thisMonthStart->format('Y-m-d');
+            $thisMonthEndDateStr = $nextMonthStart->copy()->subDay()->format('Y-m-d');
+
+            $expDateExpr = DB::connection()->getDriverName() === 'pgsql'
+                ? 'expense_date::text'
+                : 'substr(expense_date, 1, 10)';
+
+            $expenseStats = DB::table('expenses')
+                ->selectRaw("
+                    COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN amount ELSE 0 END), 0) as period_expenses_total,
+                    COUNT(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN 1 END) as period_expenses_count,
+                    COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? AND payment_source = 'cash' THEN amount ELSE 0 END), 0) as period_expenses_cash,
+                    COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? AND payment_source IN ('bank', 'xendit_balance') THEN amount ELSE 0 END), 0) as period_expenses_bank,
+                    COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN amount ELSE 0 END), 0) as prev_period_expenses,
+                    COALESCE(SUM(CASE WHEN {$expDateExpr} = ? THEN amount ELSE 0 END), 0) as today_expenses,
+                    COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN amount ELSE 0 END), 0) as this_month_expenses
+                ", [
+                    $periodStartDateStr, $periodEndDateStr,
+                    $periodStartDateStr, $periodEndDateStr,
+                    $periodStartDateStr, $periodEndDateStr,
+                    $periodStartDateStr, $periodEndDateStr,
+                    $prevStartDateStr, $prevEndDateStr,
+                    $todayDateStr,
+                    $thisMonthStartDateStr, $thisMonthEndDateStr,
+                ])
+                ->first();
+
+            $periodExpensesTotal = round((float) ($expenseStats->period_expenses_total ?? 0), 2);
+            $periodExpensesCount = (int) ($expenseStats->period_expenses_count ?? 0);
+            $periodExpensesCash = round((float) ($expenseStats->period_expenses_cash ?? 0), 2);
+            $periodExpensesBank = round((float) ($expenseStats->period_expenses_bank ?? 0), 2);
+            $prevPeriodExpenses = ($prevPeriodStart && $prevPeriodEndExclusive)
+                ? round((float) ($expenseStats->prev_period_expenses ?? 0), 2)
+                : 0.0;
+            $todayExpenses = round((float) ($expenseStats->today_expenses ?? 0), 2);
+            $thisMonthExpenses = round((float) ($expenseStats->this_month_expenses ?? 0), 2);
+
+            $menusMissingCostCount = (int) DB::table('menus')
+                ->where('is_active', true)
+                ->whereNull('cost_price')
+                ->count();
+        }
 
         $todayRevenue = (float) ($metrics->today_revenue ?? 0);
         $yesterdayRevenue = (float) ($metrics->yesterday_revenue ?? 0);
@@ -1198,13 +1496,40 @@ class FinancialReportController extends Controller
         $periodRefundAmount = (float) ($metrics->period_refund_amount ?? 0);
         $periodRefundCount = (int) ($metrics->period_refunded_count ?? 0);
 
+        $cogsCoveragePercent = $periodItemsSold > 0
+            ? round(($periodCogsCoveredQty / $periodItemsSold) * 100, 1)
+            : 100.0;
+        $cogsStatus = $periodItemsSold === 0
+            ? 'complete'
+            : ($periodCogsCoveredQty >= $periodItemsSold ? 'complete' : ($periodCogsCoveredQty > 0 ? 'partial' : 'unavailable'));
+        $cogsMessage = match ($cogsStatus) {
+            'complete' => '100% porsi terjual memiliki modal HPP dari master menu & snapshot transaksi.',
+            'partial' => "{$cogsCoveragePercent}% porsi terjual ({$periodCogsCoveredQty}/{$periodItemsSold} porsi) sudah memiliki HPP. Lengkapi modal menu yang tersisa.",
+            default => 'Belum ada item terjual di periode ini yang memiliki data HPP. Atur HPP di halaman Menu, Kategori & HPP.',
+        };
+
+        $periodGrossProfit = round($periodNetRevenue - $periodCogsAmount, 2);
+        $prevPeriodGrossProfit = round($prevPeriodNetRevenue - $prevPeriodCogsAmount, 2);
+        $grossMarginPercent = $periodNetRevenue > 0 ? round(($periodGrossProfit / $periodNetRevenue) * 100, 1) : 0.0;
+
+        $periodNetProfit = round($periodGrossProfit - $periodExpensesTotal, 2);
+        $prevPeriodNetProfit = round($prevPeriodGrossProfit - $prevPeriodExpenses, 2);
+        $netMarginPercent = $periodNetRevenue > 0 ? round(($periodNetProfit / $periodNetRevenue) * 100, 1) : 0.0;
+
+        $todayNetProfit = round($todayRevenue - $todayCogsAmount - $todayExpenses, 2);
+        $thisMonthNetProfit = round($thisMonthRevenue - $thisMonthCogsAmount - $thisMonthExpenses, 2);
+
         $inflowXendit = (float) ($gatewayBreakdownRows->get('xendit')->paid_net_revenue ?? 0);
         $inflowCash = (float) ($methodBreakdownRows->get('cash')->paid_net_revenue ?? 0);
         $inflowQris = (float) ($methodBreakdownRows->get('qris')->paid_net_revenue ?? 0);
         $inflowTransfer = (float) ($methodBreakdownRows->get('transfer')->paid_net_revenue ?? 0);
+        $inflowDebit = (float) ($methodBreakdownRows->get('debit')->paid_net_revenue ?? 0);
 
         return [
             'today_revenue' => $todayRevenue,
+            'today_cogs' => $todayCogsAmount,
+            'today_expenses' => $todayExpenses,
+            'today_net_profit' => $todayNetProfit,
             'today_paid_count' => (int) ($metrics->today_paid_count ?? 0),
             'today_orders_count' => (int) ($metrics->today_orders_count ?? 0),
             'today_items_sold' => $todayItemsSold,
@@ -1221,6 +1546,9 @@ class FinancialReportController extends Controller
             'this_week_label' => $this->formatIndoDate($thisWeekStart).' - '.$this->formatIndoDate($nextWeekStart->copy()->subDay()),
 
             'this_month_revenue' => $thisMonthRevenue,
+            'this_month_cogs' => $thisMonthCogsAmount,
+            'this_month_expenses' => $thisMonthExpenses,
+            'this_month_net_profit' => $thisMonthNetProfit,
             'this_month_paid_count' => (int) ($metrics->this_month_paid_count ?? 0),
             'this_month_orders_count' => (int) ($metrics->this_month_orders_count ?? 0),
             'this_month_items_sold' => $thisMonthItemsSold,
@@ -1287,29 +1615,64 @@ class FinancialReportController extends Controller
                 'refund_diff' => $periodRefundAmount - $prevPeriodRefundAmount,
                 'refund_growth_percent' => $this->calculateGrowthPercent($periodRefundAmount, $prevPeriodRefundAmount),
 
-                // Data Biaya & Laba Transparan (Audit-Ready)
+                // Data Biaya, HPP & Laba Rugi Riil
                 'discount_amount' => 0.0,
                 'tax_service_amount' => 0.0,
-                'cogs_amount' => null,
-                'cogs_status' => 'unavailable',
-                'cogs_message' => 'Data HPP produk belum dicatat di database',
-                'gross_profit' => $periodNetRevenue,
-                'operational_expenses' => null,
-                'operational_expenses_status' => 'unavailable',
-                'operational_expenses_message' => 'Data pengeluaran operasional belum dicatat di database',
-                'net_profit' => null,
-                'net_profit_status' => 'unavailable',
-                'net_profit_message' => 'Laba bersih membutuhkan data HPP dan beban operasional',
+                'cogs_amount' => $periodCogsAmount,
+                'previous_cogs_amount' => $prevPeriodCogsAmount,
+                'cogs_diff' => $periodCogsAmount - $prevPeriodCogsAmount,
+                'cogs_growth_percent' => $this->calculateGrowthPercent($periodCogsAmount, $prevPeriodCogsAmount),
+                'cogs_coverage_percent' => $cogsCoveragePercent,
+                'cogs_covered_items' => $periodCogsCoveredQty,
+                'cogs_total_items' => $periodItemsSold,
+                'menus_missing_cost_count' => $menusMissingCostCount,
+                'cogs_status' => $cogsStatus,
+                'cogs_message' => $cogsMessage,
 
-                // Arus Kas Riil Periode
+                'gross_profit' => $periodGrossProfit,
+                'previous_gross_profit' => $prevPeriodGrossProfit,
+                'gross_profit_diff' => $periodGrossProfit - $prevPeriodGrossProfit,
+                'gross_profit_growth_percent' => $this->calculateGrowthPercent($periodGrossProfit, $prevPeriodGrossProfit),
+                'gross_margin_percent' => $grossMarginPercent,
+
+                'operational_expenses' => $periodExpensesTotal,
+                'operational_expenses_cash' => $periodExpensesCash,
+                'operational_expenses_bank' => $periodExpensesBank,
+                'operational_expenses_count' => $periodExpensesCount,
+                'previous_operational_expenses' => $prevPeriodExpenses,
+                'operational_expenses_diff' => $periodExpensesTotal - $prevPeriodExpenses,
+                'operational_expenses_growth_percent' => $this->calculateGrowthPercent($periodExpensesTotal, $prevPeriodExpenses),
+                'operational_expenses_status' => $periodExpensesCount > 0 ? 'recorded' : 'empty',
+                'operational_expenses_message' => $periodExpensesCount > 0
+                    ? "{$periodExpensesCount} pengeluaran operasional tercatat pada periode ini."
+                    : 'Belum ada catatan pengeluaran operasional pada periode ini.',
+
+                'net_profit' => $periodNetProfit,
+                'previous_net_profit' => $prevPeriodNetProfit,
+                'net_profit_diff' => $periodNetProfit - $prevPeriodNetProfit,
+                'net_profit_growth_percent' => $this->calculateGrowthPercent($periodNetProfit, $prevPeriodNetProfit),
+                'net_margin_percent' => $netMarginPercent,
+                'net_profit_status' => $cogsStatus === 'complete' ? 'complete' : 'partial',
+                'net_profit_message' => $cogsStatus === 'complete'
+                    ? 'Laba bersih dihitung akurat dari Omzet Bersih - HPP - Pengeluaran Operasional.'
+                    : "Laba bersih menggunakan {$cogsCoveragePercent}% cakupan HPP item terjual.",
+
+                // Arus Kas Riil Periode (Masuk vs Keluar)
                 'cash_flow' => [
-                    'inflow_total' => $periodGrossRevenue,
+                    'inflow_total' => $periodNetRevenue,
+                    'inflow_gross' => $periodGrossRevenue,
                     'inflow_cash' => $inflowCash,
                     'inflow_qris' => $inflowQris,
                     'inflow_transfer' => $inflowTransfer,
+                    'inflow_debit' => $inflowDebit,
                     'inflow_xendit' => $inflowXendit,
                     'outflow_refund' => $periodRefundAmount,
-                    'net_cash_flow' => max(0.0, $periodGrossRevenue - $periodRefundAmount),
+                    'outflow_expenses_cash' => $periodExpensesCash,
+                    'outflow_expenses_bank' => $periodExpensesBank,
+                    'outflow_expenses_total' => $periodExpensesTotal,
+                    'net_cash_drawer' => round($inflowCash - $periodExpensesCash, 2),
+                    'net_bank_digital' => round(($inflowXendit + $inflowDebit) - $periodExpensesBank, 2),
+                    'net_cash_flow' => round($periodNetRevenue - $periodExpensesTotal, 2),
                 ],
             ],
 
@@ -1317,12 +1680,12 @@ class FinancialReportController extends Controller
             'payment_gateways' => $paymentGateways,
             'xendit_integration' => [
                 'driver' => $activeDriver,
-                'label' => 'Xendit Payment Gateway',
+                'label' => 'Pembayaran Digital',
                 'configured' => $xenditConfigured,
                 'is_production' => $xenditProduction,
                 'mode' => $xenditConfigured ? ($xenditProduction ? 'Production Live' : 'Sandbox Active') : 'Sandbox Ready Slot',
-                'webhook_endpoint' => '/payments/webhook/xendit',
-                'supported_channels' => ['QRIS (Xendit)', 'Virtual Account / Bank Transfer', 'E-Wallet Slot'],
+                'webhook_endpoint' => '/payments/webhook',
+                'supported_channels' => ['QRIS', 'Tunai (Cash)'],
                 'transactions_count' => (int) ($gatewayBreakdownRows->get('xendit')->paid_count ?? 0),
                 'net_revenue' => $inflowXendit,
                 'pending_count' => (int) ($gatewayBreakdownRows->get('xendit')->unpaid_count ?? 0),
@@ -1336,7 +1699,7 @@ class FinancialReportController extends Controller
      *
      * @return array<string, mixed>
      */
-    private function computePeriodRecaps(Carbon $start, Carbon $endExclusive): array
+    private function computePeriodRecaps(Carbon $start, Carbon $endExclusive, bool $includeExpenses = true): array
     {
         $driver = DB::connection()->getDriverName();
         $effDateExpr = 'COALESCE(orders.paid_at, orders.created_at)';
@@ -1370,18 +1733,44 @@ class FinancialReportController extends Controller
             ->get()
             ->keyBy('day_date');
 
-        // Kuantitas item terjual per hari
-        $dailyItemsDb = DB::table('order_items')
+        // Kuantitas item terjual & HPP per hari
+        $effCostExpr = 'COALESCE(order_items.cost_price, menus.cost_price)';
+        $dailyItemsStats = DB::table('order_items')
             ->join('orders', 'order_items.order_id', '=', 'orders.id')
+            ->leftJoin('menus', 'order_items.menu_id', '=', 'menus.id')
             ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [
                 $start->format('Y-m-d H:i:s'),
                 $endExclusive->format('Y-m-d H:i:s'),
             ])
             ->whereRaw($isRealizedExpr)
             ->where('order_items.status', 'active')
-            ->selectRaw("{$dayKeyExpr} as day_date, COALESCE(SUM(order_items.quantity), 0) as items_sold")
+            ->selectRaw("
+                {$dayKeyExpr} as day_date,
+                COALESCE(SUM(order_items.quantity), 0) as items_sold,
+                COALESCE(SUM(CASE WHEN {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as cogs_amount
+            ")
             ->groupByRaw($dayKeyExpr)
-            ->pluck('items_sold', 'day_date');
+            ->get()
+            ->keyBy('day_date');
+
+        // Pengeluaran operasional per hari
+        $dailyExpensesByDate = [];
+        if ($includeExpenses) {
+            $endInclusiveStr = $endExclusive->copy()->subDay()->format('Y-m-d');
+            $expDateExpr = DB::connection()->getDriverName() === 'pgsql'
+                ? 'expense_date::text'
+                : 'substr(expense_date, 1, 10)';
+            $expenseDbRows = DB::table('expenses')
+                ->whereRaw("{$expDateExpr} BETWEEN ? AND ?", [$start->format('Y-m-d'), $endInclusiveStr])
+                ->selectRaw("{$expDateExpr} as expense_date, COALESCE(SUM(amount), 0) as total_expense")
+                ->groupByRaw($expDateExpr)
+                ->get();
+
+            foreach ($expenseDbRows as $expRow) {
+                $dKey = substr((string) $expRow->expense_date, 0, 10);
+                $dailyExpensesByDate[$dKey] = ($dailyExpensesByDate[$dKey] ?? 0.0) + (float) $expRow->total_expense;
+            }
+        }
 
         $dailyRows = [];
         $weeklyBuckets = [];
@@ -1401,16 +1790,17 @@ class FinancialReportController extends Controller
             'unpaid_amount' => 0.0,
             'average_order_value' => 0.0,
             'items_sold' => 0,
-            'cogs_amount' => null,
+            'cogs_amount' => 0.0,
             'gross_profit' => 0.0,
-            'operational_expense' => null,
-            'net_profit' => null,
+            'operational_expense' => 0.0,
+            'net_profit' => 0.0,
         ];
 
         $cursor = $start->copy()->startOfDay();
         while ($cursor->lt($endExclusive)) {
             $dateKey = $cursor->format('Y-m-d');
             $dbRow = $dailyDbRows->get($dateKey);
+            $itemStat = $dailyItemsStats->get($dateKey);
 
             $totalOrders = (int) ($dbRow->total_orders ?? 0);
             $paidCount = (int) ($dbRow->paid_orders_count ?? 0);
@@ -1422,7 +1812,11 @@ class FinancialReportController extends Controller
             $netRev = (float) ($dbRow->net_revenue ?? 0.0);
             $unpaidAmt = (float) ($dbRow->unpaid_amount ?? 0.0);
             $aov = $paidCount > 0 ? round($netRev / $paidCount, 2) : 0.0;
-            $itemsSold = (int) ($dailyItemsDb->get($dateKey) ?? 0);
+            $itemsSold = (int) ($itemStat->items_sold ?? 0);
+            $dayCogs = round((float) ($itemStat->cogs_amount ?? 0.0), 2);
+            $dayGrossProfit = round($netRev - $dayCogs, 2);
+            $dayOpex = round((float) ($dailyExpensesByDate[$dateKey] ?? 0.0), 2);
+            $dayNetProfit = round($dayGrossProfit - $dayOpex, 2);
 
             $dailyRows[] = [
                 'date' => $dateKey,
@@ -1439,10 +1833,10 @@ class FinancialReportController extends Controller
                 'tax_service_amount' => 0.0,
                 'refund_amount' => $refundAmt,
                 'net_revenue' => $netRev,
-                'cogs_amount' => null,
-                'gross_profit' => $netRev,
-                'operational_expense' => null,
-                'net_profit' => null,
+                'cogs_amount' => $dayCogs,
+                'gross_profit' => $dayGrossProfit,
+                'operational_expense' => $dayOpex,
+                'net_profit' => $dayNetProfit,
                 'unpaid_amount' => $unpaidAmt,
                 'average_order_value' => $aov,
                 'items_sold' => $itemsSold,
@@ -1470,6 +1864,10 @@ class FinancialReportController extends Controller
                     'gross_revenue' => 0.0,
                     'refund_amount' => 0.0,
                     'net_revenue' => 0.0,
+                    'cogs_amount' => 0.0,
+                    'gross_profit' => 0.0,
+                    'operational_expense' => 0.0,
+                    'net_profit' => 0.0,
                     'unpaid_amount' => 0.0,
                     'average_order_value' => 0.0,
                     'items_sold' => 0,
@@ -1484,6 +1882,10 @@ class FinancialReportController extends Controller
             $weeklyBuckets[$weekKey]['gross_revenue'] += $grossRev;
             $weeklyBuckets[$weekKey]['refund_amount'] += $refundAmt;
             $weeklyBuckets[$weekKey]['net_revenue'] += $netRev;
+            $weeklyBuckets[$weekKey]['cogs_amount'] += $dayCogs;
+            $weeklyBuckets[$weekKey]['gross_profit'] += $dayGrossProfit;
+            $weeklyBuckets[$weekKey]['operational_expense'] += $dayOpex;
+            $weeklyBuckets[$weekKey]['net_profit'] += $dayNetProfit;
             $weeklyBuckets[$weekKey]['unpaid_amount'] += $unpaidAmt;
             $weeklyBuckets[$weekKey]['items_sold'] += $itemsSold;
 
@@ -1502,6 +1904,10 @@ class FinancialReportController extends Controller
                     'gross_revenue' => 0.0,
                     'refund_amount' => 0.0,
                     'net_revenue' => 0.0,
+                    'cogs_amount' => 0.0,
+                    'gross_profit' => 0.0,
+                    'operational_expense' => 0.0,
+                    'net_profit' => 0.0,
                     'unpaid_amount' => 0.0,
                     'average_order_value' => 0.0,
                     'items_sold' => 0,
@@ -1516,6 +1922,10 @@ class FinancialReportController extends Controller
             $monthlyBuckets[$monthKey]['gross_revenue'] += $grossRev;
             $monthlyBuckets[$monthKey]['refund_amount'] += $refundAmt;
             $monthlyBuckets[$monthKey]['net_revenue'] += $netRev;
+            $monthlyBuckets[$monthKey]['cogs_amount'] += $dayCogs;
+            $monthlyBuckets[$monthKey]['gross_profit'] += $dayGrossProfit;
+            $monthlyBuckets[$monthKey]['operational_expense'] += $dayOpex;
+            $monthlyBuckets[$monthKey]['net_profit'] += $dayNetProfit;
             $monthlyBuckets[$monthKey]['unpaid_amount'] += $unpaidAmt;
             $monthlyBuckets[$monthKey]['items_sold'] += $itemsSold;
 
@@ -1528,7 +1938,10 @@ class FinancialReportController extends Controller
             $totals['gross_revenue'] += $grossRev;
             $totals['refund_amount'] += $refundAmt;
             $totals['net_revenue'] += $netRev;
-            $totals['gross_profit'] += $netRev;
+            $totals['cogs_amount'] += $dayCogs;
+            $totals['gross_profit'] += $dayGrossProfit;
+            $totals['operational_expense'] += $dayOpex;
+            $totals['net_profit'] += $dayNetProfit;
             $totals['unpaid_amount'] += $unpaidAmt;
             $totals['items_sold'] += $itemsSold;
 
@@ -1616,8 +2029,14 @@ class FinancialReportController extends Controller
      * @param  array<string, mixed>  $resolved
      * @return array<string, mixed>
      */
-    private function buildChartSeries(Carbon $start, Carbon $endExclusive, string $aggregation, array $recaps, array $resolved = []): array
-    {
+    private function buildChartSeries(
+        Carbon $start,
+        Carbon $endExclusive,
+        string $aggregation,
+        array $recaps,
+        array $resolved = [],
+        bool $includeComparison = true,
+    ): array {
         $sourceRows = match ($aggregation) {
             'weekly' => $recaps['weekly']['rows'],
             'monthly' => $recaps['monthly']['rows'],
@@ -1655,7 +2074,7 @@ class FinancialReportController extends Controller
 
         // Bangun data pembanding jika compare_mode aktif
         $comparisonData = [];
-        if (! empty($resolved['prev_start']) && ! empty($resolved['prev_end_exclusive'])) {
+        if ($includeComparison && ! empty($resolved['prev_start']) && ! empty($resolved['prev_end_exclusive'])) {
             $prevRecaps = $this->computePeriodRecaps($resolved['prev_start'], $resolved['prev_end_exclusive']);
             $prevRows = match ($aggregation) {
                 'weekly' => $prevRecaps['weekly']['rows'],
@@ -1699,6 +2118,65 @@ class FinancialReportController extends Controller
     }
 
     /**
+     * Hitung daftar menu terlaris berdasarkan kuantitas terjual aktual pada rentang tanggal.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function computeTopSellingMenus(
+        Carbon $start,
+        Carbon $endExclusive,
+        int $totalPeriodQty,
+        int $limit = 10,
+    ): array {
+        $effDateExpr = 'COALESCE(orders.paid_at, orders.created_at)';
+        $isRealizedExpr = "(orders.payment_status = 'paid' AND orders.order_status != 'cancelled')";
+        $effCostExpr = 'COALESCE(order_items.cost_price, menus.cost_price)';
+        $startStr = $start->format('Y-m-d H:i:s');
+        $endStr = $endExclusive->format('Y-m-d H:i:s');
+
+        $topSellingRaw = DB::table('order_items')
+            ->join('orders', 'order_items.order_id', '=', 'orders.id')
+            ->leftJoin('menus', 'order_items.menu_id', '=', 'menus.id')
+            ->leftJoin('categories', 'menus.category_id', '=', 'categories.id')
+            ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [$startStr, $endStr])
+            ->whereRaw($isRealizedExpr)
+            ->where('order_items.status', 'active')
+            ->selectRaw("
+                order_items.menu_name,
+                COALESCE(categories.name, 'Umum') as category_name,
+                SUM(order_items.quantity) as total_qty,
+                SUM(order_items.total_price) as total_revenue,
+                COALESCE(SUM(CASE WHEN {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as total_cogs
+            ")
+            ->groupBy('order_items.menu_name', 'categories.name')
+            ->orderByDesc('total_qty')
+            ->limit($limit)
+            ->get();
+
+        $maxQty = max(1, (int) ($topSellingRaw->max('total_qty') ?? 1));
+
+        return $topSellingRaw->map(function (object $item, int|string $idx) use ($maxQty, $totalPeriodQty): array {
+            $qty = (int) $item->total_qty;
+            $rev = (float) $item->total_revenue;
+            $cogs = round((float) ($item->total_cogs ?? 0), 2);
+            $grossProfit = round($rev - $cogs, 2);
+
+            return [
+                'rank' => (int) $idx + 1,
+                'menu_name' => $item->menu_name,
+                'category_name' => $item->category_name,
+                'total_qty' => $qty,
+                'total_revenue' => $rev,
+                'total_cogs' => $cogs,
+                'gross_profit' => $grossProfit,
+                'margin_percent' => $rev > 0 ? round(($grossProfit / $rev) * 100, 1) : 0.0,
+                'relative_percentage' => (int) round(($qty / $maxQty) * 100),
+                'contribution_percent' => $totalPeriodQty > 0 ? round(($qty / $totalPeriodQty) * 100, 1) : 0.0,
+            ];
+        })->values()->all();
+    }
+
+    /**
      * Hitung analisis performa produk, menu terlaris, pendapatan tertinggi, slow moving, dan kategori menu pada periode terpilih.
      *
      * @return array<string, mixed>
@@ -1725,40 +2203,10 @@ class FinancialReportController extends Controller
         $totalPeriodQty = (int) ($periodTotals->total_qty ?? 0);
         $totalPeriodRevenue = (float) ($periodTotals->total_revenue ?? 0);
 
+        $effCostExpr = 'COALESCE(order_items.cost_price, menus.cost_price)';
+
         // 1. Menu Terlaris (Berdasarkan Kuantitas Terjual Aktual)
-        $topSellingRaw = DB::table('order_items')
-            ->join('orders', 'order_items.order_id', '=', 'orders.id')
-            ->leftJoin('menus', 'order_items.menu_id', '=', 'menus.id')
-            ->leftJoin('categories', 'menus.category_id', '=', 'categories.id')
-            ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [$startStr, $endStr])
-            ->whereRaw($isRealizedExpr)
-            ->where('order_items.status', 'active')
-            ->selectRaw("
-                order_items.menu_name,
-                COALESCE(categories.name, 'Umum') as category_name,
-                SUM(order_items.quantity) as total_qty,
-                SUM(order_items.total_price) as total_revenue
-            ")
-            ->groupBy('order_items.menu_name', 'categories.name')
-            ->orderByDesc('total_qty')
-            ->limit(10)
-            ->get();
-
-        $maxQty = max(1, (int) ($topSellingRaw->max('total_qty') ?? 1));
-        $topSelling = $topSellingRaw->map(function (object $item, int|string $idx) use ($maxQty, $totalPeriodQty): array {
-            $qty = (int) $item->total_qty;
-            $rev = (float) $item->total_revenue;
-
-            return [
-                'rank' => (int) $idx + 1,
-                'menu_name' => $item->menu_name,
-                'category_name' => $item->category_name,
-                'total_qty' => $qty,
-                'total_revenue' => $rev,
-                'relative_percentage' => (int) round(($qty / $maxQty) * 100),
-                'contribution_percent' => $totalPeriodQty > 0 ? round(($qty / $totalPeriodQty) * 100, 1) : 0.0,
-            ];
-        })->values()->all();
+        $topSelling = $this->computeTopSellingMenus($start, $endExclusive, $totalPeriodQty, 10);
 
         // 2. Menu Pendapatan Tertinggi (Berdasarkan Kontribusi Omzet)
         $highestRevRaw = DB::table('order_items')
@@ -1772,7 +2220,8 @@ class FinancialReportController extends Controller
                 order_items.menu_name,
                 COALESCE(categories.name, 'Umum') as category_name,
                 SUM(order_items.quantity) as total_qty,
-                SUM(order_items.total_price) as total_revenue
+                SUM(order_items.total_price) as total_revenue,
+                COALESCE(SUM(CASE WHEN {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as total_cogs
             ")
             ->groupBy('order_items.menu_name', 'categories.name')
             ->orderByDesc('total_revenue')
@@ -1783,6 +2232,8 @@ class FinancialReportController extends Controller
         $highestRevenue = $highestRevRaw->map(function (object $item, int|string $idx) use ($maxRev, $totalPeriodRevenue): array {
             $qty = (int) $item->total_qty;
             $rev = (float) $item->total_revenue;
+            $cogs = round((float) ($item->total_cogs ?? 0), 2);
+            $grossProfit = round($rev - $cogs, 2);
 
             return [
                 'rank' => (int) $idx + 1,
@@ -1790,6 +2241,9 @@ class FinancialReportController extends Controller
                 'category_name' => $item->category_name,
                 'total_qty' => $qty,
                 'total_revenue' => $rev,
+                'total_cogs' => $cogs,
+                'gross_profit' => $grossProfit,
+                'margin_percent' => $rev > 0 ? round(($grossProfit / $rev) * 100, 1) : 0.0,
                 'relative_percentage' => (int) round(($rev / $maxRev) * 100),
                 'contribution_percent' => $totalPeriodRevenue > 0 ? round(($rev / $totalPeriodRevenue) * 100, 1) : 0.0,
             ];
@@ -1808,15 +2262,17 @@ class FinancialReportController extends Controller
                     ->whereRaw($isRealizedExpr);
             })
             ->where('menus.is_active', true)
-            ->selectRaw('
+            ->selectRaw("
                 menus.id,
                 menus.name as menu_name,
                 categories.name as category_name,
                 menus.base_price,
+                menus.cost_price,
                 COALESCE(SUM(CASE WHEN orders.id IS NOT NULL THEN order_items.quantity ELSE 0 END), 0) as total_qty,
-                COALESCE(SUM(CASE WHEN orders.id IS NOT NULL THEN order_items.total_price ELSE 0 END), 0) as total_revenue
-            ')
-            ->groupBy('menus.id', 'menus.name', 'categories.name', 'menus.base_price')
+                COALESCE(SUM(CASE WHEN orders.id IS NOT NULL THEN order_items.total_price ELSE 0 END), 0) as total_revenue,
+                COALESCE(SUM(CASE WHEN orders.id IS NOT NULL AND {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as total_cogs
+            ")
+            ->groupBy('menus.id', 'menus.name', 'categories.name', 'menus.base_price', 'menus.cost_price')
             ->orderBy('total_qty', 'asc')
             ->orderBy('total_revenue', 'asc')
             ->limit(10)
@@ -1825,14 +2281,19 @@ class FinancialReportController extends Controller
         $slowMoving = $slowMovingRaw->map(function (object $item): array {
             $qty = (int) $item->total_qty;
             $rev = (float) $item->total_revenue;
+            $cogs = round((float) ($item->total_cogs ?? 0), 2);
+            $grossProfit = round($rev - $cogs, 2);
 
             return [
                 'menu_id' => $item->id,
                 'menu_name' => $item->menu_name,
                 'category_name' => $item->category_name,
                 'base_price' => (float) $item->base_price,
+                'cost_price' => $item->cost_price !== null ? (float) $item->cost_price : null,
                 'total_qty' => $qty,
                 'total_revenue' => $rev,
+                'total_cogs' => $cogs,
+                'gross_profit' => $grossProfit,
                 'is_zero_sales' => $qty === 0,
             ];
         })->values()->all();
@@ -1849,13 +2310,14 @@ class FinancialReportController extends Controller
                     ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [$startStr, $endStr])
                     ->whereRaw($isRealizedExpr);
             })
-            ->selectRaw('
+            ->selectRaw("
                 categories.id,
                 categories.name,
                 COALESCE(SUM(CASE WHEN orders.id IS NOT NULL THEN order_items.quantity ELSE 0 END), 0) as total_qty,
                 COALESCE(SUM(CASE WHEN orders.id IS NOT NULL THEN order_items.total_price ELSE 0 END), 0) as total_revenue,
+                COALESCE(SUM(CASE WHEN orders.id IS NOT NULL AND {$effCostExpr} IS NOT NULL THEN ({$effCostExpr} * order_items.quantity) ELSE 0 END), 0) as total_cogs,
                 COUNT(DISTINCT menus.id) as menu_count
-            ')
+            ")
             ->groupBy('categories.id', 'categories.name')
             ->orderByDesc('total_revenue')
             ->get();
@@ -1863,15 +2325,65 @@ class FinancialReportController extends Controller
         $categories = $categoriesRaw->map(function (object $item) use ($totalPeriodRevenue, $totalPeriodQty): array {
             $qty = (int) $item->total_qty;
             $rev = (float) $item->total_revenue;
+            $cogs = round((float) ($item->total_cogs ?? 0), 2);
+            $grossProfit = round($rev - $cogs, 2);
 
             return [
                 'id' => $item->id,
                 'name' => $item->name,
                 'total_qty' => $qty,
                 'total_revenue' => $rev,
+                'total_cogs' => $cogs,
+                'gross_profit' => $grossProfit,
+                'margin_percent' => $rev > 0 ? round(($grossProfit / $rev) * 100, 1) : 0.0,
                 'menu_count' => (int) $item->menu_count,
                 'revenue_share_percent' => $totalPeriodRevenue > 0 ? round(($rev / $totalPeriodRevenue) * 100, 1) : 0.0,
                 'qty_share_percent' => $totalPeriodQty > 0 ? round(($qty / $totalPeriodQty) * 100, 1) : 0.0,
+            ];
+        })->values()->all();
+
+        // 5. Daftar Seluruh Menu yang Dipesan Pelanggan Hari Ini (Tanpa Batas 10 Item)
+        $todayStart = Carbon::today(self::TIMEZONE)->startOfDay();
+        $todayEndExclusive = $todayStart->copy()->addDay();
+        $todayStartStr = $todayStart->format('Y-m-d H:i:s');
+        $todayEndStr = $todayEndExclusive->format('Y-m-d H:i:s');
+        $isItemPaidExpr = "(orders.payment_status = 'paid' OR COALESCE(order_items.payment_status, 'unpaid') = 'paid')";
+
+        $todayOrderedRaw = DB::table('order_items')
+            ->join('orders', 'order_items.order_id', '=', 'orders.id')
+            ->leftJoin('menus', 'order_items.menu_id', '=', 'menus.id')
+            ->leftJoin('categories', 'menus.category_id', '=', 'categories.id')
+            ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [$todayStartStr, $todayEndStr])
+            ->where('orders.order_status', '!=', 'cancelled')
+            ->whereIn('orders.payment_status', ['paid', 'unpaid'])
+            ->where('order_items.status', 'active')
+            ->selectRaw("
+                order_items.menu_name,
+                COALESCE(categories.name, 'Umum') as category_name,
+                SUM(order_items.quantity) as total_qty,
+                SUM(CASE WHEN {$isItemPaidExpr} THEN order_items.quantity ELSE 0 END) as paid_qty,
+                SUM(CASE WHEN NOT {$isItemPaidExpr} THEN order_items.quantity ELSE 0 END) as unpaid_qty,
+                SUM(order_items.total_price) as total_amount,
+                SUM(CASE WHEN {$isItemPaidExpr} THEN order_items.total_price ELSE 0 END) as paid_revenue,
+                SUM(CASE WHEN NOT {$isItemPaidExpr} THEN order_items.total_price ELSE 0 END) as unpaid_amount,
+                COUNT(DISTINCT orders.id) as orders_count
+            ")
+            ->groupBy('order_items.menu_name', 'categories.name')
+            ->orderByDesc('total_qty')
+            ->orderBy('order_items.menu_name')
+            ->get();
+
+        $todayOrderedMenus = $todayOrderedRaw->map(function (object $item): array {
+            return [
+                'menu_name' => $item->menu_name,
+                'category_name' => $item->category_name,
+                'total_qty' => (int) $item->total_qty,
+                'paid_qty' => (int) $item->paid_qty,
+                'unpaid_qty' => (int) $item->unpaid_qty,
+                'total_amount' => (float) $item->total_amount,
+                'paid_revenue' => (float) $item->paid_revenue,
+                'unpaid_amount' => (float) $item->unpaid_amount,
+                'orders_count' => (int) $item->orders_count,
             ];
         })->values()->all();
 
@@ -1882,6 +2394,97 @@ class FinancialReportController extends Controller
             'highest_revenue' => $highestRevenue,
             'slow_moving' => $slowMoving,
             'categories' => $categories,
+            'today_date_label' => $this->formatIndoDayDate($todayStart),
+            'today_ordered_menus' => $todayOrderedMenus,
+        ];
+    }
+
+    /**
+     * Hitung distribusi omzet per jam operasional (WIB) untuk rentang waktu tertentu.
+     *
+     * @return array{
+     *     hours: array<int, array{hour: string, revenue: float, orders_count: int, is_peak: bool}>,
+     *     peak_hour: string|null,
+     *     max_revenue: float
+     * }
+     */
+    private function computeHourlyTracking(Carbon $start, Carbon $endExclusive): array
+    {
+        $effDateExpr = 'COALESCE(orders.paid_at, orders.created_at)';
+        $isRealizedExpr = "(orders.payment_status = 'paid' AND orders.order_status != 'cancelled')";
+        $ordersInPeriod = DB::table('orders')
+            ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [
+                $start->format('Y-m-d H:i:s'),
+                $endExclusive->format('Y-m-d H:i:s'),
+            ])
+            ->whereRaw($isRealizedExpr)
+            ->select('id', 'total_amount', 'refunded_amount', 'paid_at', 'created_at')
+            ->get();
+
+        return $this->buildHourlyTrendFromOrders($ordersInPeriod);
+    }
+
+    /**
+     * @param  Collection<int, \stdClass>  $ordersInPeriod
+     * @return array{
+     *     hours: array<int, array{hour: string, revenue: float, orders_count: int, is_peak: bool}>,
+     *     peak_hour: string|null,
+     *     max_revenue: float
+     * }
+     */
+    private function buildHourlyTrendFromOrders(Collection $ordersInPeriod): array
+    {
+        $minHour = 8;
+        $maxHour = 22;
+        foreach ($ordersInPeriod as $orderRow) {
+            $orderHour = Carbon::parse((string) ($orderRow->paid_at ?? $orderRow->created_at))->timezone(self::TIMEZONE)->hour;
+            $minHour = min($minHour, $orderHour);
+            $maxHour = max($maxHour, $orderHour);
+        }
+
+        $hours = [];
+        for ($hInt = $minHour; $hInt <= $maxHour; $hInt++) {
+            $hours[] = sprintf('%02d:00', $hInt);
+        }
+
+        $periodHourlyTrend = [];
+        $maxHourlyRev = 0.0;
+        $peakHourStr = null;
+
+        foreach ($hours as $h) {
+            $hInt = (int) substr($h, 0, 2);
+            $ordersAtH = $ordersInPeriod->filter(function (\stdClass $o) use ($hInt): bool {
+                return Carbon::parse((string) ($o->paid_at ?? $o->created_at))->timezone(self::TIMEZONE)->hour === $hInt;
+            });
+            $hRev = (float) $ordersAtH->sum(fn (\stdClass $o): float => max(0.0, (float) $o->total_amount - (float) ($o->refunded_amount ?? 0)));
+            $hCount = $ordersAtH->count();
+
+            if ($hRev > $maxHourlyRev) {
+                $maxHourlyRev = $hRev;
+                $peakHourStr = $h;
+            }
+
+            $periodHourlyTrend[] = [
+                'hour' => $h,
+                'revenue' => $hRev,
+                'orders_count' => $hCount,
+                'is_peak' => false,
+            ];
+        }
+
+        if ($maxHourlyRev > 0 && $peakHourStr !== null) {
+            foreach ($periodHourlyTrend as &$item) {
+                if ($item['hour'] === $peakHourStr) {
+                    $item['is_peak'] = true;
+                }
+            }
+            unset($item);
+        }
+
+        return [
+            'hours' => $periodHourlyTrend,
+            'peak_hour' => $peakHourStr,
+            'max_revenue' => $maxHourlyRev,
         ];
     }
 
@@ -1959,47 +2562,14 @@ class FinancialReportController extends Controller
                 : $roundedMins.' menit')
             : 'Belum Ada';
 
-        // 3. Distribusi Jam Sibuk Periode Filter (08:00 - 22:00 WIB)
+        // 3. Distribusi Jam Sibuk Periode Filter (Default 08:00 - 22:00 WIB, meluas otomatis jika ada transaksi di luar jam tersebut)
         $ordersInPeriod = DB::table('orders')
             ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [$startStr, $endStr])
             ->whereRaw($isRealizedExpr)
             ->select('id', 'total_amount', 'refunded_amount', 'paid_at', 'created_at')
             ->get();
 
-        $hours = ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00'];
-        $periodHourlyTrend = [];
-        $maxHourlyRev = 0.0;
-        $peakHourStr = null;
-
-        foreach ($hours as $h) {
-            $hInt = (int) substr($h, 0, 2);
-            $ordersAtH = $ordersInPeriod->filter(function (object $o) use ($hInt): bool {
-                return Carbon::parse((string) ($o->paid_at ?? $o->created_at))->timezone(self::TIMEZONE)->hour === $hInt;
-            });
-            $hRev = (float) $ordersAtH->sum(fn (object $o): float => max(0.0, (float) $o->total_amount - (float) ($o->refunded_amount ?? 0)));
-            $hCount = $ordersAtH->count();
-
-            if ($hRev > $maxHourlyRev) {
-                $maxHourlyRev = $hRev;
-                $peakHourStr = $h;
-            }
-
-            $periodHourlyTrend[] = [
-                'hour' => $h,
-                'revenue' => $hRev,
-                'orders_count' => $hCount,
-                'is_peak' => false,
-            ];
-        }
-
-        if ($maxHourlyRev > 0 && $peakHourStr !== null) {
-            foreach ($periodHourlyTrend as &$item) {
-                if ($item['hour'] === $peakHourStr) {
-                    $item['is_peak'] = true;
-                }
-            }
-            unset($item);
-        }
+        $periodHourly = $this->buildHourlyTrendFromOrders($ordersInPeriod);
 
         // 4. Analisis Hari Paling Ramai (Senin s/d Minggu)
         $dayOfWeekMap = [
@@ -2085,6 +2655,49 @@ class FinancialReportController extends Controller
             ->orderByDesc('total_net_revenue')
             ->get();
 
+        // 6. Rincian Audit Item Ditolak pada Periode Terpilih
+        $rejectedItemsList = DB::table('order_items')
+            ->join('orders', 'order_items.order_id', '=', 'orders.id')
+            ->leftJoin('users as rejector', 'order_items.rejected_by', '=', 'rejector.id')
+            ->whereRaw("{$effDateExpr} >= ? AND {$effDateExpr} < ?", [$startStr, $endStr])
+            ->where('order_items.status', 'rejected')
+            ->orderByDesc('order_items.rejected_at')
+            ->orderByDesc('order_items.id')
+            ->limit(50)
+            ->get([
+                'order_items.id',
+                'orders.order_number',
+                'orders.customer_name',
+                'orders.payment_status',
+                'order_items.menu_name',
+                'order_items.quantity',
+                'order_items.total_price',
+                'order_items.rejection_reason',
+                'order_items.rejected_at',
+                'order_items.updated_at',
+                'rejector.name as rejected_by_name',
+            ])
+            ->map(function (object $row): array {
+                $ts = $row->rejected_at ?: $row->updated_at;
+
+                return [
+                    'id' => $row->id,
+                    'order_number' => $row->order_number,
+                    'customer_name' => $row->customer_name,
+                    'payment_status' => $row->payment_status,
+                    'menu_name' => $row->menu_name,
+                    'quantity' => (int) $row->quantity,
+                    'total_price' => (float) $row->total_price,
+                    'rejection_reason' => $row->rejection_reason,
+                    'rejected_by_name' => $row->rejected_by_name ?? 'Kasir / Dapur',
+                    'rejected_at_formatted' => $ts
+                        ? $this->formatIndoDateTime(Carbon::parse((string) $ts)->timezone(self::TIMEZONE))
+                        : '-',
+                ];
+            })
+            ->values()
+            ->all();
+
         return [
             'pipeline' => [
                 'completed_count' => (int) ($pipeline->completed_count ?? 0),
@@ -2101,11 +2714,7 @@ class FinancialReportController extends Controller
                 'formatted' => $formattedCompletionTime,
                 'sample_orders' => $validOrdersCount,
             ],
-            'period_hourly' => [
-                'hours' => $periodHourlyTrend,
-                'peak_hour' => $peakHourStr,
-                'max_revenue' => $maxHourlyRev,
-            ],
+            'period_hourly' => $periodHourly,
             'busiest_day' => [
                 'day_of_week' => array_values($dowStats),
                 'busiest_day_name' => $busiestDowStat['day_name'] ?? null,
@@ -2127,6 +2736,7 @@ class FinancialReportController extends Controller
                 'qris_count' => (int) $c->qris_count,
                 'qris_revenue' => (float) $c->qris_revenue,
             ])->values()->all(),
+            'rejected_items_list' => $rejectedItemsList,
         ];
     }
 

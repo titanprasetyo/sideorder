@@ -4,11 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Admin\FinancialReportController;
 use App\Http\Requests\Admin\FinancialReportFilterRequest;
+use App\Models\CafeSetting;
 use App\Models\CafeTable;
+use App\Models\Menu;
 use App\Models\Order;
-use App\Models\OrderItem;
+use App\Models\Payment;
+use App\Services\Payments\PaymentService;
 use Carbon\Carbon;
-use Illuminate\Contracts\Pagination\Paginator;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -21,62 +24,81 @@ class DashboardController extends Controller
     private const TIMEZONE = 'Asia/Jakarta';
 
     /**
-     * Tampilkan Ringkasan & Laporan Keuangan Terpadu Administrator SIDEORDER.
+     * Tampilkan Ringkasan Eksekutif & Status Sistem Café SIDE LINE (Admin).
      */
-    public function index(Request $request, FinancialReportController $financialController): Response|RedirectResponse
-    {
-        // Kasir tidak memerlukan dashboard analitik admin, langsung alihkan ke Papan Pesanan Masuk
+    public function index(
+        Request $request,
+        FinancialReportController $financialController,
+        PaymentService $paymentService
+    ): Response|RedirectResponse {
         if ($request->user() && $request->user()->isCashier()) {
             return redirect()->route('cashier.orders.index');
         }
 
-        // Resolusi filter request untuk kalkulasi finansial
+        $paymentService->expireOverduePendingPayments();
+
         $filterRequest = $this->resolveFilterRequest($request);
-        $financialData = $financialController->buildReportData($filterRequest);
-
-        // Ambil metrik operasional langsung & tren 7 hari aktual
+        $dashboardData = $financialController->buildDashboardData($filterRequest);
         $operationalData = $this->getOperationalMetrics();
-        $salesTrend7d = $this->getSalesTrend7Days();
+        $systemSnapshot = $this->getSystemSnapshot($paymentService);
 
-        // Gunakan menu terlaris periode aktif secara presisi
-        $topMenus = ! empty($financialData['product_analytics']['top_selling'])
-            ? $financialData['product_analytics']['top_selling']
-            : $operationalData['top_menus'];
-
-        // Siapkan recent_orders untuk kompatibilitas riwayat transaksi cepat
-        $paginator = $financialData['transactions'] ?? null;
-        $recentOrders = $paginator instanceof Paginator
-            ? array_slice($paginator->items(), 0, 15)
-            : [];
-
-        return Inertia::render('dashboard', array_merge($financialData, $operationalData, [
-            'top_menus' => $topMenus,
-            'sales_trend_7d' => $salesTrend7d,
-            'recent_orders' => $recentOrders,
-        ]));
+        return Inertia::render('dashboard', [
+            'filters' => $dashboardData['filters'],
+            'summary' => $dashboardData['summary'],
+            'chart' => $dashboardData['chart'],
+            'hourly_tracking' => $dashboardData['hourly_tracking'],
+            'top_menus' => $dashboardData['top_menus'],
+            'operational' => $operationalData['operational'],
+            'alerts' => $operationalData['alerts'],
+            'system_snapshot' => $systemSnapshot,
+            'synced_at' => $dashboardData['synced_at'],
+        ]);
     }
 
     /**
-     * Endpoint API JSON sinkronisasi on-demand / polling untuk dashboard terpadu.
+     * Endpoint API JSON sinkronisasi on-demand / polling untuk Ringkasan & pengujian analitik.
      */
-    public function sync(Request $request, FinancialReportController $financialController): JsonResponse
-    {
+    public function sync(
+        Request $request,
+        FinancialReportController $financialController,
+        PaymentService $paymentService
+    ): JsonResponse {
         if (! $request->user() || ! $request->user()->isAdmin()) {
             abort(403, 'Akses ditolak. Hanya Administrator yang dapat menyinkronkan analitik dashboard.');
         }
 
-        $filterRequest = $this->resolveFilterRequest($request);
-        $financialData = $financialController->buildReportData($filterRequest);
-        $operationalData = $this->getOperationalMetrics();
-        $salesTrend7d = $this->getSalesTrend7Days();
+        $paymentService->expireOverduePendingPayments();
 
-        $topMenus = ! empty($financialData['product_analytics']['top_selling'])
-            ? $financialData['product_analytics']['top_selling']
-            : $operationalData['top_menus'];
+        $filterRequest = $this->resolveFilterRequest($request);
+        $operationalData = $this->getOperationalMetrics();
+        $systemSnapshot = $this->getSystemSnapshot($paymentService);
+
+        if ($request->query('scope') === 'dashboard') {
+            $dashboardData = $financialController->buildDashboardData($filterRequest);
+
+            return response()->json(array_merge($dashboardData, $operationalData, [
+                'system_snapshot' => $systemSnapshot,
+            ]));
+        }
+
+        $financialData = $financialController->buildReportData($filterRequest);
+
+        $topMenus = array_slice(
+            is_array($financialData['product_analytics']['top_selling'] ?? null)
+                ? $financialData['product_analytics']['top_selling']
+                : [],
+            0,
+            5,
+        );
+
+        $hourlyTracking = is_array($financialData['operational_analytics']['period_hourly'] ?? null)
+            ? $financialData['operational_analytics']['period_hourly']
+            : null;
 
         return response()->json(array_merge($financialData, $operationalData, [
             'top_menus' => $topMenus,
-            'sales_trend_7d' => $salesTrend7d,
+            'hourly_tracking' => $hourlyTracking,
+            'system_snapshot' => $systemSnapshot,
         ]));
     }
 
@@ -84,6 +106,9 @@ class DashboardController extends Controller
     {
         /** @var FinancialReportFilterRequest $filterRequest */
         $filterRequest = FinancialReportFilterRequest::createFrom($request);
+        if ($request->hasSession()) {
+            $filterRequest->setLaravelSession($request->session());
+        }
         $filterRequest->setContainer(app());
         $filterRequest->setRedirector(app(Redirector::class));
         $filterRequest->validateResolved();
@@ -92,13 +117,11 @@ class DashboardController extends Controller
     }
 
     /**
-     * Mengambil seluruh metrik operasional kafe terkini (Live status).
+     * Mengambil ringkasan operasional meja, antrean kasir/barista hari ini, serta peringatan stok & HPP menu.
      *
      * @return array{
      *     operational: array<string, int>,
-     *     hourly_trend: list<array<string, mixed>>,
-     *     hourly_summary: array<string, mixed>,
-     *     top_menus: list<array<string, mixed>>
+     *     alerts: array<string, mixed>
      * }
      */
     private function getOperationalMetrics(): array
@@ -106,210 +129,126 @@ class DashboardController extends Controller
         $todayStart = Carbon::today(self::TIMEZONE)->startOfDay();
         $todayEnd = Carbon::today(self::TIMEZONE)->endOfDay();
 
-        // 1. Ambil seluruh pesanan hari ini untuk status pipeline dapur
-        $todayOrders = Order::whereBetween('created_at', [$todayStart, $todayEnd])->get();
+        $todayCounts = Order::query()
+            ->whereBetween('created_at', [$todayStart, $todayEnd])
+            ->selectRaw("
+                COUNT(CASE WHEN order_status = 'processing' THEN 1 END) as in_kitchen,
+                COUNT(CASE WHEN order_status = 'ready' THEN 1 END) as ready_for_pickup,
+                COUNT(CASE WHEN order_status = 'completed' THEN 1 END) as completed_today,
+                COUNT(CASE WHEN payment_status = 'unpaid' AND order_status != 'cancelled' THEN 1 END) as pending_payments
+            ")
+            ->first();
 
-        $inKitchen = $todayOrders->where('order_status', 'processing')->count();
-        $readyForPickup = $todayOrders->where('order_status', 'ready')->count();
-        $completedToday = $todayOrders->where('order_status', 'completed')->count();
-        $pendingPayments = $todayOrders->where('payment_status', 'unpaid')
-            ->where('order_status', '!=', 'cancelled')
-            ->count();
-
-        // 2. Okupansi Meja Aktif
         $tables = CafeTable::withCount('activeOrders')->where('is_active', true)->get();
         $totalTables = $tables->count();
         $occupiedTables = $tables->where('active_orders_count', '>', 0)->count();
         $occupancyRate = $totalTables > 0 ? (int) round(($occupiedTables / $totalTables) * 100) : 0;
 
-        // 3. Tren Penjualan per Jam Hari Ini (08:00 - 21:00 WIB)
-        // Dikelompokkan sekali secara O(N) untuk mencegah multi-pass parsing Carbon yang membebani CPU
-        $ordersByHour = [];
-        foreach ($todayOrders as $o) {
-            $hInt = (int) Carbon::parse($o->created_at)->timezone(self::TIMEZONE)->hour;
-            $ordersByHour[$hInt][] = $o;
-        }
-
-        $hours = ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
-        $hourlyTrend = [];
-        $peakHour = '12:00';
-        $maxHourlyRevenue = 0.0;
-        $totalHourlyRevenue = 0.0;
-        $totalHourlyOrders = 0;
-
-        foreach ($hours as $h) {
-            $hInt = (int) substr($h, 0, 2);
-            $ordersInHour = collect($ordersByHour[$hInt] ?? []);
-
-            $hRevenue = (float) $ordersInHour->where('payment_status', 'paid')
-                ->where('order_status', '!=', 'cancelled')
-                ->sum(fn (Order $o) => $o->getRealizedNetAmount());
-            $hCount = $ordersInHour->count();
-
-            if ($hRevenue > $maxHourlyRevenue) {
-                $maxHourlyRevenue = $hRevenue;
-                $peakHour = $h;
-            }
-
-            $totalHourlyRevenue += $hRevenue;
-            $totalHourlyOrders += $hCount;
-
-            $hourlyTrend[] = [
-                'hour' => $h,
-                'revenue' => $hRevenue,
-                'orders_count' => $hCount,
-                'is_peak' => false,
-            ];
-        }
-
-        if ($maxHourlyRevenue > 0) {
-            foreach ($hourlyTrend as &$item) {
-                if ($item['hour'] === $peakHour) {
-                    $item['is_peak'] = true;
-                }
-            }
-            unset($item);
-        }
-
-        // 4. Top 5 Menu Terlaris (Berdasarkan Kuantitas Terjual Aktual)
-        $rawTopMenus = OrderItem::query()
-            ->where('status', 'active')
-            ->whereHas('order', function ($q): void {
-                $q->whereNotIn('order_status', ['cancelled']);
+        $alertMenus = Menu::query()
+            ->where('is_active', true)
+            ->where(function (Builder $query): void {
+                $query->where('is_limited_stock', true)
+                    ->orWhereNull('cost_price');
             })
-            ->selectRaw('menu_name, SUM(quantity) as total_qty, SUM(total_price) as total_revenue')
-            ->groupBy('menu_name')
-            ->orderByDesc('total_qty')
-            ->limit(5)
-            ->get();
+            ->orderBy('name', 'asc')
+            ->get([
+                'id',
+                'name',
+                'is_limited_stock',
+                'stock_quantity',
+                'stock_valid_days',
+                'stock_updated_at',
+                'cost_price',
+                'updated_at',
+                'created_at',
+            ]);
 
-        $maxQty = (int) ($rawTopMenus->max('total_qty') ?: 1);
+        $limitedMenus = $alertMenus
+            ->filter(fn (Menu $menu): bool => (bool) $menu->is_limited_stock)
+            ->values();
 
-        $topMenus = array_values($rawTopMenus->map(function (object $item) use ($maxQty): array {
-            /** @var object{menu_name: string, total_qty: int|string, total_revenue: float|string} $row */
-            $row = $item;
-            $qty = (int) $row->total_qty;
-            $rev = (float) $row->total_revenue;
+        $expiredAll = $limitedMenus
+            ->filter(fn (Menu $menu): bool => $menu->hasExpiredStock())
+            ->values();
 
-            return [
-                'menu_name' => $row->menu_name,
-                'total_qty' => $qty,
-                'total_revenue' => $rev,
-                'percentage' => (int) round(($qty / $maxQty) * 100),
-            ];
-        })->all());
+        $expiredStockMenus = $expiredAll
+            ->take(6)
+            ->map(fn (Menu $menu): array => [
+                'id' => $menu->id,
+                'name' => $menu->name,
+                'stock_quantity' => (int) $menu->stock_quantity,
+                'stock_valid_days' => $menu->stockValidDays(),
+                'stock_updated_at_label' => $menu->stock_updated_at_label,
+                'stock_valid_until_label' => $menu->stock_valid_until_label,
+            ])
+            ->all();
+
+        $lowStockMenus = $limitedMenus
+            ->filter(fn (Menu $menu): bool => ! $menu->hasExpiredStock() && $menu->resolveEffectiveStockQuantity() <= 5)
+            ->sortBy(fn (Menu $menu): int => $menu->resolveEffectiveStockQuantity())
+            ->take(6)
+            ->values()
+            ->map(fn (Menu $menu): array => [
+                'id' => $menu->id,
+                'name' => $menu->name,
+                'stock_quantity' => (int) $menu->stock_quantity,
+                'stock_valid_days' => $menu->stockValidDays(),
+            ])
+            ->all();
+
+        $menusMissingCostCount = $alertMenus
+            ->filter(fn (Menu $menu): bool => $menu->cost_price === null)
+            ->count();
 
         return [
             'operational' => [
-                'in_kitchen' => $inKitchen,
-                'ready_for_pickup' => $readyForPickup,
-                'completed_today' => $completedToday,
-                'pending_payments' => $pendingPayments,
+                'in_kitchen' => (int) ($todayCounts->in_kitchen ?? 0),
+                'ready_for_pickup' => (int) ($todayCounts->ready_for_pickup ?? 0),
+                'completed_today' => (int) ($todayCounts->completed_today ?? 0),
+                'pending_payments' => (int) ($todayCounts->pending_payments ?? 0),
                 'total_tables' => $totalTables,
                 'occupied_tables' => $occupiedTables,
                 'occupancy_rate' => $occupancyRate,
             ],
-            'hourly_trend' => $hourlyTrend,
-            'hourly_summary' => [
-                'max_revenue' => $maxHourlyRevenue,
-                'peak_hour' => $maxHourlyRevenue > 0 ? $peakHour : null,
-                'total_revenue' => $totalHourlyRevenue,
-                'total_orders' => $totalHourlyOrders,
+            'alerts' => [
+                'expired_stock_count' => $expiredAll->count(),
+                'expired_stock_menus' => $expiredStockMenus,
+                'low_stock_menus' => $lowStockMenus,
+                'menus_missing_cost_count' => $menusMissingCostCount,
             ],
-            'top_menus' => $topMenus,
         ];
     }
 
     /**
-     * Menghitung tren penjualan 7 hari terakhir (Hari ini mundur 6 hari) secara presisi.
+     * Ringkasan konfigurasi sistem & payment gateway aktif untuk tampilan cepat Ringkasan Admin.
      *
      * @return array<string, mixed>
      */
-    private function getSalesTrend7Days(): array
+    private function getSystemSnapshot(PaymentService $paymentService): array
     {
-        $today = Carbon::today(self::TIMEZONE);
-        $start7Days = $today->copy()->subDays(6)->startOfDay();
-        $endToday = $today->copy()->endOfDay();
-
-        // Ambil pesanan dalam rentang 7 hari terakhir
-        $orders = Order::where(function ($q) use ($start7Days, $endToday): void {
-            $q->whereBetween('paid_at', [$start7Days, $endToday])
-                ->orWhere(function ($sub) use ($start7Days, $endToday): void {
-                    $sub->whereNull('paid_at')->whereBetween('created_at', [$start7Days, $endToday]);
-                });
-        })->get();
-
-        $trend = [];
-        $maxRevenue = 0.0;
-        $totalRevenue = 0.0;
-        $totalPaidOrders = 0;
-        $peakDateKey = null;
-
-        // Kelompokkan pesanan sekali (O(N)) berdasarkan tanggal efektif untuk meminimalkan parsing Carbon
-        $ordersByDate = [];
-        foreach ($orders as $order) {
-            $effDate = Carbon::parse($order->paid_at ?? $order->created_at)->timezone(self::TIMEZONE)->format('Y-m-d');
-            $ordersByDate[$effDate][] = $order;
-        }
-
-        $dayNames = [
-            0 => 'Minggu', 1 => 'Senin', 2 => 'Selasa', 3 => 'Rabu',
-            4 => 'Kamis', 5 => 'Jumat', 6 => 'Sabtu',
-        ];
-        $monthNames = [
-            1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April',
-            5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus',
-            9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember',
-        ];
-
-        for ($i = 6; $i >= 0; $i--) {
-            $date = $today->copy()->subDays($i);
-            $dateKey = $date->format('Y-m-d');
-            $dayOrders = collect($ordersByDate[$dateKey] ?? []);
-
-            $paidOrders = $dayOrders->filter(fn (Order $o): bool => $o->isRealizedRevenue());
-            $dayRevenue = (float) $paidOrders->sum(fn (Order $o): float => $o->getRealizedNetAmount());
-            $dayPaidCount = $paidOrders->count();
-
-            if ($dayRevenue > $maxRevenue) {
-                $maxRevenue = $dayRevenue;
-                $peakDateKey = $dateKey;
-            }
-
-            $totalRevenue += $dayRevenue;
-            $totalPaidOrders += $dayPaidCount;
-
-            $fullLabel = ($dayNames[$date->dayOfWeek] ?? '')
-                .', '.$date->format('j')
-                .' '.$monthNames[(int) $date->format('n')]
-                .' '.$date->format('Y');
-
-            $trend[] = [
-                'key' => $dateKey,
-                'date' => $date->format('d M'),
-                'full_label' => $fullLabel,
-                'revenue' => $dayRevenue,
-                'orders_count' => $dayPaidCount,
-                'is_today' => $date->isToday(),
-                'is_peak' => false,
-            ];
-        }
-
-        if ($maxRevenue > 0 && $peakDateKey) {
-            foreach ($trend as &$item) {
-                if ($item['key'] === $peakDateKey) {
-                    $item['is_peak'] = true;
-                }
-            }
-            unset($item);
-        }
+        $setting = CafeSetting::current();
+        $gateway = $paymentService->getPublicGatewayConfig();
+        $paymentCounts = Payment::query()
+            ->selectRaw("
+                COUNT(CASE WHEN gateway = 'xendit' AND status = 'pending' THEN 1 END) as xendit_pending_payments,
+                COUNT(CASE WHEN status IN ('failed', 'expired') THEN 1 END) as failed_payments_recent
+            ")
+            ->first();
 
         return [
-            'data' => $trend,
-            'max_revenue' => $maxRevenue,
-            'total_revenue' => $totalRevenue,
-            'total_paid' => $totalPaidOrders,
-            'peak_date' => $peakDateKey,
+            'cafe_name' => $setting->cafe_name,
+            'is_ordering_enabled' => (bool) $setting->is_ordering_enabled,
+            'is_location_restricted' => (bool) $setting->is_location_restricted,
+            'is_enforcement_active' => $setting->isEnforcementActive(),
+            'access_radius_meters' => (int) $setting->access_radius_meters,
+            'allow_cash_payment' => (bool) $setting->allow_cash_payment,
+            'allow_xendit_payment' => (bool) $setting->allow_xendit_payment,
+            'payment_expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
+            'gateway_label' => $gateway['label'],
+            'gateway_mode' => $gateway['mode'],
+            'gateway_configured' => $gateway['is_configured'],
+            'xendit_pending_payments' => (int) ($paymentCounts->xendit_pending_payments ?? 0),
+            'failed_payments_recent' => (int) ($paymentCounts->failed_payments_recent ?? 0),
         ];
     }
 }

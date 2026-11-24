@@ -46,7 +46,6 @@ import {
     Dialog,
     DialogContent,
     DialogDescription,
-    DialogFooter,
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
@@ -317,9 +316,9 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                     actions={
                         <Button
                             onClick={openCreateModal}
-                            className="h-10 gap-2 rounded-xl px-4 font-bold shadow-sm"
+                            className="h-9 shrink-0 gap-1.5 rounded-xl px-3.5 text-xs font-bold whitespace-nowrap shadow-sm"
                         >
-                            <Plus className="size-4" />
+                            <Plus className="size-3.5" />
                             Tambah Meja
                         </Button>
                     }
@@ -544,13 +543,13 @@ export default function TablesIndex({ tables, appUrl }: Props) {
 
             {/* MODAL 1: Form Tambah / Edit Meja (Gaya 2 Kolom Standee QR Meja) */}
             <Dialog open={isFormModalOpen} onOpenChange={setIsFormModalOpen}>
-                <DialogContent className="flex max-h-[92dvh] w-full max-w-4xl flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-4xl">
+                <DialogContent className="flex max-h-[94dvh] w-full max-w-4xl flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-4xl md:max-h-none md:overflow-visible">
                     <form
                         onSubmit={handleSubmit}
-                        className="flex max-h-[92dvh] flex-col"
+                        className="flex max-h-[94dvh] flex-col md:max-h-none"
                     >
-                        {/* Sticky Header */}
-                        <div className="shrink-0 border-b border-[#EBE5DC] bg-[#FAF8F4] px-5 pt-4 pb-3.5">
+                        {/* Header */}
+                        <div className="shrink-0 border-b border-[#EBE5DC] bg-[#FAF8F4] px-5 pt-3 pb-2.5">
                             <FormDialogHeader
                                 icon={editingTable ? Pencil : Armchair}
                                 badge="Standee Meja Digital"
@@ -574,9 +573,9 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                             />
                         </div>
 
-                        {/* Body 2 Kolom ala Modal QR Code Meja */}
-                        <div className="flex-1 overflow-y-auto bg-[#FAF8F4] p-4 sm:p-5">
-                            <div className="flex flex-col items-stretch gap-5 md:flex-row">
+                        {/* Body 2 Kolom (Tanpa Scroll di Desktop) */}
+                        <div className="flex-1 bg-[#FAF8F4] p-3.5 max-md:overflow-y-auto md:overflow-visible md:p-4">
+                            <div className="flex flex-col items-stretch gap-4 md:flex-row md:items-center">
                                 {/* KOLOM KIRI: Kartu Standee Preview Meja */}
                                 <StandeeModalCard
                                     pillPrimary={
@@ -599,7 +598,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                         { num: '03', label: 'Siap Diantar' },
                                     ]}
                                 >
-                                    <div className="flex size-36 flex-col items-center justify-center gap-1.5 bg-[#FAF5E8] p-3 text-center">
+                                    <div className="flex size-32 flex-col items-center justify-center gap-1.5 bg-[#FAF5E8] p-2.5 text-center">
                                         {editingTable?.qr_token ? (
                                             <img
                                                 src={getQrImage(
@@ -611,8 +610,8 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                             />
                                         ) : (
                                             <>
-                                                <div className="flex size-14 items-center justify-center rounded-2xl bg-[#C52828] text-white shadow-sm">
-                                                    <QrCode className="size-8" />
+                                                <div className="flex size-12 items-center justify-center rounded-2xl bg-[#C52828] text-white shadow-sm">
+                                                    <QrCode className="size-7" />
                                                 </div>
                                                 <span className="font-heading text-xs font-black tracking-wider text-[#18181B] uppercase">
                                                     {form.data.table_number
@@ -631,161 +630,152 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                 </StandeeModalCard>
 
                                 {/* KOLOM KANAN: Panel Informasi & Form Meja */}
-                                <div className="flex min-w-0 flex-1 flex-col justify-between gap-3.5">
-                                    <div className="space-y-3.5">
-                                        {/* Dark Banner ala Card QRIS */}
-                                        <div className="flex items-center justify-between rounded-xl bg-[#1A1A1A] p-3.5 text-white shadow-sm">
-                                            <div className="flex min-w-0 items-center gap-3">
-                                                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-[#C52828] text-xs font-black tracking-tight text-white">
-                                                    QR
-                                                </div>
-                                                <div className="min-w-0">
-                                                    <p className="truncate text-xs font-bold tracking-wide text-white uppercase">
-                                                        SIDE LINE COFFEE •{' '}
-                                                        {form.data.table_number
-                                                            ? formatTableBadge(
-                                                                  form.data
-                                                                      .table_number,
-                                                              )
-                                                            : 'MEJA BARU'}
-                                                    </p>
-                                                    <p className="truncate text-[10px] text-white/60">
-                                                        {form.data.name ||
-                                                            'Area Utama Kafe'}{' '}
-                                                        • Token Terenkripsi
-                                                    </p>
-                                                </div>
+                                <div className="flex min-w-0 flex-1 flex-col justify-center gap-3">
+                                    {/* Dark Banner ala Card QRIS */}
+                                    <div className="flex items-center justify-between rounded-xl bg-[#1A1A1A] p-3 text-white shadow-sm">
+                                        <div className="flex min-w-0 items-center gap-3">
+                                            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[#C52828] text-xs font-black tracking-tight text-white">
+                                                QR
                                             </div>
-                                            <div className="shrink-0 text-right">
-                                                <p className="text-[10px] font-medium text-white/60">
-                                                    Total Order
+                                            <div className="min-w-0">
+                                                <p className="truncate text-xs font-bold tracking-wide text-white uppercase">
+                                                    SIDE LINE COFFEE •{' '}
+                                                    {form.data.table_number
+                                                        ? formatTableBadge(
+                                                              form.data
+                                                                  .table_number,
+                                                          )
+                                                        : 'MEJA BARU'}
                                                 </p>
-                                                <p className="text-sm font-black text-white tabular-nums">
-                                                    {editingTable?.orders_count ??
-                                                        0}
-                                                    x
+                                                <p className="truncate text-[10px] text-white/60">
+                                                    {form.data.name ||
+                                                        'Area Utama Kafe'}{' '}
+                                                    • Token Terenkripsi
                                                 </p>
                                             </div>
                                         </div>
+                                        <div className="shrink-0 text-right">
+                                            <p className="text-[10px] font-medium text-white/60">
+                                                Total Order
+                                            </p>
+                                            <p className="text-sm font-black text-white tabular-nums">
+                                                {editingTable?.orders_count ??
+                                                    0}
+                                                x
+                                            </p>
+                                        </div>
+                                    </div>
 
-                                        {/* Kotak Form Nomor & Lokasi Meja */}
-                                        <div className="space-y-3 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-4 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
-                                            <div className="flex items-center justify-between text-xs font-bold text-[#1A1A1A]">
-                                                <span className="flex items-center gap-1.5">
-                                                    <Sparkles className="size-3.5 text-[#C52828]" />
-                                                    Identitas & Lokasi Meja
-                                                </span>
-                                                <span className="font-mono text-[10px] text-[#6E6A64]">
-                                                    Standee A6
-                                                </span>
+                                    {/* Kotak Form Nomor & Lokasi Meja */}
+                                    <div className="space-y-2.5 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3.5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
+                                        <div className="flex items-center justify-between text-xs font-bold text-[#1A1A1A]">
+                                            <span className="flex items-center gap-1.5">
+                                                <Sparkles className="size-3.5 text-[#C52828]" />
+                                                Identitas & Lokasi Meja
+                                            </span>
+                                            <span className="font-mono text-[10px] text-[#6E6A64]">
+                                                Standee A6
+                                            </span>
+                                        </div>
+
+                                        <div className="grid gap-2.5">
+                                            <div className="grid gap-1">
+                                                <Label
+                                                    htmlFor="table_number"
+                                                    className="text-xs font-bold text-[#1A1A1A]"
+                                                >
+                                                    Nomor Meja{' '}
+                                                    <span className="text-[#C52828]">
+                                                        *
+                                                    </span>
+                                                </Label>
+                                                <Input
+                                                    id="table_number"
+                                                    value={
+                                                        form.data.table_number
+                                                    }
+                                                    onChange={(e) =>
+                                                        form.setData(
+                                                            'table_number',
+                                                            e.target.value,
+                                                        )
+                                                    }
+                                                    placeholder="Contoh: 01, 02, VIP-1"
+                                                    className="h-9 rounded-xl border-[#E6DFD3] bg-[#FAF8F4] text-sm font-semibold text-[#1A1A1A] placeholder:text-[#9E978E] focus:bg-white focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
+                                                    required
+                                                    autoFocus
+                                                />
+                                                <FieldError
+                                                    message={
+                                                        form.errors.table_number
+                                                    }
+                                                />
                                             </div>
 
-                                            <div className="grid gap-3">
-                                                <div className="grid gap-1.5">
-                                                    <Label
-                                                        htmlFor="table_number"
-                                                        className="text-xs font-bold text-[#1A1A1A]"
-                                                    >
-                                                        Nomor Meja{' '}
-                                                        <span className="text-[#C52828]">
-                                                            *
-                                                        </span>
-                                                    </Label>
+                                            <div className="grid gap-1">
+                                                <Label
+                                                    htmlFor="table_name"
+                                                    className="text-xs font-bold text-[#1A1A1A]"
+                                                >
+                                                    Nama / Lokasi{' '}
+                                                    <span className="font-normal text-[#6E6A64]">
+                                                        (opsional)
+                                                    </span>
+                                                </Label>
+                                                <div className="relative">
+                                                    <MapPin className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8C857B]" />
                                                     <Input
-                                                        id="table_number"
-                                                        value={
-                                                            form.data
-                                                                .table_number
-                                                        }
+                                                        id="table_name"
+                                                        value={form.data.name}
                                                         onChange={(e) =>
                                                             form.setData(
-                                                                'table_number',
+                                                                'name',
                                                                 e.target.value,
                                                             )
                                                         }
-                                                        placeholder="Contoh: 01, 02, VIP-1"
-                                                        className="h-10 rounded-xl border-[#E6DFD3] bg-[#FAF8F4] text-sm font-semibold text-[#1A1A1A] placeholder:text-[#9E978E] focus:bg-white focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
-                                                        required
-                                                        autoFocus
-                                                    />
-                                                    <FieldError
-                                                        message={
-                                                            form.errors
-                                                                .table_number
-                                                        }
+                                                        placeholder="Contoh: Teras Outdoor, Dekat Bar, Dibelakang AC"
+                                                        className="h-9 rounded-xl border-[#E6DFD3] bg-[#FAF8F4] pl-9 text-sm font-medium text-[#1A1A1A] placeholder:text-[#9E978E] focus:bg-white focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
                                                     />
                                                 </div>
-
-                                                <div className="grid gap-1.5">
-                                                    <Label
-                                                        htmlFor="table_name"
-                                                        className="text-xs font-bold text-[#1A1A1A]"
-                                                    >
-                                                        Nama / Lokasi{' '}
-                                                        <span className="font-normal text-[#6E6A64]">
-                                                            (opsional)
-                                                        </span>
-                                                    </Label>
-                                                    <div className="relative">
-                                                        <MapPin className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8C857B]" />
-                                                        <Input
-                                                            id="table_name"
-                                                            value={
-                                                                form.data.name
-                                                            }
-                                                            onChange={(e) =>
-                                                                form.setData(
-                                                                    'name',
-                                                                    e.target
-                                                                        .value,
-                                                                )
-                                                            }
-                                                            placeholder="Contoh: Teras Outdoor, Dekat Bar, Dibelakang AC"
-                                                            className="h-10 rounded-xl border-[#E6DFD3] bg-[#FAF8F4] pl-9 text-sm font-medium text-[#1A1A1A] placeholder:text-[#9E978E] focus:bg-white focus-visible:border-[#C52828] focus-visible:ring-[#C52828]/20"
-                                                        />
-                                                    </div>
-                                                    <FieldError
-                                                        message={
-                                                            form.errors.name
-                                                        }
-                                                    />
-                                                </div>
+                                                <FieldError
+                                                    message={form.errors.name}
+                                                />
                                             </div>
                                         </div>
+                                    </div>
 
-                                        {/* Kotak Status Pemesanan Mandiri */}
-                                        <div className="space-y-2.5 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-4 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
-                                            <div className="flex items-center justify-between text-xs font-bold text-[#1A1A1A]">
-                                                <span className="flex items-center gap-1.5">
-                                                    <Link2 className="size-3.5 text-[#C52828]" />
-                                                    Status Pemesanan Mandiri
-                                                </span>
-                                                <span className="font-mono text-[10px] text-[#6E6A64]">
-                                                    {form.data.is_active
-                                                        ? 'Siap Scan'
-                                                        : 'Nonaktif'}
-                                                </span>
-                                            </div>
-                                            <ToggleField
-                                                id="table_is_active"
-                                                checked={form.data.is_active}
-                                                onChange={(checked) =>
-                                                    form.setData(
-                                                        'is_active',
-                                                        checked,
-                                                    )
-                                                }
-                                                label="Meja aktif untuk pemesanan"
-                                                description="Pelanggan bisa langsung memesan dari meja ini dengan scan QR Code."
-                                            />
+                                    {/* Kotak Status Pemesanan Mandiri */}
+                                    <div className="space-y-2 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3.5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
+                                        <div className="flex items-center justify-between text-xs font-bold text-[#1A1A1A]">
+                                            <span className="flex items-center gap-1.5">
+                                                <Link2 className="size-3.5 text-[#C52828]" />
+                                                Status Pemesanan Mandiri
+                                            </span>
+                                            <span className="font-mono text-[10px] text-[#6E6A64]">
+                                                {form.data.is_active
+                                                    ? 'Siap Scan'
+                                                    : 'Nonaktif'}
+                                            </span>
                                         </div>
+                                        <ToggleField
+                                            id="table_is_active"
+                                            checked={form.data.is_active}
+                                            onChange={(checked) =>
+                                                form.setData(
+                                                    'is_active',
+                                                    checked,
+                                                )
+                                            }
+                                            label="Meja aktif untuk pemesanan"
+                                            description="Pelanggan bisa langsung memesan dari meja ini dengan scan QR Code."
+                                        />
                                     </div>
                                 </div>
                             </div>
                         </div>
 
-                        {/* Sticky Footer Action Bar ala Modal QR Code Meja */}
-                        <div className="flex shrink-0 items-center justify-between gap-2.5 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 px-5 py-3.5">
+                        {/* Footer Action Bar */}
+                        <div className="flex shrink-0 items-center justify-between gap-2.5 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 px-5 py-2.5">
                             <span className="hidden text-xs font-semibold text-[#6E6A64] sm:inline">
                                 Token QR meja terenkripsi otomatis oleh sistem
                             </span>
@@ -793,7 +783,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                 <Button
                                     type="button"
                                     variant="outline"
-                                    className="h-11 cursor-pointer rounded-xl border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-bold text-[#1A1A1A] hover:bg-[#F3EFE6]"
+                                    className="h-9 cursor-pointer rounded-xl border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-bold text-[#1A1A1A] hover:bg-[#F3EFE6]"
                                     onClick={() => setIsFormModalOpen(false)}
                                     disabled={form.processing}
                                 >
@@ -802,9 +792,9 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                 <Button
                                     type="submit"
                                     disabled={form.processing}
-                                    className="h-11 cursor-pointer gap-2 rounded-xl bg-[#C52828] px-5 text-xs font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] hover:bg-[#B02222]"
+                                    className="h-9 cursor-pointer gap-1.5 rounded-xl bg-[#C52828] px-4 text-xs font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] hover:bg-[#B02222]"
                                 >
-                                    <Check className="size-4" />
+                                    <Check className="size-3.5" />
                                     {form.processing
                                         ? 'Menyimpan...'
                                         : editingTable
@@ -819,11 +809,11 @@ export default function TablesIndex({ tables, appUrl }: Props) {
 
             {/* MODAL 2: Tampilan & Cetak Kartu QR Code Meja (Gaya Card Modal Pemesanan Meja QRIS) */}
             <Dialog open={isQrModalOpen} onOpenChange={setIsQrModalOpen}>
-                <DialogContent className="flex max-h-[92dvh] w-full max-w-4xl flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl">
+                <DialogContent className="flex max-h-[94dvh] w-full max-w-4xl flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl md:max-h-none md:overflow-visible">
                     {selectedQrTable && (
                         <>
-                            {/* Sticky Header Bar ala Card Modal QRIS */}
-                            <div className="shrink-0 border-b border-[#EBE5DC] bg-[#FAF8F4] px-5 pt-4 pr-14 pb-3.5">
+                            {/* Header Bar */}
+                            <div className="shrink-0 border-b border-[#EBE5DC] bg-[#FAF8F4] px-5 pt-3 pr-14 pb-2.5">
                                 <div className="mb-1 flex flex-wrap items-center gap-1.5">
                                     <span className="inline-flex items-center gap-1 rounded-md bg-[#FDECEB] px-2 py-0.5 text-[10px] font-bold tracking-wider text-[#C52828] uppercase">
                                         <QrCode className="size-3" />
@@ -870,35 +860,35 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                 </DialogHeader>
                             </div>
 
-                            {/* Body 2 Kolom */}
-                            <div className="flex-1 overflow-y-auto p-4 sm:p-5">
-                                <div className="flex flex-col items-stretch gap-5 md:flex-row">
+                            {/* Body 2 Kolom (Tanpa Scroll di Desktop) */}
+                            <div className="flex-1 p-3.5 max-md:overflow-y-auto md:overflow-visible md:p-4">
+                                <div className="flex flex-col items-stretch gap-4 md:flex-row md:items-center">
                                     {/* KOLOM KIRI: Kartu Standee Meja Siap Cetak (Preview Fisik) */}
-                                    <div className="flex w-full shrink-0 flex-col items-center justify-center rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3.5 shadow-[0_2px_12px_rgba(26,26,26,0.03)] md:w-[300px] lg:w-[315px]">
-                                        <div className="printable-qr relative flex w-full max-w-[17rem] flex-col items-center overflow-hidden rounded-[1.35rem] border-2 border-[#E2D4B5] bg-[#FFFDF9] shadow-md">
+                                    <div className="flex w-full shrink-0 flex-col items-center justify-center rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3 shadow-[0_2px_12px_rgba(26,26,26,0.03)] md:w-[275px] lg:w-[290px]">
+                                        <div className="printable-qr relative flex w-full max-w-[15.5rem] flex-col items-center overflow-hidden rounded-2xl border-2 border-[#E2D4B5] bg-[#FFFDF9] shadow-md">
                                             {/* Header Brand Café SIDE LINE */}
-                                            <div className="relative w-full overflow-hidden bg-gradient-to-br from-[#C52828] via-[#B71C1C] to-[#8E1414] px-4 pt-3.5 pb-4 text-center text-white">
+                                            <div className="relative w-full overflow-hidden bg-gradient-to-br from-[#C52828] via-[#B71C1C] to-[#8E1414] px-3.5 pt-2.5 pb-3.5 text-center text-white">
                                                 <div className="pointer-events-none absolute -top-8 -right-8 size-24 rounded-full bg-[#FBF1CB]/15 blur-lg" />
                                                 <div className="pointer-events-none absolute -bottom-8 -left-8 size-20 rounded-full bg-black/15 blur-lg" />
 
                                                 <div className="relative z-10 flex flex-col items-center">
-                                                    <div className="mb-1.5 flex items-center gap-1.5 rounded-full border border-[#FBF1CB]/30 bg-white/10 px-2.5 py-0.5 backdrop-blur-xs">
+                                                    <div className="mb-1 flex items-center gap-1.5 rounded-md border border-[#FBF1CB]/30 bg-white/10 px-2.5 py-0.5 backdrop-blur-xs">
                                                         <Coffee className="size-2.5 text-[#FBF1CB]" />
-                                                        <span className="text-[8.5px] font-extrabold tracking-[0.2em] text-[#FBF1CB] uppercase">
+                                                        <span className="text-[8px] font-extrabold tracking-[0.2em] text-[#FBF1CB] uppercase">
                                                             Café & Roastery
                                                         </span>
                                                     </div>
-                                                    <h3 className="font-heading text-xl leading-none font-black tracking-[0.14em] text-white uppercase">
+                                                    <h3 className="font-heading text-lg leading-none font-black tracking-[0.14em] text-white uppercase">
                                                         SIDE LINE
                                                     </h3>
                                                 </div>
                                             </div>
 
                                             {/* Badge Nomor Meja Melayang di Perbatasan Header */}
-                                            <div className="relative z-20 -mt-3.5 flex flex-col items-center">
-                                                <div className="inline-flex items-center gap-1.5 rounded-full border-2 border-[#FFFDF9] bg-[#FBF1CB] px-3.5 py-1 shadow-md">
-                                                    <span className="size-2 rounded-full bg-[#C52828]" />
-                                                    <span className="font-heading text-xs font-black tracking-[0.1em] text-[#3F2D1C] uppercase">
+                                            <div className="relative z-20 -mt-3 flex flex-col items-center">
+                                                <div className="inline-flex items-center gap-1.5 rounded-md border-2 border-[#FFFDF9] bg-[#FBF1CB] px-3 py-0.5 shadow-md">
+                                                    <span className="size-1.5 rounded-full bg-[#C52828]" />
+                                                    <span className="font-heading text-[11px] font-black tracking-[0.1em] text-[#3F2D1C] uppercase">
                                                         {formatTableBadge(
                                                             selectedQrTable.table_number,
                                                         )}
@@ -908,7 +898,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                                             <span className="text-[#C8B58A]">
                                                                 •
                                                             </span>
-                                                            <span className="max-w-[6.5rem] truncate text-[9.5px] font-bold text-[#78716C]">
+                                                            <span className="max-w-[6rem] truncate text-[9px] font-bold text-[#78716C]">
                                                                 {
                                                                     selectedQrTable.name
                                                                 }
@@ -919,22 +909,22 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                             </div>
 
                                             {/* Area Utama Bingkai QR & Instruksi */}
-                                            <div className="flex w-full flex-col items-center gap-3 px-4 pt-3 pb-3.5">
+                                            <div className="flex w-full flex-col items-center gap-2 px-3 pt-2.5 pb-2.5">
                                                 {/* Bingkai QR Viewfinder Kamera */}
-                                                <div className="relative mt-0.5 rounded-2xl border border-[#E8DFC8] bg-gradient-to-b from-white to-[#FAF6EC] p-3 shadow-sm">
+                                                <div className="relative mt-0.5 rounded-2xl border border-[#E8DFC8] bg-gradient-to-b from-white to-[#FAF6EC] p-2.5 shadow-sm">
                                                     {/* Label Pill Atas Bingkai */}
                                                     <div className="absolute -top-2 left-1/2 z-10 -translate-x-1/2">
-                                                        <span className="inline-flex items-center gap-1 rounded-full bg-[#C52828] px-2 py-0.5 text-[8.5px] font-extrabold tracking-widest text-white uppercase shadow-xs">
+                                                        <span className="inline-flex items-center gap-1 rounded-md bg-[#C52828] px-2 py-0.5 text-[8px] font-extrabold tracking-widest text-white uppercase shadow-xs">
                                                             <Camera className="size-2.5" />
                                                             Scan QR
                                                         </span>
                                                     </div>
 
                                                     {/* 4 Siku Viewfinder Kamera (#C52828) */}
-                                                    <span className="pointer-events-none absolute top-1.5 left-1.5 size-4 rounded-tl-lg border-t-[3px] border-l-[3px] border-[#C52828]" />
-                                                    <span className="pointer-events-none absolute top-1.5 right-1.5 size-4 rounded-tr-lg border-t-[3px] border-r-[3px] border-[#C52828]" />
-                                                    <span className="pointer-events-none absolute bottom-1.5 left-1.5 size-4 rounded-bl-lg border-b-[3px] border-l-[3px] border-[#C52828]" />
-                                                    <span className="pointer-events-none absolute right-1.5 bottom-1.5 size-4 rounded-br-lg border-r-[3px] border-b-[3px] border-[#C52828]" />
+                                                    <span className="pointer-events-none absolute top-1.5 left-1.5 size-3.5 rounded-tl-lg border-t-[3px] border-l-[3px] border-[#C52828]" />
+                                                    <span className="pointer-events-none absolute top-1.5 right-1.5 size-3.5 rounded-tr-lg border-t-[3px] border-r-[3px] border-[#C52828]" />
+                                                    <span className="pointer-events-none absolute bottom-1.5 left-1.5 size-3.5 rounded-bl-lg border-b-[3px] border-l-[3px] border-[#C52828]" />
+                                                    <span className="pointer-events-none absolute right-1.5 bottom-1.5 size-3.5 rounded-br-lg border-r-[3px] border-b-[3px] border-[#C52828]" />
 
                                                     {/* Gambar QR Code Presisi Tinggi */}
                                                     <div className="relative overflow-hidden rounded-xl border border-[#EFE5CF] bg-white p-1.5 shadow-2xs">
@@ -944,7 +934,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                                                 380,
                                                             )}
                                                             alt={`QR Code ${formatTableTitle(selectedQrTable.table_number)}`}
-                                                            className="aspect-square size-36 object-contain"
+                                                            className="aspect-square size-32 object-contain"
                                                             loading="eager"
                                                         />
                                                     </div>
@@ -952,10 +942,10 @@ export default function TablesIndex({ tables, appUrl }: Props) {
 
                                                 {/* Teks Ajakan */}
                                                 <div className="space-y-0.5 text-center">
-                                                    <p className="font-heading text-sm font-black tracking-tight text-[#18181B]">
+                                                    <p className="font-heading text-[13px] font-black tracking-tight text-[#18181B]">
                                                         Scan untuk Lihat Menu
                                                     </p>
-                                                    <p className="text-[10px] leading-snug font-medium text-[#78716C]">
+                                                    <p className="text-[9.5px] leading-snug font-medium text-[#78716C]">
                                                         Arahkan kamera
                                                         smartphone untuk memilih
                                                         menu favorit dari meja
@@ -964,28 +954,28 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                                 </div>
 
                                                 {/* 3 Langkah Visual */}
-                                                <div className="grid w-full grid-cols-3 gap-1 rounded-xl border border-[#E8DFC8] bg-[#FAF6EC] p-1.5 text-center">
+                                                <div className="grid w-full grid-cols-3 gap-1 rounded-xl border border-[#E8DFC8] bg-[#FAF6EC] p-1 text-center">
                                                     <div className="flex flex-col items-center gap-0.5 rounded-lg bg-[#FFFDF9] px-1 py-1 shadow-2xs">
-                                                        <span className="text-[8.5px] font-black text-[#C52828]">
+                                                        <span className="text-[8px] font-black text-[#C52828]">
                                                             01
                                                         </span>
-                                                        <span className="text-[9.5px] leading-tight font-bold text-[#18181B]">
+                                                        <span className="text-[9px] leading-tight font-bold text-[#18181B]">
                                                             Buka Kamera
                                                         </span>
                                                     </div>
                                                     <div className="flex flex-col items-center gap-0.5 rounded-lg bg-[#FFFDF9] px-1 py-1 shadow-2xs">
-                                                        <span className="text-[8.5px] font-black text-[#C52828]">
+                                                        <span className="text-[8px] font-black text-[#C52828]">
                                                             02
                                                         </span>
-                                                        <span className="text-[9.5px] leading-tight font-bold text-[#18181B]">
+                                                        <span className="text-[9px] leading-tight font-bold text-[#18181B]">
                                                             Pilih Menu
                                                         </span>
                                                     </div>
                                                     <div className="flex flex-col items-center gap-0.5 rounded-lg bg-[#FFFDF9] px-1 py-1 shadow-2xs">
-                                                        <span className="text-[8.5px] font-black text-[#C52828]">
+                                                        <span className="text-[8px] font-black text-[#C52828]">
                                                             03
                                                         </span>
-                                                        <span className="text-[9.5px] leading-tight font-bold text-[#18181B]">
+                                                        <span className="text-[9px] leading-tight font-bold text-[#18181B]">
                                                             Siap Diantar
                                                         </span>
                                                     </div>
@@ -993,7 +983,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                             </div>
 
                                             {/* Footer Kartu Standee */}
-                                            <div className="flex w-full items-center justify-center gap-1.5 border-t border-[#E8DFC8] bg-[#FAF5E8] px-3 py-1.5 text-[8.5px] font-extrabold tracking-[0.16em] text-[#78716C] uppercase">
+                                            <div className="flex w-full items-center justify-center gap-1.5 border-t border-[#E8DFC8] bg-[#FAF5E8] px-3 py-1 text-[8px] font-extrabold tracking-[0.16em] text-[#78716C] uppercase">
                                                 <Sparkles className="size-2 text-[#C52828]" />
                                                 <span>
                                                     SIDEORDER • DIGITAL MENU
@@ -1003,156 +993,152 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                     </div>
 
                                     {/* KOLOM KANAN: Panel Informasi & Tautan ala Card QRIS */}
-                                    <div className="flex min-w-0 flex-1 flex-col justify-between gap-3.5">
-                                        <div className="space-y-3.5">
-                                            {/* Dark Merchant / Table Banner ala QRIS */}
-                                            <div className="flex items-center justify-between rounded-xl bg-[#1A1A1A] p-3.5 text-white shadow-sm">
-                                                <div className="flex items-center gap-3">
-                                                    <div className="flex size-10 items-center justify-center rounded-lg bg-[#C52828] text-xs font-black tracking-tight text-white">
-                                                        QR
-                                                    </div>
-                                                    <div>
-                                                        <p className="text-xs font-bold tracking-wide text-white">
-                                                            SIDE LINE COFFEE •{' '}
-                                                            {formatTableBadge(
-                                                                selectedQrTable.table_number,
-                                                            )}
-                                                        </p>
-                                                        <p className="text-[10px] text-white/60">
-                                                            {selectedQrTable.name ||
-                                                                'Area Utama Kafe'}{' '}
-                                                            • Token Terenkripsi
-                                                        </p>
-                                                    </div>
+                                    <div className="flex min-w-0 flex-1 flex-col justify-center gap-3">
+                                        {/* Dark Merchant / Table Banner ala QRIS */}
+                                        <div className="flex items-center justify-between rounded-xl bg-[#1A1A1A] p-3.5 text-white shadow-sm">
+                                            <div className="flex items-center gap-3">
+                                                <div className="flex size-10 items-center justify-center rounded-lg bg-[#C52828] text-xs font-black tracking-tight text-white">
+                                                    QR
                                                 </div>
-                                                <div className="text-right">
-                                                    <p className="text-[10px] font-medium text-white/60">
-                                                        Total Order
+                                                <div>
+                                                    <p className="text-xs font-bold tracking-wide text-white">
+                                                        SIDE LINE COFFEE •{' '}
+                                                        {formatTableBadge(
+                                                            selectedQrTable.table_number,
+                                                        )}
                                                     </p>
-                                                    <p className="text-sm font-black text-white tabular-nums">
-                                                        {selectedQrTable.orders_count ??
-                                                            0}
-                                                        x
+                                                    <p className="text-[10px] text-white/60">
+                                                        {selectedQrTable.name ||
+                                                            'Area Utama Kafe'}{' '}
+                                                        • Token Terenkripsi
                                                     </p>
                                                 </div>
                                             </div>
+                                            <div className="text-right">
+                                                <p className="text-[10px] font-medium text-white/60">
+                                                    Total Order
+                                                </p>
+                                                <p className="text-sm font-black text-white tabular-nums">
+                                                    {selectedQrTable.orders_count ??
+                                                        0}
+                                                    x
+                                                </p>
+                                            </div>
+                                        </div>
 
-                                            {/* Kotak Petunjuk Standee Akrilik */}
-                                            <div className="space-y-2.5 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-4 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
-                                                <div className="flex items-center justify-between text-xs font-bold text-[#1A1A1A]">
-                                                    <span className="flex items-center gap-1.5">
-                                                        <Sparkles className="size-3.5 text-[#C52828]" />
-                                                        Spesifikasi Cetak
-                                                        Standee
+                                        {/* Kotak Petunjuk Standee Akrilik */}
+                                        <div className="space-y-2 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3.5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
+                                            <div className="flex items-center justify-between text-xs font-bold text-[#1A1A1A]">
+                                                <span className="flex items-center gap-1.5">
+                                                    <Sparkles className="size-3.5 text-[#C52828]" />
+                                                    Spesifikasi Cetak Standee
+                                                </span>
+                                                <span className="font-mono text-[10px] text-[#6E6A64]">
+                                                    High Resolution (300 DPI)
+                                                </span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-2 text-[11px]">
+                                                <div className="rounded-xl border border-[#EBE5DC] bg-[#FAF8F4] p-2.5">
+                                                    <span className="block text-[10px] text-[#6E6A64]">
+                                                        Rekomendasi Akrilik
                                                     </span>
-                                                    <span className="font-mono text-[10px] text-[#6E6A64]">
-                                                        High Resolution (300
-                                                        DPI)
-                                                    </span>
+                                                    <strong className="font-bold text-[#1A1A1A]">
+                                                        Ukuran A6 (10×15 cm)
+                                                    </strong>
                                                 </div>
-                                                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                                                    <div className="rounded-xl border border-[#EBE5DC] bg-[#FAF8F4] p-2.5">
-                                                        <span className="block text-[10px] text-[#6E6A64]">
-                                                            Rekomendasi Akrilik
-                                                        </span>
-                                                        <strong className="font-bold text-[#1A1A1A]">
-                                                            Ukuran A6 (10×15 cm)
-                                                        </strong>
-                                                    </div>
-                                                    <div className="rounded-xl border border-[#EBE5DC] bg-[#FAF8F4] p-2.5">
-                                                        <span className="block text-[10px] text-[#6E6A64]">
-                                                            Dukungan Kamera
-                                                        </span>
-                                                        <strong className="font-bold text-[#1A1A1A]">
-                                                            Semua Smartphone
-                                                            (iOS / Android)
-                                                        </strong>
-                                                    </div>
+                                                <div className="rounded-xl border border-[#EBE5DC] bg-[#FAF8F4] p-2.5">
+                                                    <span className="block text-[10px] text-[#6E6A64]">
+                                                        Dukungan Kamera
+                                                    </span>
+                                                    <strong className="font-bold text-[#1A1A1A]">
+                                                        Semua Smartphone (iOS /
+                                                        Android)
+                                                    </strong>
                                                 </div>
                                             </div>
+                                        </div>
 
-                                            {/* Tautan URL Pemesanan Mandiri */}
-                                            <div className="space-y-2 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-4 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
-                                                <div className="flex items-center justify-between">
-                                                    <Label className="flex items-center gap-1.5 text-xs font-bold text-[#1A1A1A]">
-                                                        <Link2 className="size-3.5 text-[#C52828]" />
-                                                        Tautan Pemesanan Mandiri
-                                                    </Label>
-                                                    <a
-                                                        href={getOrderUrl(
-                                                            selectedQrTable.qr_token,
-                                                        )}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[#C52828] hover:underline"
-                                                    >
-                                                        <span>
-                                                            Tes Buka Halaman
-                                                        </span>
-                                                        <ExternalLink className="size-3" />
-                                                    </a>
-                                                </div>
+                                        {/* Tautan URL Pemesanan Mandiri */}
+                                        <div className="space-y-2 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-3.5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
+                                            <div className="flex items-center justify-between">
+                                                <Label className="flex items-center gap-1.5 text-xs font-bold text-[#1A1A1A]">
+                                                    <Link2 className="size-3.5 text-[#C52828]" />
+                                                    Tautan Pemesanan Mandiri
+                                                </Label>
+                                                <a
+                                                    href={getOrderUrl(
+                                                        selectedQrTable.qr_token,
+                                                    )}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#C52828] hover:underline"
+                                                >
+                                                    <span>
+                                                        Tes Buka Halaman
+                                                    </span>
+                                                    <ExternalLink className="size-3" />
+                                                </a>
+                                            </div>
 
-                                                <div className="flex items-center gap-2 rounded-xl border border-[#E6DFD3] bg-[#F3EFE6]/80 p-1.5 pl-3 transition-colors focus-within:border-[#C52828] focus-within:bg-white">
-                                                    <input
-                                                        ref={urlInputRef}
-                                                        type="text"
-                                                        readOnly
-                                                        value={getOrderUrl(
-                                                            selectedQrTable.qr_token,
-                                                        )}
-                                                        onClick={() =>
-                                                            copyToClipboard(
-                                                                getOrderUrl(
-                                                                    selectedQrTable.qr_token,
-                                                                ),
-                                                            )
-                                                        }
-                                                        title="Klik untuk menyalin tautan"
-                                                        className="min-w-0 flex-1 cursor-pointer truncate bg-transparent font-mono text-xs font-semibold text-[#1A1A1A] selection:bg-[#C52828]/20 focus:outline-hidden"
-                                                    />
-                                                    <Button
-                                                        type="button"
-                                                        size="sm"
-                                                        onClick={() =>
-                                                            copyToClipboard(
-                                                                getOrderUrl(
-                                                                    selectedQrTable.qr_token,
-                                                                ),
-                                                            )
-                                                        }
-                                                        className={cn(
-                                                            'h-8 shrink-0 cursor-pointer gap-1.5 rounded-lg px-3 text-xs font-bold shadow-xs transition-all',
-                                                            isCopied
-                                                                ? 'border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'
-                                                                : 'border border-[#E6DFD3] bg-[#FFFDFB] text-[#1A1A1A] hover:bg-[#FAF8F4]',
-                                                        )}
-                                                    >
-                                                        {isCopied ? (
-                                                            <>
-                                                                <Check className="size-3.5 text-white" />
-                                                                <span>
-                                                                    Tersalin!
-                                                                </span>
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                                <Copy className="size-3.5 text-[#6E6A64]" />
-                                                                <span>
-                                                                    Salin Link
-                                                                </span>
-                                                            </>
-                                                        )}
-                                                    </Button>
-                                                </div>
+                                            <div className="flex items-center gap-2 rounded-xl border border-[#E6DFD3] bg-[#F3EFE6]/80 p-1.5 pl-3 transition-colors focus-within:border-[#C52828] focus-within:bg-white">
+                                                <input
+                                                    ref={urlInputRef}
+                                                    type="text"
+                                                    readOnly
+                                                    value={getOrderUrl(
+                                                        selectedQrTable.qr_token,
+                                                    )}
+                                                    onClick={() =>
+                                                        copyToClipboard(
+                                                            getOrderUrl(
+                                                                selectedQrTable.qr_token,
+                                                            ),
+                                                        )
+                                                    }
+                                                    title="Klik untuk menyalin tautan"
+                                                    className="min-w-0 flex-1 cursor-pointer truncate bg-transparent font-mono text-xs font-semibold text-[#1A1A1A] selection:bg-[#C52828]/20 focus:outline-hidden"
+                                                />
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    onClick={() =>
+                                                        copyToClipboard(
+                                                            getOrderUrl(
+                                                                selectedQrTable.qr_token,
+                                                            ),
+                                                        )
+                                                    }
+                                                    className={cn(
+                                                        'h-8 shrink-0 cursor-pointer gap-1.5 rounded-lg px-3 text-xs font-bold shadow-xs transition-all',
+                                                        isCopied
+                                                            ? 'border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'
+                                                            : 'border border-[#E6DFD3] bg-[#FFFDFB] text-[#1A1A1A] hover:bg-[#FAF8F4]',
+                                                    )}
+                                                >
+                                                    {isCopied ? (
+                                                        <>
+                                                            <Check className="size-3.5 text-white" />
+                                                            <span>
+                                                                Tersalin!
+                                                            </span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <Copy className="size-3.5 text-[#6E6A64]" />
+                                                            <span>
+                                                                Salin Link
+                                                            </span>
+                                                        </>
+                                                    )}
+                                                </Button>
                                             </div>
                                         </div>
                                     </div>
                                 </div>
                             </div>
 
-                            {/* Sticky Footer Bar ala Card Modal QRIS */}
-                            <div className="flex shrink-0 flex-col-reverse gap-2.5 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+                            {/* Footer Bar */}
+                            <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-[#EBE5DC] bg-[#FAF8F4]/98 px-5 py-2.5 sm:flex-row sm:items-center sm:justify-between">
                                 <Button
                                     type="button"
                                     variant="ghost"
@@ -1160,7 +1146,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                     onClick={() =>
                                         setRegeneratingTable(selectedQrTable)
                                     }
-                                    className="h-10 cursor-pointer justify-center gap-1.5 rounded-xl text-xs font-bold text-[#B91C1C] hover:bg-[#FDECEB] hover:text-[#B91C1C] sm:justify-start"
+                                    className="h-9 cursor-pointer justify-center gap-1.5 rounded-xl text-xs font-bold text-[#B91C1C] hover:bg-[#FDECEB] hover:text-[#B91C1C] sm:justify-start"
                                 >
                                     <RefreshCw className="size-3.5" /> Reset
                                     Token QR
@@ -1170,7 +1156,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                     <Button
                                         type="button"
                                         variant="outline"
-                                        className="h-11 flex-1 cursor-pointer rounded-xl border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-bold text-[#1A1A1A] hover:bg-[#F3EFE6] sm:flex-none"
+                                        className="h-9 flex-1 cursor-pointer rounded-xl border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-bold text-[#1A1A1A] hover:bg-[#F3EFE6] sm:flex-none"
                                         onClick={() => setIsQrModalOpen(false)}
                                     >
                                         Tutup
@@ -1178,7 +1164,7 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                     <Button
                                         type="button"
                                         variant="outline"
-                                        className="h-11 flex-1 cursor-pointer gap-1.5 rounded-xl border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-bold text-[#1A1A1A] hover:bg-[#F3EFE6] sm:flex-none"
+                                        className="h-9 flex-1 cursor-pointer gap-1.5 rounded-xl border-[#E6DFD3] bg-[#FFFDFB] px-4 text-xs font-bold text-[#1A1A1A] hover:bg-[#F3EFE6] sm:flex-none"
                                         onClick={() =>
                                             handleDownloadTableQr(
                                                 selectedQrTable,
@@ -1192,9 +1178,9 @@ export default function TablesIndex({ tables, appUrl }: Props) {
                                     <Button
                                         type="button"
                                         onClick={handlePrint}
-                                        className="h-11 flex-1 cursor-pointer gap-2 rounded-xl bg-[#C52828] px-5 text-xs font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] hover:bg-[#B02222] sm:flex-none"
+                                        className="h-9 flex-1 cursor-pointer gap-1.5 rounded-xl bg-[#C52828] px-4 text-xs font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] hover:bg-[#B02222] sm:flex-none"
                                     >
-                                        <Printer className="size-4" /> Cetak
+                                        <Printer className="size-3.5" /> Cetak
                                         Kartu
                                     </Button>
                                 </div>

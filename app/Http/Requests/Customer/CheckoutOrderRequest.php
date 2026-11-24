@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Customer;
 
+use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -37,8 +38,32 @@ class CheckoutOrderRequest extends FormRequest
             'items.*.menu_id' => ['required', 'integer', 'exists:menus,id'],
             'items.*.quantity' => ['required', 'integer', 'min:1', 'max:50'],
             'items.*.customer_notes' => ['nullable', 'string', 'max:255'],
-            'items.*.selected_option_ids' => ['nullable', 'array'],
-            'items.*.selected_option_ids.*' => ['integer', 'distinct', 'exists:menu_option_items,id'],
+            'items.*.selected_option_ids' => [
+                'nullable',
+                'array',
+                function (string $attribute, mixed $value, Closure $fail): void {
+                    if (! is_array($value)) {
+                        return;
+                    }
+
+                    $seenIds = [];
+                    foreach ($value as $optId) {
+                        if (! is_int($optId) && ! (is_string($optId) && preg_match('/^-?\d+$/', $optId) === 1)) {
+                            continue;
+                        }
+
+                        $normalizedId = (int) $optId;
+                        if (isset($seenIds[$normalizedId])) {
+                            $fail('Setiap pilihan varian atau ukuran dalam satu item pesanan hanya boleh dipilih satu kali.');
+
+                            return;
+                        }
+
+                        $seenIds[$normalizedId] = true;
+                    }
+                },
+            ],
+            'items.*.selected_option_ids.*' => ['integer', 'exists:menu_option_items,id'],
         ];
     }
 

@@ -9,7 +9,9 @@ use App\Models\CafeTable;
 use App\Models\Category;
 use App\Models\Menu;
 use App\Models\Order;
+use App\Models\OrderItem;
 use App\Models\OrderStatusHistory;
+use App\Services\Orders\OrderServingService;
 use App\Services\Payments\PaymentService;
 use App\Services\Stock\MenuStockService;
 use Carbon\Carbon;
@@ -27,6 +29,7 @@ class OrderController extends Controller
     public function __construct(
         private readonly PaymentService $paymentService,
         private readonly MenuStockService $menuStockService,
+        private readonly OrderServingService $orderServingService,
     ) {}
 
     /**
@@ -87,10 +90,19 @@ class OrderController extends Controller
      */
     private function getCashierData(string $dateFilter = 'today'): array
     {
+        $this->paymentService->expireOverduePendingPayments();
+
         $startOfToday = Carbon::today()->startOfDay();
         $endOfToday = Carbon::today()->endOfDay();
 
-        $query = Order::with(['table', 'items.options', 'latestPayment'])->latest();
+        $query = Order::with([
+            'table',
+            'items.options',
+            'items.rejectedByUser:id,name',
+            'items.servedByUser:id,name',
+            'latestPayment',
+            'payments:id,order_id,payment_reference,gateway,method,channel,type,amount,settled_amount,status,expired_at,paid_at',
+        ])->latest();
 
         if ($dateFilter === 'today') {
             // Ambil semua pesanan aktif (pending/processing/ready) ATAU pesanan selesai/batal hari ini
@@ -106,6 +118,10 @@ class OrderController extends Controller
         $pendingOrders = $orders->where('order_status', 'pending');
         $processingOrders = $orders->where('order_status', 'processing');
         $readyOrders = $orders->where('order_status', 'ready');
+        $partialReadyOrders = $processingOrders->filter(
+            fn (Order $o): bool => $o->hasServedActivePaidItem()
+        );
+        $readyAndPartialOrders = $readyOrders->merge($partialReadyOrders);
 
         // Filter pesanan selesai khusus hari ini
         $completedTodayOrders = $orders->where('order_status', 'completed')->filter(function (Order $o) use ($startOfToday): bool {
@@ -118,7 +134,7 @@ class OrderController extends Controller
         $counts = [
             'pending' => $pendingOrders->count(),
             'processing' => $processingOrders->count(),
-            'ready' => $readyOrders->count(),
+            'ready' => $readyAndPartialOrders->count(),
             'completed_today' => $completedTodayOrders->count(),
             'active' => $pendingOrders->count() + $processingOrders->count() + $readyOrders->count(),
             'all' => $orders->count(),
@@ -127,7 +143,7 @@ class OrderController extends Controller
         $stats = [
             'processing_amount' => (float) $processingOrders->sum('total_amount'),
             'completed_amount' => (float) $completedTodayOrders->sum('total_amount'),
-            'ready_tables' => $readyOrders->pluck('table.table_number')->filter()->unique()->values()->all(),
+            'ready_tables' => $readyAndPartialOrders->pluck('table.table_number')->filter()->unique()->values()->all(),
             'active_tables_count' => Cache::remember('active_tables_count', 60, fn (): int => CafeTable::where('is_active', true)->count()),
         ];
 
@@ -143,7 +159,7 @@ class OrderController extends Controller
 
         $counts['menus_total'] = $allMenus->count();
         $counts['menus_active'] = $allMenus->filter(
-            fn (Menu $m): bool => (bool) $m->is_active && (! $m->is_limited_stock || (int) $m->stock_quantity > 0)
+            fn (Menu $m): bool => (bool) $m->is_active && (! $m->is_limited_stock || $m->resolveEffectiveStockQuantity() > 0)
         )->count();
         $counts['menus_discounted'] = $allMenus->where('is_discount_active', true)->count();
 
@@ -203,7 +219,7 @@ class OrderController extends Controller
             abort(403, 'Konfirmasi pembayaran hanya dapat dilakukan melalui operasional Kasir.');
         }
 
-        if ($order->payment_status === 'paid') {
+        if ($order->payment_status === 'paid' && $order->getUnpaidBalance() <= 0.01 && ! $order->hasUnpaidActiveItems()) {
             $existingOrderStatusChanged = false;
             if ($order->order_status === 'pending') {
                 $order->update(['order_status' => 'processing']);
@@ -311,6 +327,11 @@ class OrderController extends Controller
             $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
             $previousStatus = $lockedOrder->order_status;
 
+            $lockedActiveItems = $lockedOrder->items()
+                ->where('status', 'active')
+                ->lockForUpdate()
+                ->get();
+
             if ($lockedOrder->order_status === 'completed') {
                 $blockedError = "Pesanan #{$lockedOrder->order_number} sudah selesai dan tidak dapat diproses ulang.";
 
@@ -323,21 +344,64 @@ class OrderController extends Controller
                 return;
             }
 
-            if ($newStatus === 'cancelled' && $lockedOrder->hasAnySettlement()) {
+            if ($lockedOrder->order_status === $newStatus) {
+                return;
+            }
+
+            $allowedTransitions = [
+                'pending' => ['processing', 'cancelled'],
+                'processing' => ['ready', 'cancelled'],
+                'ready' => ['completed'],
+            ];
+
+            if (! in_array($newStatus, $allowedTransitions[$lockedOrder->order_status] ?? [], true)) {
+                $blockedError = "Transisi status Pesanan #{$lockedOrder->order_number} dari {$lockedOrder->order_status} ke {$newStatus} tidak diizinkan.";
+
+                return;
+            }
+
+            $hasAnySettlement = $lockedOrder->hasAnySettlement()
+                || $lockedActiveItems->contains(fn (OrderItem $item): bool => $item->isPaid());
+
+            if ($newStatus === 'cancelled' && $hasAnySettlement) {
                 $blockedError = "Pesanan #{$lockedOrder->order_number} sudah memiliki pembayaran lunas dan tidak dapat dibatalkan maupun di-refund.";
 
                 return;
             }
 
-            if ($newStatus === 'completed' && $lockedOrder->payment_status !== 'paid') {
-                $blockedError = "Pesanan #{$lockedOrder->order_number} belum lunas. Konfirmasi pembayaran terlebih dahulu sebelum menyelesaikan pesanan.";
+            if (in_array($newStatus, ['processing', 'ready', 'completed'], true)) {
+                $unpaidItems = $lockedActiveItems->filter(fn (OrderItem $item): bool => ! $item->isPaid());
+                $unpaidBalance = $lockedOrder->getUnpaidBalance();
+                $isFullyPaid = $lockedOrder->payment_status === 'paid'
+                    && $unpaidBalance <= 0.01
+                    && $unpaidItems->isEmpty();
 
-                return;
+                if (! $isFullyPaid) {
+                    $unpaidDue = max($unpaidBalance, (float) $unpaidItems->sum('total_price'));
+                    $dueFormatted = number_format($unpaidDue, 0, ',', '.');
+                    $blockedError = $hasAnySettlement
+                        ? "Pesanan #{$lockedOrder->order_number} masih memiliki pesanan susulan belum dibayar (Rp {$dueFormatted}). Konfirmasi pembayaran susulan terlebih dahulu."
+                        : "Pesanan #{$lockedOrder->order_number} belum lunas. Konfirmasi pembayaran terlebih dahulu sebelum memproses atau menyajikan pesanan.";
+
+                    return;
+                }
             }
 
             $lockedOrder->update([
                 'order_status' => $newStatus,
             ]);
+
+            if (in_array($newStatus, ['ready', 'completed'], true)) {
+                $lockedOrder->items()
+                    ->where('status', 'active')
+                    ->where('payment_status', OrderItem::PAYMENT_PAID)
+                    ->where('is_served', false)
+                    ->update([
+                        'is_served' => true,
+                        'served_at' => now('Asia/Jakarta'),
+                        'served_by' => $user->id,
+                    ]);
+            }
 
             if ($newStatus === 'cancelled') {
                 $this->menuStockService->releaseUnsettledOrderStock($lockedOrder);
@@ -386,5 +450,42 @@ class OrderController extends Controller
             'success',
             "Pesanan #{$order->order_number} berhasil diubah ke: {$label}."
         );
+    }
+
+    /**
+     * Menandai atau membatalkan status pengantaran per menu saat fase Sedang Diracik / Siap Disajikan.
+     * Dilindungi IDOR check dan validasi bahwa item wajib sudah dibayar lunas.
+     */
+    public function toggleItemServed(Request $request, Order $order, OrderItem $item): RedirectResponse|JsonResponse
+    {
+        $user = $request->user();
+        if (! $user || (! $user->isCashier() && ! $user->isAdmin())) {
+            abort(403);
+        }
+
+        if ((int) $item->order_id !== (int) $order->id) {
+            abort(404);
+        }
+
+        $validated = $request->validate([
+            'is_served' => ['required', 'boolean'],
+        ]);
+
+        $targetServed = (bool) $validated['is_served'];
+        $result = $this->orderServingService->toggleItemServed($order, $item, $targetServed, $user);
+
+        if ($result['blocked_error'] !== null) {
+            return $this->respondCashierAction($request, 'error', $result['blocked_error'], 422);
+        }
+
+        $itemName = $result['item_name'];
+        $msg = match (true) {
+            $result['auto_promoted'] => "Menu '{$itemName}' selesai! Seluruh menu pada #{$order->order_number} kini siap disajikan.",
+            $result['auto_reverted'] => "Status '{$itemName}' dikembalikan ke antrean racik (#{$order->order_number}).",
+            $targetServed => "Menu '{$itemName}' pada #{$order->order_number} ditandai Siap Diantarkan ke meja.",
+            default => "Status pengantaran menu '{$itemName}' pada #{$order->order_number} dikembalikan ke antrean racik.",
+        };
+
+        return $this->respondCashierAction($request, 'success', $msg);
     }
 }

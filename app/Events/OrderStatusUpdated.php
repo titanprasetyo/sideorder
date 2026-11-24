@@ -40,7 +40,7 @@ class OrderStatusUpdated implements ShouldBroadcastNow
      */
     public function broadcastWith(): array
     {
-        $this->order->loadMissing(['table', 'items.options']);
+        $this->order->loadMissing(['table', 'items.options', 'items.servedByUser:id,name']);
 
         return [
             'order' => $this->order,

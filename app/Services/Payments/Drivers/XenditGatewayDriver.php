@@ -23,6 +23,11 @@ class XenditGatewayDriver implements PaymentGatewayInterface
         return trim((string) config('services.xendit.secret_key', '')) !== '';
     }
 
+    public function isWebhookConfigured(): bool
+    {
+        return trim((string) config('services.xendit.webhook_token', '')) !== '';
+    }
+
     public function getBaseUrl(): string
     {
         return rtrim((string) config('services.xendit.base_url', 'https://api.xendit.co'), '/');
@@ -39,12 +44,12 @@ class XenditGatewayDriver implements PaymentGatewayInterface
         $amount = (int) round((float) $payment->amount);
         $externalId = $payment->external_id ?: $payment->payment_reference;
         $channel = strtoupper((string) ($options['channel'] ?? $payment->channel ?? ($payment->method === 'transfer' ? 'VIRTUAL_ACCOUNT' : 'QRIS')));
-        $duration = max(300, (int) config('services.payment_gateway.invoice_duration_seconds', 900));
+        $duration = max(300, (int) ($options['invoice_duration_seconds'] ?? config('services.payment_gateway.invoice_duration_seconds', 900)));
         $expiresAt = Carbon::now('Asia/Jakarta')->addSeconds($duration);
 
         if (! $this->isConfigured()) {
             if (app()->environment('production')) {
-                throw new PaymentGatewayException('Kredensial Xendit (XENDIT_SECRET_KEY) belum dikonfigurasi pada server produksi.');
+                throw new PaymentGatewayException('Kredensial payment gateway belum dikonfigurasi pada server produksi.');
             }
 
             return [
@@ -77,7 +82,7 @@ class XenditGatewayDriver implements PaymentGatewayInterface
                 'type' => 'DYNAMIC',
                 'currency' => 'IDR',
                 'amount' => $amount,
-                'expires_at' => $expiresAt->utc()->toIso8601String(),
+                'expires_at' => $expiresAt->utc()->format('Y-m-d\TH:i:s.v\Z'),
                 'metadata' => [
                     'order_number' => $order->order_number,
                     'payment_reference' => $payment->payment_reference,
@@ -118,17 +123,17 @@ class XenditGatewayDriver implements PaymentGatewayInterface
                     'body' => $response->body(),
                 ]);
 
-                throw new PaymentGatewayException('Gagal menginisiasi pembayaran QRIS ke Xendit (HTTP '.$response->status().').');
+                throw new PaymentGatewayException('Gagal menginisiasi pembayaran QRIS ke payment gateway (HTTP '.$response->status().').');
             } catch (PaymentGatewayException $e) {
                 throw $e;
             } catch (\Throwable $e) {
                 Log::error('Xendit QRIS Exception: '.$e->getMessage(), ['reference_id' => $externalId]);
 
-                throw new PaymentGatewayException('Koneksi ke gateway Xendit gagal saat membuat QRIS.');
+                throw new PaymentGatewayException('Koneksi ke payment gateway gagal saat membuat QRIS.');
             }
         }
 
-        // Invoice Xendit v2 (untuk Transfer / Virtual Account / Channel Nontunai)
+        // Invoice Xendit v2 (fallback channel nontunai)
         $invoicePayload = [
             'external_id' => $externalId,
             'amount' => $amount,
@@ -178,13 +183,13 @@ class XenditGatewayDriver implements PaymentGatewayInterface
                 'body' => $response->body(),
             ]);
 
-            throw new PaymentGatewayException('Gagal menginisiasi invoice Xendit (HTTP '.$response->status().').');
+            throw new PaymentGatewayException('Gagal menginisiasi invoice pembayaran ke payment gateway (HTTP '.$response->status().').');
         } catch (PaymentGatewayException $e) {
             throw $e;
         } catch (\Throwable $e) {
             Log::error('Xendit Invoice Exception: '.$e->getMessage(), ['external_id' => $externalId]);
 
-            throw new PaymentGatewayException('Koneksi ke gateway Xendit gagal saat membuat invoice.');
+            throw new PaymentGatewayException('Koneksi ke payment gateway gagal saat membuat invoice.');
         }
     }
 
@@ -213,10 +218,24 @@ class XenditGatewayDriver implements PaymentGatewayInterface
                     ->get("{$baseUrl}/qr_codes/{$payment->gateway_transaction_id}/payments");
 
                 if ($response->successful()) {
-                    /** @var array<string, mixed> $body */
+                    /** @var array<int|string, mixed> $body */
                     $body = $response->json() ?? [];
-                    $payments = is_array($body['data'] ?? null) ? $body['data'] : [];
-                    $latest = is_array($payments[0] ?? null) ? $payments[0] : null;
+                    $payments = is_array($body['data'] ?? null)
+                        ? $body['data']
+                        : (array_is_list($body) ? $body : []);
+                    $latest = null;
+                    foreach ($payments as $item) {
+                        if (! is_array($item)) {
+                            continue;
+                        }
+                        if ($latest === null) {
+                            $latest = $item;
+                        }
+                        if ($this->normalizeXenditStatus((string) ($item['status'] ?? '')) === 'paid') {
+                            $latest = $item;
+                            break;
+                        }
+                    }
                     if ($latest !== null) {
                         return [
                             'normalized_status' => $this->normalizeXenditStatus((string) ($latest['status'] ?? 'PENDING')),
@@ -297,41 +316,73 @@ class XenditGatewayDriver implements PaymentGatewayInterface
         $raw = $request->all();
         /** @var array<string, mixed>|null $nestedData */
         $nestedData = is_array($raw['data'] ?? null) ? $raw['data'] : null;
+        /** @var array<string, mixed>|null $nestedQrCode */
+        $nestedQrCode = is_array($raw['qr_code'] ?? null) ? $raw['qr_code'] : null;
         $event = strtolower((string) ($raw['event'] ?? ''));
 
         $externalId = (string) (
             $nestedData['reference_id']
+            ?? $nestedQrCode['reference_id']
+            ?? $nestedQrCode['external_id']
             ?? $raw['external_id']
+            ?? $raw['reference_id']
             ?? $raw['payment_reference']
             ?? ''
         );
 
+        $isLegacyQrPayment = $nestedQrCode !== null && str_starts_with((string) ($raw['id'] ?? ''), 'qrpy_');
+
         $rawStatus = (string) (
             $nestedData['status']
             ?? $raw['status']
-            ?? ($event === 'qr.payment' ? 'COMPLETED' : '')
+            ?? ($event === 'qr.payment' || $isLegacyQrPayment ? 'COMPLETED' : '')
         );
+
+        $firstCaptureAmount = is_array($nestedData['captures'] ?? null)
+            && is_array($nestedData['captures'][0] ?? null)
+            && isset($nestedData['captures'][0]['amount'])
+            ? $nestedData['captures'][0]['amount']
+            : null;
 
         $amount = (float) (
             $nestedData['amount']
+            ?? $firstCaptureAmount
+            ?? $nestedData['request_amount']
             ?? $raw['paid_amount']
             ?? $raw['amount']
+            ?? $nestedQrCode['amount']
             ?? $raw['gross_amount']
             ?? 0
         );
 
         $channel = strtoupper((string) (
             $nestedData['channel_code']
+            ?? $nestedQrCode['channel_code']
             ?? $raw['payment_channel']
+            ?? $raw['channel_code']
             ?? $raw['payment_method']
             ?? 'QRIS'
         ));
 
         $method = $this->mapChannelToMethod($channel);
-        $transactionId = (string) ($nestedData['id'] ?? $raw['id'] ?? $externalId);
-        $paidAt = isset($nestedData['updated']) ? (string) $nestedData['updated'] : (isset($raw['paid_at']) ? (string) $raw['paid_at'] : null);
+        $transactionId = (string) ($nestedData['id'] ?? $nestedData['payment_id'] ?? $raw['id'] ?? $externalId);
+        $paidAt = isset($nestedData['updated'])
+            ? (string) $nestedData['updated']
+            : (isset($raw['paid_at'])
+                ? (string) $raw['paid_at']
+                : ($nestedQrCode !== null && isset($raw['created']) ? (string) $raw['created'] : null));
 
-        $orderNumber = (string) ($raw['order_number'] ?? ($nestedData['metadata']['order_number'] ?? $raw['metadata']['order_number'] ?? ''));
+        $nestedMetadata = is_array($nestedData['metadata'] ?? null) ? $nestedData['metadata'] : null;
+        $qrMetadata = is_array($nestedQrCode['metadata'] ?? null) ? $nestedQrCode['metadata'] : null;
+        $rootMetadata = is_array($raw['metadata'] ?? null) ? $raw['metadata'] : null;
+
+        $orderNumber = (string) (
+            $raw['order_number']
+            ?? $nestedMetadata['order_number']
+            ?? $qrMetadata['order_number']
+            ?? $rootMetadata['order_number']
+            ?? ''
+        );
 
         return [
             'external_id' => $externalId,

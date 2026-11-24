@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Models\CafeSetting;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -50,9 +51,38 @@ class HandleInertiaRequests extends Middleware
                 'info' => fn () => $request->session()->get('info'),
                 'toast' => fn () => $request->session()->get('toast'),
             ],
+            'cafeSettings' => function (): array {
+                try {
+                    $setting = CafeSetting::current();
+
+                    return [
+                        'cafe_name' => $setting->cafe_name,
+                        'address' => $setting->address,
+                        'phone' => $setting->phone,
+                        'receipt_footer' => $setting->receipt_footer,
+                        'is_ordering_enabled' => (bool) $setting->is_ordering_enabled,
+                        'closed_message' => $setting->closed_message,
+                        'allow_cash_payment' => (bool) $setting->allow_cash_payment,
+                        'allow_xendit_payment' => (bool) $setting->allow_xendit_payment,
+                        'payment_expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
+                    ];
+                } catch (\Throwable) {
+                    return [
+                        'cafe_name' => 'Café SIDE LINE',
+                        'address' => null,
+                        'phone' => null,
+                        'receipt_footer' => 'Terima kasih atas kunjungan Anda! Nikmati momen hangat di SIDE LINE.',
+                        'is_ordering_enabled' => true,
+                        'closed_message' => 'Pemesanan mandiri sedang ditutup sementara.',
+                        'allow_cash_payment' => true,
+                        'allow_xendit_payment' => true,
+                        'payment_expiry_minutes' => 15,
+                    ];
+                }
+            },
             'paymentGateway' => [
                 'driver' => $driver,
-                'label' => $driver === 'midtrans' ? 'Midtrans Snap' : 'Xendit Payment Gateway',
+                'label' => $driver === 'midtrans' ? 'Midtrans Snap' : 'Pembayaran Digital',
                 'isConfigured' => $xenditConfigured,
                 'mode' => $xenditConfigured && config('services.xendit.is_production', false) ? 'production' : 'sandbox',
             ],

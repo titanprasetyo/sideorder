@@ -83,7 +83,7 @@ function Avatar({ user }: { user: StaffUser }) {
     return (
         <div
             className={cn(
-                'flex size-10 shrink-0 items-center justify-center rounded-full text-xs font-black uppercase shadow-xs ring-2 ring-white',
+                'flex size-10 shrink-0 items-center justify-center rounded-lg text-xs font-black uppercase shadow-xs ring-2 ring-white',
                 user.role === 'admin'
                     ? 'bg-[#C52828] text-white'
                     : 'border border-[#DFCFA9] bg-[#F5EEDC] text-[#5B4126]',
@@ -229,13 +229,13 @@ export default function StaffUsersIndex({ users, currentUserId }: Props) {
                 <PageHeader
                     icon={Users}
                     title="Kelola Kasir & Staf"
-                    description="Daftarkan akun kasir baru dan kelola hak akses operasional SIDE LINE. Sistem menggunakan kebijakan 1 akun Administrator tunggal."
+                    description="Daftarkan akun kasir dan kelola hak akses operasional SIDE LINE."
                     actions={
                         <Button
                             onClick={openCreateModal}
-                            className="h-10 gap-2 rounded-xl bg-[#C52828] px-4 font-bold text-white shadow-sm hover:bg-[#A81E1E]"
+                            className="h-9 shrink-0 gap-1.5 rounded-xl bg-[#C52828] px-3.5 text-xs font-bold whitespace-nowrap text-white shadow-sm hover:bg-[#A81E1E]"
                         >
-                            <UserPlus className="size-4" />
+                            <UserPlus className="size-3.5" />
                             Tambah Kasir
                         </Button>
                     }
@@ -575,7 +575,7 @@ export default function StaffUsersIndex({ users, currentUserId }: Props) {
                                                 2,
                                             )}
                                         </div>
-                                        <span className="rounded-full border border-[#E8DFC8] bg-white px-2.5 py-0.5 text-[10px] font-extrabold tracking-wider text-[#18181B] uppercase shadow-2xs">
+                                        <span className="rounded-md border border-[#E8DFC8] bg-white px-2.5 py-0.5 text-[10px] font-extrabold tracking-wider text-[#18181B] uppercase shadow-2xs">
                                             {form.data.role === 'admin'
                                                 ? 'Administrator'
                                                 : 'Kasir Operasional'}

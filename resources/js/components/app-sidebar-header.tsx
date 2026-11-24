@@ -10,8 +10,9 @@ export function AppSidebarHeader({
     breadcrumbs?: BreadcrumbItemType[];
 }) {
     const { auth } = usePage<{ auth: { user: User } }>().props;
-    const userName = auth?.user?.name ?? 'Arya Pratama';
+    const userName = auth?.user?.name ?? 'Administrator';
     const userInitials = userName.slice(0, 2).toUpperCase();
+    const isAdmin = auth?.user?.role === 'admin';
 
     return (
         <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center justify-between border-b border-[#E8DFC8] bg-[#FAF6EC]/95 px-4 font-sans backdrop-blur-md transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 sm:px-6">
@@ -53,7 +54,7 @@ export function AppSidebarHeader({
                     href="/settings/profile"
                     className="flex shrink-0 items-center gap-2.5 rounded-xl border border-[#E8DFC8] bg-[#FFFDF9] py-1 pr-2.5 pl-1.5 shadow-2xs transition-all hover:border-[#DFCFA9] hover:bg-[#FAF5E8] sm:pr-3.5 sm:pl-2"
                 >
-                    <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#C52828] text-xs font-extrabold text-white shadow-2xs">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-[#C52828] text-xs font-extrabold text-white shadow-2xs">
                         {userInitials}
                     </div>
                     <div className="hidden text-left lg:block">
@@ -61,8 +62,8 @@ export function AppSidebarHeader({
                             {userName}
                         </div>
                         <div className="text-[10px] font-semibold text-[#78716C]">
-                            {auth?.user?.role === 'admin'
-                                ? 'Head Barista / SPV'
+                            {isAdmin
+                                ? 'Administrator Sistem'
                                 : 'Kasir SIDE LINE'}
                         </div>
                     </div>

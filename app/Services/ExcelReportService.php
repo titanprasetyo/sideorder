@@ -10,7 +10,7 @@ class ExcelReportService
     private const TIMEZONE = 'Asia/Jakarta';
 
     /**
-     * Bangun file Excel (.xlsx) dengan 7 sheet lengkap dan simpan ke file temporary.
+     * Bangun file Excel (.xlsx) dengan 6 sheet lengkap dan simpan ke file temporary.
      * Mengembalikan absolute path file temporary .xlsx yang siap diunduh.
      *
      * @param  array<string, mixed>  $resolved
@@ -45,7 +45,7 @@ class ExcelReportService
         $endInclusiveCarbon = $resolved['end_inclusive'];
         $periodLabel = $resolved['label'].' ('.$startCarbon->format('d/m/Y').' - '.$endInclusiveCarbon->format('d/m/Y').' WIB)';
         $xenditInfo = $summary['xendit_integration'] ?? [
-            'label' => 'Xendit Payment Gateway',
+            'label' => 'Pembayaran Digital',
             'mode' => 'Sandbox Ready Slot',
             'transactions_count' => 0,
             'net_revenue' => 0.0,
@@ -58,7 +58,7 @@ class ExcelReportService
             ['Periode Laporan', $periodLabel],
             ['Waktu Pembuatan', $nowStr],
             ['Dicetak Oleh', $printedBy ?? 'Administrator'],
-            ['Payment Gateway', ($xenditInfo['label'] ?? 'Xendit Payment Gateway').' ('.($xenditInfo['mode'] ?? 'Sandbox Ready Slot').')'],
+            ['Payment Gateway', ($xenditInfo['label'] ?? 'Pembayaran Digital').' ('.($xenditInfo['mode'] ?? 'Sandbox Ready Slot').')'],
             ['Zona Waktu', 'Asia/Jakarta (WIB)'],
             [],
             ['METRIK KEUANGAN', 'NILAI AKTUAL (RP)', 'FORMAT RUPIAH', 'PERIODE PEMBANDING', 'PERTUMBUHAN (%)'],
@@ -77,7 +77,7 @@ class ExcelReportService
                 '-',
             ],
             [
-                'Pendapatan Via Xendit Payment Gateway',
+                'Pendapatan Via Pembayaran Digital',
                 (float) ($xenditInfo['net_revenue'] ?? 0),
                 $this->formatRupiah((float) ($xenditInfo['net_revenue'] ?? 0)),
                 ($xenditInfo['transactions_count'] ?? 0).' transaksi lunas',
@@ -94,34 +94,6 @@ class ExcelReportService
                 'Total Diskon Faktur',
                 0,
                 'Rp 0 (Diskon per item sudah termasuk subtotal)',
-                '-',
-                '-',
-            ],
-            [
-                'Total HPP / Modal Produk',
-                0,
-                'Belum Tercatat di Database',
-                '-',
-                '-',
-            ],
-            [
-                'Laba Kotor (Gross Profit)',
-                $summary['period']['net_revenue'],
-                $this->formatRupiah((float) $summary['period']['net_revenue']).' (Tanpa HPP)',
-                '-',
-                '-',
-            ],
-            [
-                'Beban Operasional (Opex)',
-                0,
-                'Belum Tercatat di Database',
-                '-',
-                '-',
-            ],
-            [
-                'Laba Bersih (Net Profit)',
-                0,
-                'Belum Tersedia (Perlu HPP & Opex)',
                 '-',
                 '-',
             ],
@@ -180,7 +152,7 @@ class ExcelReportService
 
         // 2. Data Sheet 2: Daily Breakdown (Pemetaan Harian Paling Detail)
         $sheet2Data = [
-            ['SHEET 2: PEMETAAN KEUANGAN HARIAN (DAILY FINANCIAL BREAKDOWN)'],
+            ['SHEET 2: PEMETAAN PENDAPATAN HARIAN (DAILY REVENUE BREAKDOWN)'],
             ['Periode Laporan', $periodLabel],
             ['Waktu Pembuatan', $nowStr],
             [],
@@ -188,16 +160,13 @@ class ExcelReportService
                 'Tanggal',
                 'Hari',
                 'Total Transaksi',
-                'Pesanan Selesai',
+                'Pesanan Lunas',
                 'Omzet Bruto (Rp)',
                 'Diskon (Rp)',
                 'Pajak & Layanan (Rp)',
                 'Penyesuaian (Rp)',
                 'Omzet Bersih (Rp)',
-                'HPP / Modal (Rp)',
-                'Laba Kotor (Rp)',
-                'Pengeluaran Opex (Rp)',
-                'Laba Bersih (Rp)',
+                'Belum Dibayar (Rp)',
                 'AOV (Rp)',
                 'Item Terjual (Porsi)',
                 'Status Hari',
@@ -218,16 +187,13 @@ class ExcelReportService
                 $r['date'],
                 $r['day_name'] ?? '-',
                 $r['total_orders'],
-                $r['completed_orders_count'] ?? $r['paid_orders_count'],
+                $r['paid_orders_count'],
                 $r['gross_revenue'],
                 0,
                 0,
                 $r['refund_amount'],
                 $r['net_revenue'],
-                'Belum Ada',
-                $r['net_revenue'],
-                'Belum Ada',
-                'Belum Ada',
+                $r['unpaid_amount'],
                 $r['average_order_value'],
                 $r['items_sold'] ?? 0,
                 $statusHari,
@@ -247,18 +213,15 @@ class ExcelReportService
             0,
             $dailyTotals['refund_amount'],
             $dailyTotals['net_revenue'],
-            'Belum Ada',
-            $dailyTotals['net_revenue'],
-            'Belum Ada',
-            'Belum Ada',
+            $dailyTotals['unpaid_amount'],
             $dailyTotals['average_order_value'],
             $summary['period']['items_sold'] ?? 0,
             '-',
         ];
 
-        // 3. Data Sheet 3: Sales Transactions (Ledger Transaksi + Xendit Reference)
+        // 3. Data Sheet 3: Sales Transactions (Ledger Transaksi + Referensi Pembayaran)
         $sheet3Data = [
-            ['SHEET 3: BUKU BESAR DETAIL TRANSAKSI & GATEWAY XENDIT (SALES TRANSACTION LEDGER)'],
+            ['SHEET 3: BUKU BESAR DETAIL TRANSAKSI & PEMBAYARAN (SALES TRANSACTION LEDGER)'],
             ['Periode Laporan', $periodLabel],
             ['Waktu Pembuatan', $nowStr],
             [],
@@ -374,12 +337,12 @@ class ExcelReportService
             ];
         }
 
-        // 5. Data Sheet 5: Payment Gateway & Methods Summary (Xendit Attribution)
+        // 5. Data Sheet 5: Payment Gateway & Methods Summary
         $sheet5Data = [
-            ['SHEET 5: REKAPITULASI PAYMENT GATEWAY XENDIT & METODE PEMBAYARAN'],
+            ['SHEET 5: REKAPITULASI PAYMENT GATEWAY & METODE PEMBAYARAN'],
             ['Periode Laporan', $periodLabel],
             ['Waktu Pembuatan', $nowStr],
-            ['Status Integrasi Gateway', ($xenditInfo['label'] ?? 'Xendit Payment Gateway').' ('.($xenditInfo['mode'] ?? 'Sandbox Ready Slot').')'],
+            ['Status Integrasi Gateway', ($xenditInfo['label'] ?? 'Pembayaran Digital').' ('.($xenditInfo['mode'] ?? 'Sandbox Ready Slot').')'],
             [],
             ['=== RINGKASAN PER PAYMENT GATEWAY ==='],
             ['Kode Gateway', 'Nama Payment Gateway', 'Transaksi Lunas', 'Pangsa Transaksi (%)', 'Total Omzet Lunas (Rp)', 'Pangsa Omzet (%)', 'Menunggu Pembayaran', 'Nominal Menunggu (Rp)', 'Pesanan Batal', 'Nominal Batal (Rp)'],
@@ -452,59 +415,14 @@ class ExcelReportService
             }
         }
 
-        // 7. Data Sheet 7: Cost & Profit (Transparansi HPP & Catatan Audit)
-        $sheet7Data = [
-            ['SHEET 7: TRANSPARANSI HARGA POKOK PENJUALAN (HPP) & LABA BERSIH'],
-            ['Periode Laporan', $periodLabel],
-            ['Waktu Pembuatan', $nowStr],
-            [],
-            ['KOMPONEN BIAYA & LABA', 'STATUS SISTEM', 'NILAI SAAT INI', 'CATATAN AUDIT'],
-            [
-                'Omzet Penjualan Bersih (Net Sales)',
-                'Tersedia & Valid',
-                $this->formatRupiah((float) $summary['period']['net_revenue']),
-                'Dihitung dari total_amount pesanan berstatus PAID (termasuk transaksi Xendit & Tunai).',
-            ],
-            [
-                'Harga Pokok Penjualan (HPP)',
-                'Belum Tercatat di Database',
-                'Rp 0 / Belum Ada',
-                'Sistem SIDEORDER saat ini belum memiliki tabel/kolom resep bahan baku dan modal produk (cost_price).',
-            ],
-            [
-                'Laba Kotor (Gross Profit)',
-                'Omzet Bersih (Sementara)',
-                $this->formatRupiah((float) $summary['period']['net_revenue']),
-                'Karena data HPP belum ada, laba kotor sementara setara dengan omzet penjualan bersih.',
-            ],
-            [
-                'Beban Operasional (Opex)',
-                'Belum Tercatat di Database',
-                'Rp 0 / Belum Ada',
-                'Belum tersedia modul pencatatan beban listrik, sewa, gaji, dan biaya operasional kafe.',
-            ],
-            [
-                'Laba Bersih (Net Profit)',
-                'Belum Dapat Dihitung',
-                'Belum Ada',
-                'Untuk menjaga integritas data akuntansi, angka laba bersih tidak ditampilkan agar tidak menyesatkan (menghindari angka fiktif).',
-            ],
-            [],
-            ['REKOMENDASI PENGEMBANGAN SISTEM AKUNTANSI:'],
-            ['1. Tambahkan kolom cost_price pada tabel menus untuk menghitung modal dasar per porsi.'],
-            ['2. Buat tabel expenses untuk mencatat pengeluaran operasional harian/bulanan kafe.'],
-            ['3. Dengan dua modul tersebut, Laba Bersih riil dapat dikalkulasi secara otomatis 100% presisi.'],
-        ];
-
         // Tulis semua sheet ke OpenXML ZIP
         $sheets = [
             1 => ['name' => 'Summary', 'data' => $sheet1Data],
             2 => ['name' => 'Daily Breakdown', 'data' => $sheet2Data],
             3 => ['name' => 'Sales Transactions', 'data' => $sheet3Data],
             4 => ['name' => 'Product Performance', 'data' => $sheet4Data],
-            5 => ['name' => 'Xendit & Payments', 'data' => $sheet5Data],
+            5 => ['name' => 'Gateway & Payments', 'data' => $sheet5Data],
             6 => ['name' => 'Item Reject & Cancel', 'data' => $sheet6Data],
-            7 => ['name' => 'Cost & Profit', 'data' => $sheet7Data],
         ];
 
         $zip->addFromString('[Content_Types].xml', $this->buildContentTypesXml(count($sheets)));

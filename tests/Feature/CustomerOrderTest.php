@@ -7,6 +7,7 @@ use App\Models\Menu;
 use App\Models\MenuOptionGroup;
 use App\Models\MenuOptionItem;
 use App\Models\Order;
+use App\Models\Payment;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
@@ -444,6 +445,7 @@ test('payment, cashier KDS, customer status, admin orders, dashboard, and financ
     $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Pelanggan E2E',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $juiceMenu->id,
@@ -509,14 +511,25 @@ test('payment, cashier KDS, customer status, admin orders, dashboard, and financ
         ->and($tx['items_summary'])->toContain('1x Kopi Susu Gula Aren')
         ->and((float) $tx['net_revenue'])->toBe(75000.0);
 
-    // 5. Dashboard membaca ringkasan item lengkap dengan ukuran
+    // 5. Ringkasan Dashboard menyajikan ringkasan eksekutif, sedangkan sinkronisasi transaksi (/dashboard/sync) membaca item lengkap dengan ukuran
     $this->actingAs($admin)
         ->get(route('dashboard'))
         ->assertOk()
         ->assertInertia(fn ($page) => $page
             ->component('dashboard')
-            ->where('recent_orders.0.items_summary', '1x Juice Jeruk (Large), 1x Juice Jeruk (XL), 1x Kopi Susu Gula Aren')
+            ->has('summary')
+            ->has('top_menus')
+            ->has('system_snapshot')
         );
+
+    $dashboardSync = $this->actingAs($admin)
+        ->getJson(route('dashboard.sync', ['preset' => 'today']))
+        ->assertOk()
+        ->json();
+
+    $dashTx = collect($dashboardSync['transactions']['data'])->firstWhere('order_number', $order->order_number);
+    expect($dashTx)->not->toBeNull()
+        ->and($dashTx['items_summary'])->toBe('1x Juice Jeruk (Large), 1x Juice Jeruk (XL), 1x Kopi Susu Gula Aren');
 });
 
 test('adding more menu items from the same table while order is pending unpaid merges into the same active order and recalculates total', function () {
@@ -605,10 +618,11 @@ test('adding more menu items while order is processing and already paid preserve
         'is_active' => true,
     ]);
 
-    // 1. Customer membuat pesanan awal: 2x Kopi Susu Gula Aren Large = Rp 50.000
+    // 1. Customer membuat pesanan awal tunai kasir: 2x Kopi Susu Gula Aren Large = Rp 50.000
     $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Nadia Paid',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $this->menu->id,
@@ -642,6 +656,7 @@ test('adding more menu items while order is processing and already paid preserve
         'qr_token' => $this->table->qr_token,
         'order_number' => $order->order_number,
         'customer_name' => 'Nadia Paid',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $pastryMenu->id,
@@ -980,4 +995,576 @@ test('tambah menu on order with failed payment status resets payment status to u
     $response->assertRedirect();
     $order->refresh();
     expect($order->payment_status)->toBe('unpaid');
+});
+
+test('customer checkout allows multiple cart items sharing the same option ids and preserves exact prices and variants', function () {
+    Event::fake([OrderCreated::class]);
+
+    $espresso = Menu::create([
+        'category_id' => $this->category->id,
+        'name' => 'Espreso',
+        'slug' => 'espreso-test',
+        'base_price' => 19000,
+        'is_active' => true,
+    ]);
+    $espressoGroup = MenuOptionGroup::create([
+        'menu_id' => $espresso->id,
+        'name' => 'Ukuran',
+        'selection_type' => 'single',
+        'is_required' => true,
+        'sort_order' => 0,
+    ]);
+    $espressoHot = MenuOptionItem::create([
+        'option_group_id' => $espressoGroup->id,
+        'name' => 'Hot',
+        'additional_price' => 0,
+        'is_default' => true,
+        'is_active' => true,
+        'sort_order' => 0,
+    ]);
+
+    $americano = Menu::create([
+        'category_id' => $this->category->id,
+        'name' => 'Americano',
+        'slug' => 'americano-test',
+        'base_price' => 20000,
+        'is_active' => true,
+    ]);
+    $groupHot = MenuOptionGroup::create([
+        'menu_id' => $americano->id,
+        'name' => 'HOT',
+        'selection_type' => 'single',
+        'is_required' => true,
+        'sort_order' => 0,
+    ]);
+    $optNormal = MenuOptionItem::create([
+        'option_group_id' => $groupHot->id,
+        'name' => 'NORMAL',
+        'additional_price' => 0,
+        'is_default' => true,
+        'is_active' => true,
+        'sort_order' => 0,
+    ]);
+
+    $groupIce = MenuOptionGroup::create([
+        'menu_id' => $americano->id,
+        'name' => 'ICE',
+        'selection_type' => 'single',
+        'is_required' => false,
+        'sort_order' => 1,
+    ]);
+    $optMd = MenuOptionItem::create([
+        'option_group_id' => $groupIce->id,
+        'name' => 'MD',
+        'additional_price' => 3000,
+        'is_default' => false,
+        'is_active' => true,
+        'sort_order' => 0,
+    ]);
+    $optLg = MenuOptionItem::create([
+        'option_group_id' => $groupIce->id,
+        'name' => 'LG',
+        'additional_price' => 1500,
+        'is_default' => false,
+        'is_active' => true,
+        'sort_order' => 1,
+    ]);
+
+    $katsu = Menu::create([
+        'category_id' => $this->category->id,
+        'name' => 'Chicken katsu',
+        'slug' => 'chicken-katsu-test',
+        'base_price' => 33000,
+        'is_active' => true,
+    ]);
+
+    // Kedua item Americano sama-sama memakai $optNormal (HOT: NORMAL) namun ukuran ICE berbeda,
+    // ditambah item duplikat kombinasi sama dengan catatan berbeda.
+    $response = $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Titan Uji',
+        'payment_method' => 'qris',
+        'items' => [
+            [
+                'menu_id' => $espresso->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$espressoHot->id],
+            ],
+            [
+                'menu_id' => $americano->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$optNormal->id, $optMd->id],
+            ],
+            [
+                'menu_id' => $americano->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$optNormal->id, $optLg->id],
+                'customer_notes' => 'Less ice',
+            ],
+            [
+                'menu_id' => $americano->id,
+                'quantity' => 2,
+                'selected_option_ids' => [$optNormal->id, $optLg->id],
+                'customer_notes' => 'Normal ice',
+            ],
+            [
+                'menu_id' => $katsu->id,
+                'quantity' => 1,
+                'selected_option_ids' => [],
+            ],
+        ],
+    ]);
+
+    $order = Order::latest('id')->first();
+    expect($order)->not->toBeNull();
+    $response->assertRedirect(route('order.status', ['order_number' => $order->order_number]));
+
+    // 19.000 + 23.000 + 21.500 + (2 x 21.500 = 43.000) + 33.000 = 139.500
+    expect((float) $order->subtotal)->toBe(139500.0)
+        ->and((float) $order->total_amount)->toBe(139500.0)
+        ->and($order->items)->toHaveCount(5);
+
+    $item1 = $order->items[1]->load('options');
+    $item2 = $order->items[2]->load('options');
+    expect((float) $item1->unit_price)->toBe(23000.0)
+        ->and($item1->options->pluck('option_name')->all())->toBe(['NORMAL', 'MD'])
+        ->and((float) $item2->unit_price)->toBe(21500.0)
+        ->and($item2->options->pluck('option_name')->all())->toBe(['NORMAL', 'LG']);
+});
+
+test('customer checkout rejects duplicate option ids within a single cart item', function () {
+    $americano = Menu::create([
+        'category_id' => $this->category->id,
+        'name' => 'Americano Duplicate Guard',
+        'slug' => 'americano-dup-guard',
+        'base_price' => 20000,
+        'is_active' => true,
+    ]);
+    $group = MenuOptionGroup::create([
+        'menu_id' => $americano->id,
+        'name' => 'HOT',
+        'selection_type' => 'single',
+        'is_required' => true,
+        'sort_order' => 0,
+    ]);
+    $optNormal = MenuOptionItem::create([
+        'option_group_id' => $group->id,
+        'name' => 'NORMAL',
+        'additional_price' => 0,
+        'is_default' => true,
+        'is_active' => true,
+        'sort_order' => 0,
+    ]);
+
+    $response = $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Tester Duplikat',
+        'items' => [
+            [
+                'menu_id' => $americano->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$optNormal->id, $optNormal->id],
+            ],
+        ],
+    ]);
+
+    $response->assertSessionHasErrors(['items.0.selected_option_ids']);
+    expect(Order::count())->toBe(0);
+});
+
+test('appending items with shared option ids onto an active order succeeds without duplicate error', function () {
+    $americano = Menu::create([
+        'category_id' => $this->category->id,
+        'name' => 'Americano Append Test',
+        'slug' => 'americano-append-test',
+        'base_price' => 20000,
+        'is_active' => true,
+    ]);
+    $groupHot = MenuOptionGroup::create([
+        'menu_id' => $americano->id,
+        'name' => 'HOT',
+        'selection_type' => 'single',
+        'is_required' => true,
+        'sort_order' => 0,
+    ]);
+    $optNormal = MenuOptionItem::create([
+        'option_group_id' => $groupHot->id,
+        'name' => 'NORMAL',
+        'additional_price' => 0,
+        'is_default' => true,
+        'is_active' => true,
+        'sort_order' => 0,
+    ]);
+    $groupIce = MenuOptionGroup::create([
+        'menu_id' => $americano->id,
+        'name' => 'ICE',
+        'selection_type' => 'single',
+        'is_required' => false,
+        'sort_order' => 1,
+    ]);
+    $optMd = MenuOptionItem::create([
+        'option_group_id' => $groupIce->id,
+        'name' => 'MD',
+        'additional_price' => 3000,
+        'is_default' => false,
+        'is_active' => true,
+        'sort_order' => 0,
+    ]);
+    $optLg = MenuOptionItem::create([
+        'option_group_id' => $groupIce->id,
+        'name' => 'LG',
+        'additional_price' => 1500,
+        'is_default' => false,
+        'is_active' => true,
+        'sort_order' => 1,
+    ]);
+
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Rafi Append',
+        'items' => [
+            [
+                'menu_id' => $americano->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$optNormal->id, $optMd->id],
+            ],
+        ],
+    ])->assertRedirect();
+
+    $order = Order::firstOrFail();
+
+    $appendResponse = $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'order_number' => $order->order_number,
+        'customer_name' => 'Rafi Append',
+        'items' => [
+            [
+                'menu_id' => $americano->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$optNormal->id, $optMd->id],
+            ],
+            [
+                'menu_id' => $americano->id,
+                'quantity' => 1,
+                'selected_option_ids' => [$optNormal->id, $optLg->id],
+            ],
+        ],
+    ]);
+
+    $appendResponse->assertRedirect(route('order.status', ['order_number' => $order->order_number]));
+    $order->refresh();
+
+    // 23.000 + 23.000 + 21.500 = 67.500
+    expect($order->items)->toHaveCount(3)
+        ->and((float) $order->subtotal)->toBe(67500.0)
+        ->and((float) $order->total_amount)->toBe(67500.0);
+});
+
+test('follow-up checkout assigns sequential batch numbers across settlement waves and preserves paid initial items', function () {
+    $cashier = User::factory()->create(['role' => 'cashier']);
+
+    $pastryMenu = Menu::create([
+        'category_id' => $this->category->id,
+        'name' => 'Orange Juice Susulan',
+        'slug' => 'orange-juice-susulan',
+        'base_price' => 18700,
+        'is_active' => true,
+    ]);
+
+    // Batch 1: Pesanan awal QRIS & dilunasi langsung via pembayaran QRIS (otomatis ketrima ke processing)
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Titan Uji',
+        'payment_method' => 'qris',
+        'items' => [
+            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
+        ],
+    ])->assertRedirect();
+
+    $order = Order::latest('id')->firstOrFail();
+
+    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+        'status' => 'paid',
+    ])->assertOk();
+
+    // Gelombang susulan pertama (belum bayar -> batch_number = 2)
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'order_number' => $order->order_number,
+        'customer_name' => 'Titan Uji',
+        'items' => [
+            ['menu_id' => $pastryMenu->id, 'quantity' => 1, 'selected_option_ids' => []],
+        ],
+    ])->assertRedirect();
+
+    // Tambah susulan lagi saat batch 2 masih unpaid -> bergabung di batch_number = 2
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'order_number' => $order->order_number,
+        'customer_name' => 'Titan Uji',
+        'items' => [
+            ['menu_id' => $pastryMenu->id, 'quantity' => 1, 'selected_option_ids' => []],
+        ],
+    ])->assertRedirect();
+
+    $order->refresh();
+    $batch1Items = $order->items()->where('batch_number', 1)->get();
+    $batch2Items = $order->items()->where('batch_number', 2)->get();
+
+    expect($batch1Items)->toHaveCount(1)
+        ->and($batch1Items[0]->payment_status)->toBe('paid')
+        ->and($batch1Items[0]->is_followup)->toBeFalse()
+        ->and($batch2Items)->toHaveCount(2)
+        ->and($batch2Items[0]->payment_status)->toBe('unpaid')
+        ->and($batch2Items[0]->is_followup)->toBeTrue()
+        ->and($batch2Items[1]->payment_status)->toBe('unpaid');
+
+    // Lunasi batch 2 melalui simulasi QRIS
+    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+        'status' => 'paid',
+    ])->assertOk();
+
+    expect($order->fresh()->payment_status)->toBe('paid')
+        ->and($order->items()->where('batch_number', 2)->where('payment_status', 'paid')->count())->toBe(2);
+
+    // Tambah susulan lagi setelah batch 2 lunas -> masuk batch_number = 3
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'order_number' => $order->order_number,
+        'customer_name' => 'Titan Uji',
+        'items' => [
+            ['menu_id' => $pastryMenu->id, 'quantity' => 1, 'selected_option_ids' => []],
+        ],
+    ])->assertRedirect();
+
+    $batch3Items = $order->items()->where('batch_number', 3)->get();
+    expect($batch3Items)->toHaveCount(1)
+        ->and($batch3Items[0]->payment_status)->toBe('unpaid')
+        ->and($batch3Items[0]->is_followup)->toBeTrue()
+        ->and($order->fresh()->payment_status)->toBe('unpaid');
+});
+
+test('public guest cannot simulate payment on cash order unless switched to qris', function () {
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Tamu Tunai',
+        'payment_method' => 'cash',
+        'items' => [
+            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
+        ],
+    ])->assertRedirect();
+
+    $order = Order::latest('id')->firstOrFail();
+
+    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+        'status' => 'paid',
+    ])->assertStatus(422)
+        ->assertJsonPath('success', false);
+
+    expect($order->fresh()->payment_status)->toBe('unpaid')
+        ->and($order->fresh()->order_status)->toBe('pending');
+
+    // Setelah dialihkan ke QRIS, simulasi pembayaran berhasil & item ikut lunas
+    $this->postJson(route('order.switch-payment-method', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+    ])->assertOk();
+
+    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+        'status' => 'paid',
+    ])->assertOk();
+
+    expect($order->fresh()->payment_status)->toBe('paid')
+        ->and($order->fresh()->order_status)->toBe('processing')
+        ->and($order->items()->where('payment_status', 'paid')->count())->toBe(1);
+});
+
+test('expired qris does not auto-reset when reopening status or initiate without force_new, and only resets on explicit force_new', function () {
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Penunda 30 Menit',
+        'payment_method' => 'qris',
+        'items' => [
+            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
+        ],
+    ])->assertRedirect();
+
+    $order = Order::latest('id')->firstOrFail();
+
+    $firstInit = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk()
+        ->assertJsonPath('is_expired', false);
+
+    $firstRef = $firstInit->json('payment.payment_reference');
+    $firstExpiredAt = $firstInit->json('payment.expired_at');
+
+    // Setelah 5 menit (masih dalam masa 15 menit): reuse QRIS yang sama tanpa memperpanjang expired_at
+    $this->travel(5)->minutes();
+
+    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk()
+        ->assertJsonPath('reused', true)
+        ->assertJsonPath('is_expired', false)
+        ->assertJsonPath('payment.payment_reference', $firstRef)
+        ->assertJsonPath('payment.expired_at', $firstExpiredAt);
+
+    expect(Payment::where('order_id', $order->id)->count())->toBe(1);
+
+    // Setelah total 30 menit berlalu: membuka halaman status langsung mengkedaluwarsakan QRIS dan tidak mereset QRIS
+    $this->travel(25)->minutes();
+
+    $this->get(route('order.status', ['order_number' => $order->order_number]))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('customer/status')
+            ->where('order.payment_status', 'failed')
+            ->where('order.latest_payment.payment_reference', $firstRef)
+            ->where('order.latest_payment.status', 'expired'));
+
+    // Memanggil initiate tanpa force_new atau membuka /order/payment tidak boleh membuat QRIS baru
+    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk()
+        ->assertJsonPath('is_expired', true)
+        ->assertJsonPath('reused', false)
+        ->assertJsonPath('payment.payment_reference', $firstRef)
+        ->assertJsonPath('payment.status', 'expired');
+
+    $this->get(route('order.payment', ['order_number' => $order->order_number]))
+        ->assertOk();
+
+    expect(Payment::where('order_id', $order->id)->count())->toBe(1)
+        ->and($order->fresh()->payment_status)->toBe('failed');
+
+    // Hanya ketika user klik tombol Reset / Buat QRIS Baru (force_new = true), barulah dibuat kode QRIS baru
+    $resetInit = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+        'force_new' => true,
+    ])->assertOk()
+        ->assertJsonPath('is_expired', false)
+        ->assertJsonPath('reused', false);
+
+    $secondRef = $resetInit->json('payment.payment_reference');
+    expect($secondRef)->not->toBe($firstRef)
+        ->and(Payment::where('order_id', $order->id)->count())->toBe(2)
+        ->and($order->fresh()->payment_status)->toBe('unpaid');
+
+    $this->travelBack();
+});
+
+test('direct initiate without prior status reload expires overdue pending qris instead of auto-resetting', function () {
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Langsung Initiate',
+        'payment_method' => 'qris',
+        'items' => [
+            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
+        ],
+    ])->assertRedirect();
+
+    $order = Order::latest('id')->firstOrFail();
+
+    $firstInit = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk();
+    $firstRef = $firstInit->json('payment.payment_reference');
+
+    $this->travel(30)->minutes();
+
+    // Tanpa membuka /order/status lebih dulu, panggilan /initiate biasa tetap mengembalikan expired (tidak auto-reset)
+    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk()
+        ->assertJsonPath('is_expired', true)
+        ->assertJsonPath('payment.payment_reference', $firstRef)
+        ->assertJsonPath('payment.status', 'expired');
+
+    expect(Payment::where('order_id', $order->id)->count())->toBe(1)
+        ->and($order->fresh()->payment_status)->toBe('failed');
+
+    $this->travelBack();
+});
+
+test('follow-up batch 2 qris expiry keeps batch 1 settled and requires force_new to reset batch 2 qris', function () {
+    $pastryMenu = Menu::create([
+        'category_id' => $this->category->id,
+        'name' => 'Croissant Susulan',
+        'slug' => 'croissant-susulan',
+        'base_price' => 25000,
+        'is_active' => true,
+    ]);
+
+    // Batch 1 lunas QRIS
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Susulan Expired',
+        'payment_method' => 'qris',
+        'items' => [
+            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
+        ],
+    ])->assertRedirect();
+
+    $order = Order::latest('id')->firstOrFail();
+    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
+        'status' => 'paid',
+    ])->assertOk();
+
+    // Tambah susulan Batch 2 QRIS & inisiasi QRIS tambahan
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'order_number' => $order->order_number,
+        'customer_name' => 'Susulan Expired',
+        'payment_method' => 'qris',
+        'items' => [
+            ['menu_id' => $pastryMenu->id, 'quantity' => 1, 'selected_option_ids' => []],
+        ],
+    ])->assertRedirect();
+
+    $batch2Init = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk();
+    $batch2Ref = $batch2Init->json('payment.payment_reference');
+
+    $this->travel(30)->minutes();
+
+    // Status page mengkedaluwarsakan Batch 2 sambil menjaga settlement Batch 1 tetap utuh
+    $this->get(route('order.status', ['order_number' => $order->order_number]))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('customer/status')
+            ->where('order.payment_status', 'unpaid')
+            ->where('order.latest_payment.payment_reference', $batch2Ref)
+            ->where('order.latest_payment.status', 'expired'));
+
+    // Initiate tanpa force_new tidak mereset Batch 2
+    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+    ])->assertOk()
+        ->assertJsonPath('is_expired', true)
+        ->assertJsonPath('payment.payment_reference', $batch2Ref);
+
+    expect(Payment::where('order_id', $order->id)->count())->toBe(2)
+        ->and($order->fresh()->getSettledAmount())->toBe(25000.0);
+
+    // Reset eksplisit membuat Batch 2 QRIS baru
+    $resetBatch2 = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
+        'payment_method' => 'qris',
+        'gateway' => 'xendit',
+        'force_new' => true,
+    ])->assertOk()
+        ->assertJsonPath('is_expired', false);
+
+    expect($resetBatch2->json('payment.payment_reference'))->not->toBe($batch2Ref)
+        ->and(Payment::where('order_id', $order->id)->count())->toBe(3);
+
+    $this->travelBack();
 });

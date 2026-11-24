@@ -22,9 +22,9 @@ use Inertia\Response;
 class MenuController extends Controller
 {
     /**
-     * Menampilkan daftar menu beserta kategorinya.
+     * Menampilkan daftar menu beserta kategorinya dan daftar kategori untuk pengelolaan terpadu.
      */
-    public function index(): Response
+    public function index(Request $request): Response
     {
         $menus = Menu::with(['category', 'optionGroups.optionItems'])
             ->latest()
@@ -34,9 +34,18 @@ class MenuController extends Controller
             ->orderBy('sort_order', 'asc')
             ->get(['id', 'name']);
 
+        $categoriesList = Category::withCount('menus')
+            ->orderBy('sort_order', 'asc')
+            ->orderBy('name', 'asc')
+            ->get();
+
+        $initialTab = $request->query('tab') === 'categories' ? 'categories' : 'menus';
+
         return Inertia::render('admin/menus/index', [
             'menus' => $menus,
             'categories' => $categories,
+            'categoriesList' => $categoriesList,
+            'initialTab' => $initialTab,
         ]);
     }
 
@@ -65,6 +74,11 @@ class MenuController extends Controller
             $discountValue = $isDiscountActive ? (float) ($validated['discount_value'] ?? 0) : 0.0;
             $isLimitedStock = $request->boolean('is_limited_stock', false);
             $stockQuantity = max(0, (int) ($validated['stock_quantity'] ?? 0));
+            $stockValidDays = max(1, min(365, (int) ($validated['stock_valid_days'] ?? Menu::DEFAULT_STOCK_VALID_DAYS)));
+            $stockUpdatedAt = $isLimitedStock ? now(Menu::TIMEZONE) : null;
+            $costPrice = isset($validated['cost_price']) && $validated['cost_price'] !== ''
+                ? (float) $validated['cost_price']
+                : null;
 
             // Buat Menu
             $menu = Menu::create([
@@ -74,12 +88,15 @@ class MenuController extends Controller
                 'description' => isset($validated['description']) ? (string) $validated['description'] : null,
                 'image_path' => $imagePath,
                 'base_price' => (float) $validated['base_price'],
+                'cost_price' => $costPrice,
                 'is_discount_active' => $isDiscountActive,
                 'discount_type' => $discountType,
                 'discount_value' => $discountValue,
                 'is_active' => $request->boolean('is_active', true),
                 'is_limited_stock' => $isLimitedStock,
                 'stock_quantity' => $stockQuantity,
+                'stock_valid_days' => $stockValidDays,
+                'stock_updated_at' => $stockUpdatedAt,
             ]);
 
             $this->syncOptionGroups($menu, $validated['option_groups'] ?? []);
@@ -116,6 +133,25 @@ class MenuController extends Controller
             $stockQuantity = $isLimitedStock
                 ? max(0, (int) ($validated['stock_quantity'] ?? 0))
                 : max(0, (int) ($validated['stock_quantity'] ?? $menu->stock_quantity ?? 0));
+            $stockValidDays = array_key_exists('stock_valid_days', $validated) && $validated['stock_valid_days'] !== null
+                ? max(1, min(365, (int) $validated['stock_valid_days']))
+                : $menu->stockValidDays();
+
+            $shouldRefreshStockTimestamp = $isLimitedStock && (
+                ! $menu->is_limited_stock
+                || $stockQuantity !== (int) $menu->stock_quantity
+                || $stockValidDays !== $menu->stockValidDays()
+                || $request->boolean('refresh_stock_timestamp')
+                || $menu->stock_updated_at === null
+            );
+
+            $stockUpdatedAt = $isLimitedStock
+                ? ($shouldRefreshStockTimestamp ? now(Menu::TIMEZONE) : $menu->stock_updated_at)
+                : $menu->stock_updated_at;
+
+            $costPrice = array_key_exists('cost_price', $validated)
+                ? ($validated['cost_price'] !== null && $validated['cost_price'] !== '' ? (float) $validated['cost_price'] : null)
+                : $menu->cost_price;
 
             $menu->update([
                 'category_id' => (int) $validated['category_id'],
@@ -123,12 +159,15 @@ class MenuController extends Controller
                 'slug' => $slug,
                 'description' => isset($validated['description']) ? (string) $validated['description'] : null,
                 'base_price' => (float) $validated['base_price'],
+                'cost_price' => $costPrice,
                 'is_discount_active' => $isDiscountActive,
                 'discount_type' => $discountType,
                 'discount_value' => $discountValue,
                 'is_active' => $request->boolean('is_active', true),
                 'is_limited_stock' => $isLimitedStock,
                 'stock_quantity' => $stockQuantity,
+                'stock_valid_days' => $stockValidDays,
+                'stock_updated_at' => $stockUpdatedAt,
             ]);
 
             $menu->optionGroups()->delete();
@@ -136,6 +175,31 @@ class MenuController extends Controller
         });
 
         return back()->with('success', 'Menu berhasil diperbarui.');
+    }
+
+    /**
+     * Memperbarui stok harian/berkala beserta masa berlaku stok secara cepat dari panel Admin.
+     */
+    public function updateStock(Request $request, Menu $menu): RedirectResponse
+    {
+        $validated = $request->validate([
+            'stock_quantity' => ['required', 'integer', 'min:0', 'max:100000'],
+            'stock_valid_days' => ['nullable', 'integer', 'min:1', 'max:365'],
+        ]);
+
+        $stockQuantity = max(0, (int) $validated['stock_quantity']);
+        $stockValidDays = array_key_exists('stock_valid_days', $validated) && $validated['stock_valid_days'] !== null
+            ? max(1, min(365, (int) $validated['stock_valid_days']))
+            : $menu->stockValidDays();
+
+        $menu->update([
+            'is_limited_stock' => true,
+            'stock_quantity' => $stockQuantity,
+            'stock_valid_days' => $stockValidDays,
+            'stock_updated_at' => now(Menu::TIMEZONE),
+        ]);
+
+        return back()->with('success', "Stok {$menu->name} diperbarui ({$stockQuantity} porsi, berlaku {$stockValidDays} hari).");
     }
 
     /**

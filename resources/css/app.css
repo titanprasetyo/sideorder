@@ -144,6 +144,14 @@
  */
 .theme-sideline {
     color-scheme: light;
+    --radius: 0.375rem;
+    --radius-xs: 0.125rem;
+    --radius-sm: 0.1875rem;
+    --radius-md: 0.25rem;
+    --radius-lg: 0.3125rem;
+    --radius-xl: 0.375rem;
+    --radius-2xl: 0.5rem;
+    --radius-3xl: 0.625rem;
     --background: #faf6ec;
     --foreground: #18181b;
     --card: #ffffff;
@@ -411,38 +419,70 @@ body,
 }
 
 @media print {
-    /* Isolasi pencetakan struk kasir thermal */
-    body * {
-        visibility: hidden !important;
+    @page {
+        size: portrait;
+        margin: 6mm;
     }
 
-    .printable-receipt,
-    .printable-receipt * {
-        visibility: visible !important;
-    }
-
-    .printable-receipt {
-        position: fixed !important;
-        left: 0 !important;
-        top: 0 !important;
-        width: 80mm !important;
-        max-width: 80mm !important;
-        margin: 0 !important;
-        padding: 10px !important;
-        color: #000000 !important;
-        background: #ffffff !important;
-        box-shadow: none !important;
-        border: none !important;
-        z-index: 999999 !important;
-    }
-
-    .no-print {
+    /* Mode Struk Kasir / Admin melalui Portal .printable-receipt-sheet */
+    body:has(.printable-receipt-sheet) > *:not(.printable-receipt-sheet) {
         display: none !important;
     }
 
-    /* Kartu QR meja (admin) */
-    .printable-qr,
-    .printable-qr * {
+    body:has(.printable-receipt-sheet) {
+        margin: 0 !important;
+        padding: 0 !important;
+        background: #ffffff !important;
+        min-height: auto !important;
+        height: auto !important;
+    }
+
+    .printable-receipt-sheet {
+        display: block !important;
+        position: static !important;
+        transform: none !important;
+        translate: none !important;
+        width: 100% !important;
+        margin: 0 auto !important;
+        padding: 0 !important;
+        background: #ffffff !important;
+        color: #09090b !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    .printable-receipt-paper {
+        box-sizing: border-box !important;
+        width: 100% !important;
+        max-width: 72mm !important;
+        margin: 0 auto !important;
+        padding: 4mm 3.5mm !important;
+        background: #ffffff !important;
+        color: #000000 !important;
+        border: 1px solid #d4d4d8 !important;
+        border-radius: 6px !important;
+        box-shadow: none !important;
+    }
+
+    .printable-receipt-sheet[data-paper='58'] .printable-receipt-paper {
+        max-width: 50mm !important;
+        padding: 3mm 2.5mm !important;
+    }
+
+    .printable-receipt-paper * {
+        color: #000000 !important;
+        border-color: #27272a !important;
+    }
+
+    /* Kartu QR Meja (Admin Tables) */
+    body:has(.printable-qr):not(:has(.printable-receipt-sheet)) * {
+        visibility: hidden !important;
+    }
+
+    body:has(.printable-qr):not(:has(.printable-receipt-sheet)) .printable-qr,
+    body:has(.printable-qr):not(:has(.printable-receipt-sheet))
+        .printable-qr
+        * {
         visibility: visible !important;
     }
 
@@ -457,8 +497,7 @@ body,
         print-color-adjust: exact;
     }
 
-    @page {
-        size: 80mm auto;
-        margin: 0;
+    .no-print {
+        display: none !important;
     }
 }

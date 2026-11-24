@@ -64,8 +64,14 @@ class MenuStockService
                 continue;
             }
 
+            if ($menu->hasExpiredStock()) {
+                throw ValidationException::withMessages([
+                    "items.{$itemIndex}.quantity" => "Maaf, stok menu {$menu->name} sudah habis (menunggu pembaruan stok harian).",
+                ]);
+            }
+
             $requestedQty = max(1, (int) ($requestedQtyByMenuId[$menuId] ?? 0));
-            $availableStock = (int) $menu->stock_quantity;
+            $availableStock = $menu->resolveEffectiveStockQuantity();
 
             if ($availableStock <= 0) {
                 throw ValidationException::withMessages([
@@ -167,9 +173,16 @@ class MenuStockService
 
             $needed = max(0, (int) $item->quantity - (int) $item->stock_deducted_quantity);
             if ($needed > 0) {
-                if ((int) $menu->stock_quantity < $needed) {
+                if ($menu->hasExpiredStock()) {
                     throw new PaymentGatewayException(
-                        "Stok menu {$menu->name} tidak mencukupi untuk mengonfirmasi pesanan #{$order->order_number} (tersisa {$menu->stock_quantity} porsi)."
+                        "Stok menu {$menu->name} sudah habis (menunggu pembaruan stok harian) sehingga pesanan #{$order->order_number} tidak dapat dikonfirmasi."
+                    );
+                }
+
+                $availableStock = $menu->resolveEffectiveStockQuantity();
+                if ($availableStock < $needed) {
+                    throw new PaymentGatewayException(
+                        "Stok menu {$menu->name} tidak mencukupi untuk mengonfirmasi pesanan #{$order->order_number} (tersisa {$availableStock} porsi)."
                     );
                 }
 
@@ -233,10 +246,17 @@ class MenuStockService
                 continue;
             }
 
-            $qty = max(1, (int) $item->quantity);
-            if ((int) $menu->stock_quantity < $qty) {
+            if ($menu->hasExpiredStock()) {
                 throw new PaymentGatewayException(
-                    "Maaf, stok menu {$menu->name} sudah tidak mencukupi untuk melanjutkan pembayaran ulang (tersisa {$menu->stock_quantity} porsi)."
+                    "Maaf, stok menu {$menu->name} sudah habis (menunggu pembaruan stok harian) sehingga pembayaran ulang tidak dapat dilanjutkan."
+                );
+            }
+
+            $qty = max(1, (int) $item->quantity);
+            $availableStock = $menu->resolveEffectiveStockQuantity();
+            if ($availableStock < $qty) {
+                throw new PaymentGatewayException(
+                    "Maaf, stok menu {$menu->name} sudah tidak mencukupi untuk melanjutkan pembayaran ulang (tersisa {$availableStock} porsi)."
                 );
             }
 

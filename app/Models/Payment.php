@@ -115,7 +115,7 @@ class Payment extends Model
     public function resolveGatewayLabel(): string
     {
         return match ($this->gateway) {
-            'xendit' => 'Xendit Payment Gateway',
+            'xendit' => 'Pembayaran Digital',
             'midtrans' => 'Midtrans Snap',
             default => 'Kasir POS',
         };
@@ -128,8 +128,8 @@ class Payment extends Model
         if ($channel !== '') {
             return match ($channel) {
                 'QRIS' => 'QRIS',
-                'VIRTUAL_ACCOUNT', 'BANK_TRANSFER' => 'Virtual Account / Transfer Bank',
-                'EWALLET' => 'E-Wallet',
+                'VIRTUAL_ACCOUNT', 'BANK_TRANSFER' => 'Transfer Bank',
+                'EWALLET' => 'QRIS',
                 'EDC_DEBIT', 'DEBIT' => 'Kartu Debit (EDC)',
                 'CASH' => 'Tunai (Cash)',
                 default => $channel,
@@ -138,7 +138,7 @@ class Payment extends Model
 
         return match ($this->method) {
             'qris' => 'QRIS',
-            'transfer' => 'Transfer Bank / Virtual Account',
+            'transfer' => 'Transfer Bank',
             'debit' => 'Kartu Debit',
             default => 'Tunai',
         };

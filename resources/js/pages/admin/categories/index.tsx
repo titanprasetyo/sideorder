@@ -35,7 +35,6 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { cn } from '@/lib/utils';
 
 interface Category {
     id: number;
@@ -161,9 +160,9 @@ export default function CategoriesIndex({ categories }: Props) {
                     actions={
                         <Button
                             onClick={openCreateModal}
-                            className="h-10 gap-2 rounded-xl bg-[#C52828] px-4 font-bold text-white shadow-sm hover:bg-[#A81E1E]"
+                            className="h-9 shrink-0 gap-1.5 rounded-xl bg-[#C52828] px-3.5 text-xs font-bold whitespace-nowrap text-white shadow-sm hover:bg-[#A81E1E]"
                         >
-                            <Plus className="size-4" />
+                            <Plus className="size-3.5" />
                             Tambah Kategori
                         </Button>
                     }
@@ -383,7 +382,7 @@ export default function CategoriesIndex({ categories }: Props) {
                                         <div className="flex size-14 items-center justify-center rounded-2xl bg-[#C52828] text-white shadow-sm">
                                             <Layers className="size-7" />
                                         </div>
-                                        <span className="max-w-full truncate rounded-full border border-[#E8DFC8] bg-white px-3 py-1 text-[11px] font-extrabold text-[#18181B] shadow-2xs">
+                                        <span className="max-w-full truncate rounded-md border border-[#E8DFC8] bg-white px-3 py-1 text-[11px] font-extrabold text-[#18181B] shadow-2xs">
                                             {form.data.name || 'Kategori Baru'}
                                         </span>
                                     </div>

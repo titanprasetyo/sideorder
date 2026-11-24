@@ -17,12 +17,21 @@ use Illuminate\Support\Carbon;
  * @property int|null $menu_id
  * @property string $menu_name
  * @property string $base_price
+ * @property string|null $cost_price
  * @property int $quantity
+ * @property int $batch_number
+ * @property bool $is_followup
+ * @property string $payment_status
+ * @property int|null $payment_id
+ * @property Carbon|null $paid_at
  * @property string $subtotal_options
  * @property string $unit_price
  * @property string $total_price
  * @property string|null $customer_notes
  * @property string $status
+ * @property bool $is_served
+ * @property Carbon|null $served_at
+ * @property int|null $served_by
  * @property int $stock_deducted_quantity
  * @property string $stock_state
  * @property Carbon|null $stock_deducted_at
@@ -34,6 +43,8 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $updated_at
  * @property-read Order|null $order
  * @property-read Menu|null $menu
+ * @property-read Payment|null $payment
+ * @property-read User|null $servedByUser
  * @property-read User|null $rejectedByUser
  * @property-read Collection<int, OrderItemOption> $options
  */
@@ -41,6 +52,10 @@ class OrderItem extends Model
 {
     /** @use HasFactory<Factory<self>> */
     use HasFactory;
+
+    public const string PAYMENT_UNPAID = 'unpaid';
+
+    public const string PAYMENT_PAID = 'paid';
 
     public const string STOCK_STATE_NONE = 'none';
 
@@ -55,7 +70,13 @@ class OrderItem extends Model
         'menu_id',
         'menu_name',
         'base_price',
+        'cost_price',
         'quantity',
+        'batch_number',
+        'is_followup',
+        'payment_status',
+        'payment_id',
+        'paid_at',
         'stock_deducted_quantity',
         'stock_state',
         'stock_deducted_at',
@@ -65,6 +86,9 @@ class OrderItem extends Model
         'total_price',
         'customer_notes',
         'status',
+        'is_served',
+        'served_at',
+        'served_by',
         'rejection_reason',
         'rejected_at',
         'rejected_by',
@@ -77,11 +101,17 @@ class OrderItem extends Model
     {
         return [
             'base_price' => 'decimal:2',
+            'cost_price' => 'decimal:2',
             'quantity' => 'integer',
+            'batch_number' => 'integer',
+            'is_followup' => 'boolean',
             'stock_deducted_quantity' => 'integer',
             'subtotal_options' => 'decimal:2',
             'unit_price' => 'decimal:2',
             'total_price' => 'decimal:2',
+            'paid_at' => 'datetime',
+            'is_served' => 'boolean',
+            'served_at' => 'datetime',
             'stock_deducted_at' => 'datetime',
             'stock_released_at' => 'datetime',
             'rejected_at' => 'datetime',
@@ -106,6 +136,26 @@ class OrderItem extends Model
     public function menu(): BelongsTo
     {
         return $this->belongsTo(Menu::class);
+    }
+
+    /**
+     * Relasi: Transaksi pembayaran yang melunasi item ini
+     *
+     * @return BelongsTo<Payment, $this>
+     */
+    public function payment(): BelongsTo
+    {
+        return $this->belongsTo(Payment::class);
+    }
+
+    /**
+     * Relasi: Kasir/barista yang menandai item ini selesai/diantar
+     *
+     * @return BelongsTo<User, $this>
+     */
+    public function servedByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'served_by');
     }
 
     /**
@@ -158,5 +208,20 @@ class OrderItem extends Model
     public function isActive(): bool
     {
         return $this->status === 'active';
+    }
+
+    public function isPaid(): bool
+    {
+        return $this->payment_status === self::PAYMENT_PAID;
+    }
+
+    public function isServed(): bool
+    {
+        return (bool) $this->is_served;
+    }
+
+    public function canBeServed(): bool
+    {
+        return $this->isActive() && $this->isPaid();
     }
 }

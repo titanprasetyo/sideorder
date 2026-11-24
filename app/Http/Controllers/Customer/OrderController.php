@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Customer;
 
 use App\Events\OrderCreated;
 use App\Events\OrderStatusUpdated;
+use App\Exceptions\PaymentGatewayException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Customer\CheckoutOrderRequest;
 use App\Models\CafeSetting;
@@ -53,6 +54,34 @@ class OrderController extends Controller
 
         $setting = CafeSetting::current();
         $locationAccess = $this->locationAccessService->getCustomerGateProps($request, $setting);
+        $orderingStatus = [
+            'enabled' => (bool) $setting->is_ordering_enabled,
+            'closed_message' => $setting->closed_message ?: 'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
+            'cafe_name' => $setting->cafe_name,
+        ];
+        $paymentPolicy = [
+            'allow_cash' => (bool) $setting->allow_cash_payment,
+            'allow_xendit' => (bool) $setting->allow_xendit_payment,
+            'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
+            'default_method' => $setting->allow_xendit_payment ? 'qris' : ($setting->allow_cash_payment ? 'cash' : 'qris'),
+        ];
+
+        if (! $setting->is_ordering_enabled) {
+            return Inertia::render('customer/order', [
+                'table' => [
+                    'id' => $table->id,
+                    'table_number' => $table->table_number,
+                    'name' => $table->name,
+                    'qr_token' => $table->qr_token,
+                ],
+                'categories' => [],
+                'activeOrder' => null,
+                'lockedOrderNotice' => null,
+                'locationAccess' => $locationAccess,
+                'orderingStatus' => $orderingStatus,
+                'paymentPolicy' => $paymentPolicy,
+            ]);
+        }
 
         if ($locationAccess['required'] && ! $locationAccess['verified']) {
             return Inertia::render('customer/order', [
@@ -66,6 +95,8 @@ class OrderController extends Controller
                 'activeOrder' => null,
                 'lockedOrderNotice' => null,
                 'locationAccess' => $locationAccess,
+                'orderingStatus' => $orderingStatus,
+                'paymentPolicy' => $paymentPolicy,
             ]);
         }
 
@@ -106,6 +137,11 @@ class OrderController extends Controller
                     });
 
                 $menu->setRelation('optionGroups', $filteredGroups);
+
+                if ($menu->is_limited_stock && $menu->hasExpiredStock()) {
+                    // Jangan simpan ke DB; hanya pastikan tampilan pelanggan otomatis menampilkan "Habis".
+                    $menu->setAttribute('stock_quantity', 0);
+                }
             });
         });
 
@@ -178,6 +214,8 @@ class OrderController extends Controller
             'activeOrder' => $activeOrderPayload,
             'lockedOrderNotice' => $lockedOrderNotice,
             'locationAccess' => $locationAccess,
+            'orderingStatus' => $orderingStatus,
+            'paymentPolicy' => $paymentPolicy,
         ]);
     }
 
@@ -223,12 +261,23 @@ class OrderController extends Controller
 
         $menus = Menu::query()
             ->with('category:id,is_active')
-            ->get(['id', 'category_id', 'is_active', 'is_limited_stock', 'stock_quantity'])
+            ->get([
+                'id',
+                'category_id',
+                'is_active',
+                'is_limited_stock',
+                'stock_quantity',
+                'stock_valid_days',
+                'stock_updated_at',
+                'updated_at',
+                'created_at',
+            ])
             ->map(fn (Menu $menu): array => [
                 'id' => $menu->id,
                 'is_active' => (bool) $menu->is_active && (bool) ($menu->category?->is_active ?? false),
                 'is_limited_stock' => (bool) $menu->is_limited_stock,
-                'stock_quantity' => (int) $menu->stock_quantity,
+                'stock_quantity' => $menu->is_limited_stock ? $menu->resolveEffectiveStockQuantity() : (int) $menu->stock_quantity,
+                'is_stock_expired' => $menu->hasExpiredStock(),
             ])
             ->values()
             ->all();
@@ -251,6 +300,29 @@ class OrderController extends Controller
 
         if (! $table->is_active) {
             return back()->withErrors(['table' => 'Meja sedang tidak aktif untuk pemesanan.']);
+        }
+
+        $setting = CafeSetting::current();
+        if (! $setting->is_ordering_enabled) {
+            throw ValidationException::withMessages([
+                'ordering' => $setting->closed_message ?: 'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
+            ]);
+        }
+
+        $requestedMethod = ! empty($validated['payment_method'])
+            ? strtolower((string) $validated['payment_method'])
+            : ($setting->allow_xendit_payment ? 'qris' : ($setting->allow_cash_payment ? 'cash' : 'qris'));
+
+        if ($requestedMethod === 'cash' && ! $setting->allow_cash_payment) {
+            throw ValidationException::withMessages([
+                'payment_method' => 'Metode pembayaran tunai sedang dinonaktifkan sementara. Silakan gunakan QRIS / Transfer.',
+            ]);
+        }
+
+        if (in_array($requestedMethod, ['qris', 'transfer'], true) && ! $setting->allow_xendit_payment) {
+            throw ValidationException::withMessages([
+                'payment_method' => 'Pembayaran QRIS sedang dinonaktifkan sementara. Silakan bayar tunai langsung di kasir.',
+            ]);
         }
 
         // Validasi ulang akses lokasi di backend agar tidak dapat dilewati melalui manipulasi request/API
@@ -280,7 +352,7 @@ class OrderController extends Controller
             }
         }
 
-        [$order, $wasAppended] = DB::transaction(function () use ($validated, $table) {
+        [$order, $wasAppended] = DB::transaction(function () use ($validated, $table, $requestedMethod) {
             $addedSubtotal = 0.0;
             $itemsToCreate = [];
 
@@ -403,6 +475,7 @@ class OrderController extends Controller
                     'menu_id' => $menu->id,
                     'menu_name' => $menu->name,
                     'base_price' => $basePrice,
+                    'cost_price' => $menu->cost_price !== null ? (float) $menu->cost_price : null,
                     'quantity' => $quantity,
                     'stock_deducted_quantity' => $menu->is_limited_stock ? $quantity : 0,
                     'stock_state' => $menu->is_limited_stock ? OrderItem::STOCK_STATE_RESERVED : OrderItem::STOCK_STATE_NONE,
@@ -453,10 +526,19 @@ class OrderController extends Controller
                 $previousTotalAmount = (float) $targetOrder->total_amount;
                 $previouslySettled = $targetOrder->getSettledAmount();
 
+                // Kunci item existing sebelum menentukan batch & menghitung ulang total tagihan
+                $targetOrder->items()->lockForUpdate()->get();
+                $followupBatchNumber = $targetOrder->getNextFollowupBatchNumber();
+
                 $addedSummaryParts = [];
                 foreach ($itemsToCreate as $itemData) {
                     $options = $itemData['options'];
                     unset($itemData['options']);
+
+                    $itemData['batch_number'] = $followupBatchNumber;
+                    $itemData['is_followup'] = true;
+                    $itemData['payment_status'] = OrderItem::PAYMENT_UNPAID;
+                    $itemData['is_served'] = false;
 
                     $orderItem = $targetOrder->items()->create($itemData);
 
@@ -473,6 +555,11 @@ class OrderController extends Controller
                 // Hitung ulang subtotal dan total tagihan dari seluruh item aktif pada pesanan
                 $newSubtotal = (float) $targetOrder->items()->where('status', 'active')->sum('total_price');
                 $newTotalAmount = $newSubtotal;
+
+                // Tagihan pending gateway lama sudah tidak sesuai nominal terbarunya
+                $targetOrder->payments()
+                    ->where('status', 'pending')
+                    ->update(['status' => 'expired']);
 
                 $mergedNotes = $targetOrder->notes;
                 if ($incomingNotes !== null) {
@@ -527,9 +614,9 @@ class OrderController extends Controller
                 if ($wasAlreadyPaid || $previouslySettled > 0) {
                     $settledFormatted = number_format($previouslySettled, 0, ',', '.');
                     $unpaidDiffFormatted = number_format(max(0.0, $newTotalAmount - $previouslySettled), 0, ',', '.');
-                    $historyNote = "Customer menambahkan menu baru ({$addedSummaryText}) senilai Rp {$addedSubtotalFormatted} dari Meja {$table->table_number}. Pembayaran awal Rp {$settledFormatted} tetap tercatat; sisa tagihan tambahan Rp {$unpaidDiffFormatted} (Total: Rp {$newTotalFormatted}).";
+                    $historyNote = "Customer menambahkan menu susulan ({$addedSummaryText}) senilai Rp {$addedSubtotalFormatted} dari Meja {$table->table_number}. Pembayaran awal Rp {$settledFormatted} tetap tercatat; sisa tagihan tambahan Rp {$unpaidDiffFormatted} (Total: Rp {$newTotalFormatted}).";
                 } else {
-                    $historyNote = "Customer menambahkan menu baru ({$addedSummaryText}) senilai Rp {$addedSubtotalFormatted} dari Meja {$table->table_number}. Total tagihan diperbarui menjadi Rp {$newTotalFormatted}.";
+                    $historyNote = "Customer menambahkan menu susulan ({$addedSummaryText}) senilai Rp {$addedSubtotalFormatted} dari Meja {$table->table_number}. Total tagihan diperbarui menjadi Rp {$newTotalFormatted}.";
                 }
 
                 OrderStatusHistory::create([
@@ -551,7 +638,7 @@ class OrderController extends Controller
             }
 
             $totalAmount = $addedSubtotal;
-            $chosenMethod = strtolower((string) ($validated['payment_method'] ?? 'qris'));
+            $chosenMethod = $requestedMethod;
             $resolvedGateway = $this->paymentService->resolveGatewayForMethod($chosenMethod);
             $resolvedChannel = $this->paymentService->resolveDefaultChannelForMethod(
                 $chosenMethod,
@@ -574,6 +661,11 @@ class OrderController extends Controller
             foreach ($itemsToCreate as $itemData) {
                 $options = $itemData['options'];
                 unset($itemData['options']);
+
+                $itemData['batch_number'] = 1;
+                $itemData['is_followup'] = false;
+                $itemData['payment_status'] = OrderItem::PAYMENT_UNPAID;
+                $itemData['is_served'] = false;
 
                 $orderItem = $order->items()->create($itemData);
 
@@ -618,18 +710,28 @@ class OrderController extends Controller
             ->with([
                 'table',
                 'items.options',
-                'items.rejectedByUser',
+                'items.rejectedByUser:id,name',
+                'items.servedByUser:id,name',
                 'statusHistories',
                 'latestPayment',
-                'payments',
+                'payments:id,order_id,payment_reference,gateway,method,channel,type,amount,settled_amount,status,checkout_url,qr_string,expired_at,paid_at',
             ])
             ->firstOrFail();
+
+        $order = $this->paymentService->syncPaymentStatus($order);
+
+        $setting = CafeSetting::current();
 
         return Inertia::render('customer/status', [
             'order' => $order,
             'initialView' => $request->query('view'),
             'canSimulate' => app()->environment('local', 'testing') || ($request->user() && ($request->user()->isAdmin() || $request->user()->isCashier())),
             'paymentGateway' => $this->paymentService->getPublicGatewayConfig(),
+            'paymentPolicy' => [
+                'allow_cash' => (bool) $setting->allow_cash_payment,
+                'allow_xendit' => (bool) $setting->allow_xendit_payment,
+                'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
+            ],
         ]);
     }
 
@@ -642,18 +744,28 @@ class OrderController extends Controller
             ->with([
                 'table',
                 'items.options',
-                'items.rejectedByUser',
+                'items.rejectedByUser:id,name',
+                'items.servedByUser:id,name',
                 'statusHistories',
                 'latestPayment',
-                'payments',
+                'payments:id,order_id,payment_reference,gateway,method,channel,type,amount,settled_amount,status,checkout_url,qr_string,expired_at,paid_at',
             ])
             ->firstOrFail();
+
+        $order = $this->paymentService->syncPaymentStatus($order);
+
+        $setting = CafeSetting::current();
 
         return Inertia::render('customer/status', [
             'order' => $order,
             'initialView' => 'qris',
             'canSimulate' => app()->environment('local', 'testing') || (request()->user() && (request()->user()->isAdmin() || request()->user()->isCashier())),
             'paymentGateway' => $this->paymentService->getPublicGatewayConfig(),
+            'paymentPolicy' => [
+                'allow_cash' => (bool) $setting->allow_cash_payment,
+                'allow_xendit' => (bool) $setting->allow_xendit_payment,
+                'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
+            ],
         ]);
     }
 
@@ -663,12 +775,25 @@ class OrderController extends Controller
      */
     public function simulatePayment(Request $request, string $order_number): RedirectResponse|JsonResponse
     {
-        if (! app()->environment('local', 'testing') && ! ($request->user() && ($request->user()->isAdmin() || $request->user()->isCashier()))) {
+        $isStaff = $request->user() && ($request->user()->isAdmin() || $request->user()->isCashier());
+        if (! app()->environment('local', 'testing') && ! $isStaff) {
             abort(403, 'Simulasi pembayaran dinonaktifkan di lingkungan produksi untuk keamanan transaksi.');
         }
 
         $status = strtolower((string) ($request->input('status', 'paid')));
         $order = Order::where('order_number', $order_number)->firstOrFail();
+
+        if (! $isStaff && $order->payment_method === 'cash') {
+            $errMsg = 'Pesanan metode tunai hanya dapat dikonfirmasi oleh kasir atau ubah metode ke QRIS terlebih dahulu.';
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $errMsg,
+                ], 422);
+            }
+
+            return back()->with('error', $errMsg);
+        }
 
         if ($order->order_status === 'cancelled' || $order->payment_status === 'refunded') {
             $errMsg = 'Pesanan sudah dibatalkan.';
@@ -682,7 +807,7 @@ class OrderController extends Controller
             return back()->with('error', $errMsg);
         }
 
-        if ($order->payment_status === 'paid') {
+        if ($order->payment_status === 'paid' && $order->getUnpaidBalance() <= 0.01 && ! $order->hasUnpaidActiveItems()) {
             if (in_array($status, ['paid', 'settlement', 'success'], true)) {
                 $infoMsg = "Pesanan #{$order->order_number} sudah berstatus lunas.";
                 if ($request->wantsJson()) {
@@ -691,7 +816,7 @@ class OrderController extends Controller
                         'status' => $order->payment_status,
                         'order_status' => $order->order_status,
                         'message' => $infoMsg,
-                        'order' => $order->fresh(['table', 'items.options', 'latestPayment']),
+                        'order' => $order->fresh(['table', 'items.options', 'items.servedByUser:id,name', 'latestPayment']),
                     ]);
                 }
 
@@ -724,13 +849,13 @@ class OrderController extends Controller
         if (in_array($status, ['paid', 'settlement', 'success'], true)) {
             if ($unpaidBalance > 0) {
                 $amountDue = $pendingPayment ? (float) $pendingPayment->amount : $unpaidBalance;
-                $externalId = $pendingPayment ? $pendingPayment->payment_reference : $order->order_number;
+                $externalId = $pendingPayment ? $pendingPayment->payment_reference : '';
 
                 $callbackResult = $this->paymentService->processGatewayCallback([
                     'external_id' => $externalId,
                     'order_number' => $order->order_number,
                     'payment_reference' => $externalId,
-                    'gateway_transaction_id' => 'XND-SIM-'.strtoupper(Str::random(8)),
+                    'gateway_transaction_id' => 'QRIS-SIM-'.strtoupper(Str::random(8)),
                     'status' => 'paid',
                     'amount' => $amountDue,
                     'method' => $method,
@@ -757,22 +882,30 @@ class OrderController extends Controller
                     /** @var Order $lockedOrder */
                     $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
                     $this->menuStockService->confirmOrderStock($lockedOrder);
+                    $nowWib = now('Asia/Jakarta');
                     $lockedOrder->update([
                         'payment_status' => 'paid',
                         'payment_method' => $method,
                         'payment_gateway' => $gatewayName,
                         'payment_channel' => $channel,
-                        'paid_at' => $lockedOrder->paid_at ?? now('Asia/Jakarta'),
-                        'payment_reference' => $lockedOrder->payment_reference ?: ('XND-SIM-'.strtoupper(Str::random(8))),
+                        'paid_at' => $lockedOrder->paid_at ?? $nowWib,
+                        'payment_reference' => $lockedOrder->payment_reference ?: ('QRIS-SIM-'.strtoupper(Str::random(8))),
                         'cash_received' => max((float) ($lockedOrder->cash_received ?? 0), (float) $lockedOrder->total_amount),
                         'change_amount' => 0.0,
                         'order_status' => $newOrderStatus,
                     ]);
+                    $lockedOrder->items()
+                        ->where('status', 'active')
+                        ->where('payment_status', '!=', OrderItem::PAYMENT_PAID)
+                        ->update([
+                            'payment_status' => OrderItem::PAYMENT_PAID,
+                            'paid_at' => $nowWib,
+                        ]);
                     OrderStatusHistory::create([
                         'order_id' => $lockedOrder->id,
                         'user_id' => null,
                         'status' => $newOrderStatus,
-                        'notes' => 'Pembayaran QRIS/Gateway berhasil dikonfirmasi (Simulasi Gateway Settlement).',
+                        'notes' => 'Pembayaran QRIS berhasil dikonfirmasi (Simulasi Settlement).',
                     ]);
                 });
                 $order->refresh();
@@ -782,7 +915,7 @@ class OrderController extends Controller
                 }
             }
 
-            $msg = '🎉 Pembayaran Xendit/QRIS berhasil diverifikasi dan pesanan diteruskan ke Barista!';
+            $msg = '🎉 Pembayaran QRIS berhasil diverifikasi dan pesanan diteruskan ke Barista!';
         } elseif (in_array($status, ['failed', 'deny', 'expire'], true)) {
             $externalId = $pendingPayment ? $pendingPayment->payment_reference : $order->order_number;
 
@@ -792,7 +925,7 @@ class OrderController extends Controller
                 'payment_reference' => $externalId,
                 'gateway_transaction_id' => $pendingPayment && $pendingPayment->gateway_transaction_id
                     ? $pendingPayment->gateway_transaction_id
-                    : ('XND-SIM-'.strtoupper(Str::random(8))),
+                    : ('QRIS-SIM-'.strtoupper(Str::random(8))),
                 'status' => $status,
                 'amount' => $pendingPayment ? (float) $pendingPayment->amount : max(0.0, $unpaidBalance),
                 'method' => $method,
@@ -853,10 +986,16 @@ class OrderController extends Controller
             ->firstOrFail();
 
         $order = $this->paymentService->syncPaymentStatus($order);
+        $isExpired = $order->payment_status !== 'paid'
+            && (
+                $order->payment_status === 'failed'
+                || ($order->latestPayment && in_array($order->latestPayment->status, ['expired', 'failed'], true))
+            );
 
         return response()->json([
             'order_number' => $order->order_number,
             'is_paid' => $order->payment_status === 'paid',
+            'is_expired' => $isExpired,
             'payment_status' => $order->payment_status,
             'order_status' => $order->order_status,
             'payment_gateway' => $order->resolveEffectivePaymentGateway(),
@@ -874,10 +1013,10 @@ class OrderController extends Controller
                 'qr_string' => $order->latestPayment->qr_string,
                 'expired_at' => $order->latestPayment->expired_at?->toIso8601String(),
             ] : null,
-            'message' => match ($order->payment_status) {
-                'paid' => 'Pembayaran lunas terverifikasi.',
-                'failed' => 'Pembayaran gagal atau kedaluwarsa.',
-                default => 'Menunggu pembayaran di e-wallet/perbankan.',
+            'message' => match (true) {
+                $order->payment_status === 'paid' => 'Pembayaran lunas terverifikasi.',
+                $isExpired => 'Pembayaran gagal atau kedaluwarsa.',
+                default => 'Menunggu pembayaran QRIS.',
             },
         ]);
     }
@@ -894,7 +1033,10 @@ class OrderController extends Controller
 
         $order = Order::where('order_number', $order_number)->firstOrFail();
 
-        if (in_array($order->payment_status, ['paid', 'refunded'], true) || $order->order_status === 'cancelled') {
+        if (
+            (in_array($order->payment_status, ['paid', 'refunded'], true) && $order->getUnpaidBalance() <= 0.01 && ! $order->hasUnpaidActiveItems())
+            || $order->order_status === 'cancelled'
+        ) {
             $errMsg = "Metode pembayaran untuk Pesanan #{$order->order_number} tidak dapat diubah karena pesanan sudah lunas atau dibatalkan.";
             if ($request->wantsJson()) {
                 return response()->json([
@@ -907,32 +1049,80 @@ class OrderController extends Controller
         }
 
         $method = strtolower((string) $validated['payment_method']);
+        $setting = CafeSetting::current();
+        if ($method === 'cash' && ! $setting->allow_cash_payment) {
+            $errMsg = 'Metode pembayaran tunai sedang dinonaktifkan sementara oleh kafe.';
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'message' => $errMsg], 422);
+            }
+
+            return back()->with('error', $errMsg);
+        }
+
+        if (in_array($method, ['qris', 'transfer'], true) && ! $setting->allow_xendit_payment) {
+            $errMsg = 'Pembayaran QRIS sedang dinonaktifkan sementara.';
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'message' => $errMsg], 422);
+            }
+
+            return back()->with('error', $errMsg);
+        }
+
         $gateway = $this->paymentService->resolveGatewayForMethod($method);
         $channel = $this->paymentService->resolveDefaultChannelForMethod(
             $method,
             isset($validated['payment_channel']) ? (string) $validated['payment_channel'] : null,
         );
 
-        DB::transaction(function () use ($order, $method, $gateway, $channel): void {
-            /** @var Order $locked */
-            $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
-            if (in_array($locked->payment_status, ['paid', 'refunded'], true) || $locked->order_status === 'cancelled') {
-                return;
+        try {
+            DB::transaction(function () use ($order, $method, $gateway, $channel): void {
+                /** @var Order $locked */
+                $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+                if (
+                    (in_array($locked->payment_status, ['paid', 'refunded'], true) && $locked->getUnpaidBalance() <= 0.01 && ! $locked->hasUnpaidActiveItems())
+                    || $locked->order_status === 'cancelled'
+                ) {
+                    return;
+                }
+
+                if ($method === 'cash') {
+                    $this->menuStockService->reserveBeforePaymentRetry($locked);
+                }
+
+                $locked->payments()
+                    ->where('status', 'pending')
+                    ->where('method', '!=', $method)
+                    ->update(['status' => 'expired']);
+
+                $updatePayload = [
+                    'payment_method' => $method,
+                    'payment_gateway' => $gateway,
+                    'payment_channel' => $channel,
+                ];
+
+                if ($method === 'cash' && $locked->payment_status === 'failed' && ! $locked->hasAnySettlement()) {
+                    $updatePayload['payment_status'] = 'unpaid';
+                }
+
+                $locked->update($updatePayload);
+            });
+        } catch (PaymentGatewayException $e) {
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                ], 422);
             }
 
-            $locked->payments()
-                ->where('status', 'pending')
-                ->where('method', '!=', $method)
-                ->update(['status' => 'expired']);
-
-            $locked->update([
-                'payment_method' => $method,
-                'payment_gateway' => $gateway,
-                'payment_channel' => $channel,
-            ]);
-        });
+            return back()->withErrors(['payment_method' => $e->getMessage()])->with('error', $e->getMessage());
+        }
 
         $order->refresh();
+
+        try {
+            event(new OrderStatusUpdated($order, $order->order_status, $order->order_status));
+        } catch (\Throwable) {
+        }
 
         if ($request->wantsJson()) {
             return response()->json([

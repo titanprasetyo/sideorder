@@ -27,6 +27,18 @@ class LocationSettingRequest extends FormRequest
         return [
             'cafe_name' => ['required', 'string', 'max:120'],
             'address' => ['nullable', 'string', 'max:255'],
+            'phone' => ['nullable', 'string', 'max:40'],
+            'receipt_footer' => ['nullable', 'string', 'max:255'],
+            'is_ordering_enabled' => ['sometimes', 'boolean'],
+            'closed_message' => ['nullable', 'string', 'max:255'],
+            'allow_cash_payment' => ['sometimes', 'boolean'],
+            'allow_xendit_payment' => ['sometimes', 'boolean'],
+            'payment_expiry_minutes' => [
+                'sometimes',
+                'integer',
+                'min:'.CafeSetting::MIN_PAYMENT_EXPIRY_MINUTES,
+                'max:'.CafeSetting::MAX_PAYMENT_EXPIRY_MINUTES,
+            ],
             'is_location_restricted' => ['required', 'boolean'],
             'latitude' => ['nullable', 'numeric', 'between:-90,90'],
             'longitude' => ['nullable', 'numeric', 'between:-180,180'],
@@ -48,6 +60,8 @@ class LocationSettingRequest extends FormRequest
     {
         $minRadius = CafeSetting::MIN_RADIUS_METERS;
         $maxRadius = number_format(CafeSetting::MAX_RADIUS_METERS, 0, ',', '.');
+        $minExp = CafeSetting::MIN_PAYMENT_EXPIRY_MINUTES;
+        $maxExp = CafeSetting::MAX_PAYMENT_EXPIRY_MINUTES;
 
         return [
             'cafe_name.required' => 'Nama lokasi kafe wajib diisi.',
@@ -56,11 +70,14 @@ class LocationSettingRequest extends FormRequest
             'access_radius_meters.required' => 'Radius akses lokasi (meter) wajib diisi.',
             'access_radius_meters.min' => "Radius akses minimal adalah {$minRadius} meter.",
             'access_radius_meters.max' => "Radius akses maksimal adalah {$maxRadius} meter.",
+            'payment_expiry_minutes.min' => "Batas waktu kedaluwarsa pembayaran minimal {$minExp} menit.",
+            'payment_expiry_minutes.max' => "Batas waktu kedaluwarsa pembayaran maksimal {$maxExp} menit.",
         ];
     }
 
     /**
-     * Pastikan latitude & longitude terisi apabila pembatasan lokasi diaktifkan.
+     * Pastikan latitude & longitude terisi apabila pembatasan lokasi diaktifkan,
+     * serta minimal satu metode pembayaran pelanggan aktif.
      *
      * @return array<int, callable(Validator): void>
      */
@@ -68,6 +85,20 @@ class LocationSettingRequest extends FormRequest
     {
         return [
             function (Validator $validator): void {
+                if ($this->has('allow_cash_payment') || $this->has('allow_xendit_payment')) {
+                    $setting = CafeSetting::current();
+                    $cashAllowed = $this->has('allow_cash_payment')
+                        ? $this->boolean('allow_cash_payment')
+                        : (bool) $setting->allow_cash_payment;
+                    $xenditAllowed = $this->has('allow_xendit_payment')
+                        ? $this->boolean('allow_xendit_payment')
+                        : (bool) $setting->allow_xendit_payment;
+
+                    if (! $cashAllowed && ! $xenditAllowed) {
+                        $validator->errors()->add('allow_cash_payment', 'Minimal satu metode pembayaran (Tunai atau QRIS) harus tetap aktif.');
+                    }
+                }
+
                 if (! $this->boolean('is_location_restricted')) {
                     return;
                 }

@@ -4,7 +4,9 @@ namespace App\Services\Payments;
 
 use App\Events\OrderStatusUpdated;
 use App\Exceptions\PaymentGatewayException;
+use App\Models\CafeSetting;
 use App\Models\Order;
+use App\Models\OrderItem;
 use App\Models\OrderStatusHistory;
 use App\Models\Payment;
 use App\Services\Payments\Contracts\PaymentGatewayInterface;
@@ -13,9 +15,11 @@ use App\Services\Payments\Drivers\MidtransGatewayDriver;
 use App\Services\Payments\Drivers\XenditGatewayDriver;
 use App\Services\Stock\MenuStockService;
 use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class PaymentService
@@ -85,6 +89,8 @@ class PaymentService
      *     driver: string,
      *     label: string,
      *     is_configured: bool,
+     *     is_webhook_configured: bool,
+     *     is_ready: bool,
      *     mode: string,
      *     supported_channels: list<string>,
      *     webhook_endpoint: string
@@ -95,6 +101,11 @@ class PaymentService
         $defaultDriver = $this->defaultGatewayName();
         $driver = $this->driver($defaultDriver);
         $isConfigured = $driver->isConfigured();
+        $isWebhookConfigured = match ($defaultDriver) {
+            'xendit' => $this->xenditDriver->isWebhookConfigured(),
+            'midtrans' => $this->midtransDriver->isConfigured(),
+            default => true,
+        };
         $isProduction = match ($defaultDriver) {
             'xendit' => (bool) config('services.xendit.is_production', false),
             'midtrans' => (bool) config('services.midtrans.is_production', false),
@@ -108,14 +119,16 @@ class PaymentService
         return [
             'driver' => $defaultDriver,
             'label' => match ($defaultDriver) {
-                'xendit' => 'Xendit Payment Gateway',
+                'xendit' => 'Pembayaran Digital',
                 'midtrans' => 'Midtrans Snap',
                 default => 'Kasir POS',
             },
             'is_configured' => $isConfigured,
+            'is_webhook_configured' => $isWebhookConfigured,
+            'is_ready' => $isConfigured && $isWebhookConfigured,
             'mode' => $mode,
-            'supported_channels' => ['QRIS', 'VIRTUAL_ACCOUNT', 'EWALLET'],
-            'webhook_endpoint' => route('payments.webhook', [], false),
+            'supported_channels' => ['QRIS', 'CASH'],
+            'webhook_endpoint' => route('payments.webhook', $defaultDriver !== 'manual' ? ['driver' => $defaultDriver] : [], false),
         ];
     }
 
@@ -175,6 +188,7 @@ class PaymentService
      *
      * @return array{
      *     already_paid: bool,
+     *     is_expired: bool,
      *     reused: bool,
      *     order: Order,
      *     payment: Payment|null,
@@ -193,10 +207,25 @@ class PaymentService
             $resolvedMethod = 'qris';
         }
 
+        $setting = CafeSetting::current();
+        if ($resolvedMethod === 'cash' && ! $setting->allow_cash_payment) {
+            throw new PaymentGatewayException('Metode pembayaran tunai sedang dinonaktifkan oleh manajemen kafe. Silakan pilih pembayaran digital.');
+        }
+
+        if (in_array($resolvedMethod, ['qris', 'transfer'], true) && ! $setting->allow_xendit_payment) {
+            throw new PaymentGatewayException('Pembayaran QRIS sedang dinonaktifkan sementara. Silakan bayar tunai langsung di kasir.');
+        }
+
+        $expiryMinutes = max(
+            CafeSetting::MIN_PAYMENT_EXPIRY_MINUTES,
+            min(CafeSetting::MAX_PAYMENT_EXPIRY_MINUTES, (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES)),
+        );
+        $invoiceDurationSeconds = $expiryMinutes * 60;
+
         $resolvedGateway = $this->resolveGatewayForMethod($resolvedMethod, $preferredGateway);
         $resolvedChannel = $this->resolveDefaultChannelForMethod($resolvedMethod, $channel);
 
-        /** @var array{status: string, payment: Payment|null, order: Order, reused: bool} $prep */
+        /** @var array{status: string, payment: Payment|null, order: Order, reused: bool, expired_now?: bool} $prep */
         $prep = DB::transaction(function () use ($order, $resolvedMethod, $resolvedGateway, $resolvedChannel, $forceNew): array {
             /** @var Order $lockedOrder */
             $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
@@ -221,7 +250,43 @@ class PaymentService
                 ];
             }
 
-            $this->menuStockService->reserveBeforePaymentRetry($lockedOrder);
+            // Tutup & lepaskan stok untuk transaksi pending gateway yang sudah melewati batas kedaluwarsa
+            $expiredPendingNow = false;
+            $overduePendings = $lockedOrder->payments()
+                ->where('status', 'pending')
+                ->whereNotNull('expired_at')
+                ->where('expired_at', '<=', now('Asia/Jakarta'))
+                ->where(function ($q): void {
+                    $q->whereIn('gateway', ['xendit', 'midtrans'])
+                        ->orWhereIn('method', ['qris', 'transfer']);
+                })
+                ->lockForUpdate()
+                ->get();
+
+            if ($overduePendings->isNotEmpty()) {
+                $expiredPendingNow = true;
+                $lockedOrder->payments()
+                    ->whereIn('id', $overduePendings->pluck('id')->all())
+                    ->update(['status' => 'expired']);
+
+                $hasOtherActivePending = $lockedOrder->payments()
+                    ->where('status', 'pending')
+                    ->exists();
+
+                if (! $hasOtherActivePending) {
+                    if (! $lockedOrder->hasAnySettlement()) {
+                        $lockedOrder->update(['payment_status' => 'failed']);
+                    }
+                    $this->menuStockService->releaseUnsettledOrderStock($lockedOrder);
+                }
+
+                OrderStatusHistory::create([
+                    'order_id' => $lockedOrder->id,
+                    'user_id' => null,
+                    'status' => $lockedOrder->order_status,
+                    'notes' => 'Batas waktu pembayaran QRIS / digital telah kedaluwarsa.',
+                ]);
+            }
 
             if (! $forceNew) {
                 /** @var Payment|null $reusable */
@@ -254,7 +319,30 @@ class PaymentService
                         'reused' => true,
                     ];
                 }
+
+                /** @var Payment|null $latestForAttempt */
+                $latestForAttempt = $lockedOrder->payments()
+                    ->where('gateway', $resolvedGateway)
+                    ->where('method', $resolvedMethod)
+                    ->latest('id')
+                    ->first();
+
+                if (
+                    $latestForAttempt
+                    && abs((float) $latestForAttempt->amount - $unpaidBalance) < 0.01
+                    && in_array($latestForAttempt->status, ['expired', 'failed'], true)
+                ) {
+                    return [
+                        'status' => 'expired',
+                        'payment' => $latestForAttempt,
+                        'order' => $lockedOrder->fresh(['table', 'latestPayment', 'payments']) ?? $lockedOrder,
+                        'reused' => false,
+                        'expired_now' => $expiredPendingNow,
+                    ];
+                }
             }
+
+            $this->menuStockService->reserveBeforePaymentRetry($lockedOrder);
 
             // Kedaluwarsakan percobaan pending sebelumnya yang nominal/metodenya berbeda
             $lockedOrder->payments()
@@ -286,14 +374,19 @@ class PaymentService
                 ],
             ]);
 
-            $lockedOrder->update([
+            $orderResetPayload = [
                 'payment_method' => $resolvedMethod,
                 'payment_gateway' => $resolvedGateway,
                 'payment_channel' => $resolvedChannel,
                 'payment_reference' => $lockedOrder->hasAnySettlement()
                     ? ($lockedOrder->payment_reference ?: $reference)
                     : $reference,
-            ]);
+            ];
+            if ($lockedOrder->payment_status === 'failed' && ! $lockedOrder->hasAnySettlement()) {
+                $orderResetPayload['payment_status'] = 'unpaid';
+            }
+
+            $lockedOrder->update($orderResetPayload);
 
             return [
                 'status' => 'created',
@@ -306,7 +399,26 @@ class PaymentService
         if ($prep['status'] === 'already_paid') {
             return [
                 'already_paid' => true,
+                'is_expired' => false,
                 'reused' => true,
+                'order' => $prep['order'],
+                'payment' => $prep['payment'],
+                'gateway_response' => null,
+            ];
+        }
+
+        if ($prep['status'] === 'expired') {
+            if (! empty($prep['expired_now'])) {
+                try {
+                    event(new OrderStatusUpdated($prep['order'], $prep['order']->order_status, $prep['order']->order_status));
+                } catch (\Throwable) {
+                }
+            }
+
+            return [
+                'already_paid' => false,
+                'is_expired' => true,
+                'reused' => false,
                 'order' => $prep['order'],
                 'payment' => $prep['payment'],
                 'gateway_response' => null,
@@ -321,6 +433,7 @@ class PaymentService
         if ($prep['reused'] && is_array($payment->response_payload)) {
             return [
                 'already_paid' => false,
+                'is_expired' => false,
                 'reused' => true,
                 'order' => $freshOrder,
                 'payment' => $payment,
@@ -333,6 +446,7 @@ class PaymentService
         try {
             $gatewayResult = $driver->createTransaction($freshOrder, $payment, [
                 'channel' => $resolvedChannel,
+                'invoice_duration_seconds' => $invoiceDurationSeconds,
             ]);
         } catch (PaymentGatewayException $e) {
             $payment->update([
@@ -355,6 +469,7 @@ class PaymentService
 
         return [
             'already_paid' => false,
+            'is_expired' => false,
             'reused' => false,
             'order' => $freshOrder->fresh(['table', 'latestPayment']) ?? $freshOrder,
             'payment' => $payment->fresh() ?? $payment,
@@ -403,24 +518,37 @@ class PaymentService
             $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
             $previousOrderStatus = $lockedOrder->order_status;
 
-            if ($lockedOrder->payment_status === 'paid') {
+            // Kunci baris item aktif agar penambahan susulan konkuren tidak menyelip sebelum settlement selesai
+            $lockedActiveItems = $lockedOrder->items()
+                ->where('status', 'active')
+                ->lockForUpdate()
+                ->get();
+
+            if ($lockedOrder->payment_status === 'paid' && $lockedOrder->getUnpaidBalance() <= 0.01 && ! $lockedOrder->hasUnpaidActiveItems()) {
                 if ($lockedOrder->order_status === 'pending') {
                     $lockedOrder->update(['order_status' => 'processing']);
                 }
                 $alreadyPaid = true;
 
-                return $lockedOrder->fresh(['table', 'items.options', 'latestPayment']) ?? $lockedOrder;
+                return $lockedOrder->fresh(['table', 'items.options', 'items.servedByUser:id,name', 'latestPayment']) ?? $lockedOrder;
             }
 
             if (in_array($lockedOrder->order_status, ['completed', 'cancelled'], true)) {
                 throw new PaymentGatewayException("Pesanan #{$lockedOrder->order_number} berstatus {$lockedOrder->order_status} dan tidak dapat diubah pembayarannya.");
             }
 
+            if ($lockedOrder->payment_method === 'qris' || $paymentMethod === 'qris') {
+                throw new PaymentGatewayException("Pesanan #{$lockedOrder->order_number} menggunakan metode QRIS. Pembayaran dilakukan mandiri oleh pelanggan dan pesanan akan otomatis diterima setelah QRIS lunas.");
+            }
+
             $this->ensureLegacySettlementLedgered($lockedOrder);
             $this->menuStockService->confirmOrderStock($lockedOrder);
 
             $previouslySettled = $lockedOrder->getSettledAmount();
-            $expectedTotal = (float) $lockedOrder->total_amount;
+            $itemsTotal = $lockedActiveItems->isNotEmpty()
+                ? (float) $lockedActiveItems->sum('total_price')
+                : (float) $lockedOrder->total_amount;
+            $expectedTotal = max((float) $lockedOrder->total_amount, $itemsTotal);
             $remainingDue = max(0.0, $expectedTotal - $previouslySettled);
             $newOrderStatus = $lockedOrder->order_status === 'pending' ? 'processing' : $lockedOrder->order_status;
             $rawCashInput = isset($payload['cash_received']) ? (float) $payload['cash_received'] : null;
@@ -509,6 +637,8 @@ class PaymentService
             }
 
             $lockedOrder->update([
+                'subtotal' => $expectedTotal,
+                'total_amount' => $expectedTotal,
                 'payment_status' => 'paid',
                 'payment_method' => $paymentMethod,
                 'payment_gateway' => $resolvedGateway,
@@ -521,8 +651,15 @@ class PaymentService
                 'order_status' => $newOrderStatus,
             ]);
 
+            $this->allocatePaidStatusToActiveItems(
+                $lockedOrder,
+                $settledPayment,
+                $expectedTotal,
+                true,
+                $nowWib,
+            );
+
             $methodLabel = match ($paymentMethod) {
-                'qris' => 'QRIS',
                 'transfer' => 'Transfer Bank',
                 'debit' => 'Kartu Debit',
                 default => 'Tunai',
@@ -548,7 +685,7 @@ class PaymentService
                 'notes' => $notes,
             ]);
 
-            return $lockedOrder->fresh(['table', 'items.options', 'latestPayment']) ?? $lockedOrder;
+            return $lockedOrder->fresh(['table', 'items.options', 'items.servedByUser:id,name', 'latestPayment']) ?? $lockedOrder;
         });
 
         if (! $alreadyPaid) {
@@ -586,6 +723,21 @@ class PaymentService
         $txStatus = strtolower(trim((string) ($normalized['status'] ?? '')));
         $grossAmount = (float) ($normalized['amount'] ?? 0);
 
+        if ($gatewaySource === 'xendit' && $externalId === '' && $orderNumber === '') {
+            Log::info('Xendit webhook ping terverifikasi tanpa referensi pesanan (diabaikan).', [
+                'gateway' => $gatewaySource,
+                'status' => $txStatus,
+            ]);
+
+            return [
+                'http_status' => 200,
+                'status' => 'ok',
+                'already_processed' => false,
+                'message' => 'Webhook Xendit terverifikasi (ping uji koneksi diterima).',
+                'order' => null,
+            ];
+        }
+
         if (($externalId === '' && $orderNumber === '') || $txStatus === '') {
             return [
                 'http_status' => 422,
@@ -614,6 +766,8 @@ class PaymentService
                 if ($externalId !== '') {
                     $targetPayment = Payment::where('payment_reference', $externalId)
                         ->orWhere('external_id', $externalId)
+                        ->orderByRaw("CASE WHEN status = 'pending' THEN 0 ELSE 1 END")
+                        ->latest('id')
                         ->lockForUpdate()
                         ->first();
                 }
@@ -630,6 +784,25 @@ class PaymentService
                 }
 
                 if (! $order) {
+                    if ($gatewaySource === 'xendit') {
+                        Log::info('Xendit webhook terverifikasi tetapi referensi tidak ditemukan di SideOrder (uji Test & Save atau transaksi eksternal).', [
+                            'external_id' => $externalId,
+                            'order_number' => $orderNumber,
+                            'status' => $txStatus,
+                        ]);
+
+                        return [
+                            'http_status' => 200,
+                            'status' => 'ok',
+                            'already_processed' => false,
+                            'message' => 'Webhook Xendit terverifikasi (transaksi uji atau di luar SideOrder diabaikan).',
+                            'order' => null,
+                            'dispatch_event' => false,
+                            'prev_status' => '',
+                            'new_status' => '',
+                        ];
+                    }
+
                     return [
                         'http_status' => 404,
                         'status' => 'error',
@@ -644,6 +817,11 @@ class PaymentService
 
                 $this->ensureLegacySettlementLedgered($order);
 
+                $lockedActiveItems = $order->items()
+                    ->where('status', 'active')
+                    ->lockForUpdate()
+                    ->get();
+
                 $resolvedMethod = strtolower(trim((string) ($normalized['method'] ?? ($targetPayment !== null ? $targetPayment->method : null) ?? $order->payment_method ?? 'qris')));
                 if (! in_array($resolvedMethod, ['cash', 'qris', 'transfer', 'debit'], true)) {
                     $resolvedMethod = 'qris';
@@ -654,7 +832,23 @@ class PaymentService
                 $rawPayload = is_array($normalized['raw'] ?? null) ? $normalized['raw'] : [];
 
                 if (in_array($txStatus, ['paid', 'settlement', 'capture', 'completed', 'succeeded'], true)) {
-                    if (($targetPayment && $targetPayment->isPaid()) || ($targetPayment === null && $order->payment_status === 'paid')) {
+                    $hasUnpaidItems = $lockedActiveItems->contains(fn (OrderItem $item): bool => ! $item->isPaid());
+
+                    // Jika webhook menggunakan fallback order_number yang dulu sempat tersimpan di pembayaran awal,
+                    // jangan blokir pembayaran susulan baru selama ID transaksi gateway-nya berbeda dan masih ada tagihan belum bayar.
+                    if (
+                        $targetPayment
+                        && $targetPayment->isPaid()
+                        && $externalId === $order->order_number
+                        && $targetPayment->payment_reference !== $externalId
+                        && $gatewayTxId !== ''
+                        && $targetPayment->gateway_transaction_id !== $gatewayTxId
+                        && ($order->getUnpaidBalance() > 0.01 || $hasUnpaidItems)
+                    ) {
+                        $targetPayment = null;
+                    }
+
+                    if (($targetPayment && $targetPayment->isPaid()) || ($targetPayment === null && $order->payment_status === 'paid' && $order->getUnpaidBalance() <= 0.01 && ! $hasUnpaidItems)) {
                         return [
                             'http_status' => 200,
                             'status' => 'ok',
@@ -680,9 +874,10 @@ class PaymentService
                         ];
                     }
 
+                    $unpaidItemsSum = (float) $lockedActiveItems->where('payment_status', '!=', OrderItem::PAYMENT_PAID)->sum('total_price');
                     $expectedAmount = $targetPayment
                         ? (float) $targetPayment->amount
-                        : ($order->getUnpaidBalance() > 0 ? $order->getUnpaidBalance() : (float) $order->total_amount);
+                        : ($order->getUnpaidBalance() > 0 ? max($order->getUnpaidBalance(), $unpaidItemsSum) : (float) $order->total_amount);
 
                     if ($grossAmount <= 0 || abs($grossAmount - $expectedAmount) > 0.01) {
                         return [
@@ -731,7 +926,7 @@ class PaymentService
                             'change_amount' => 0.0,
                             'fee_amount' => 0.0,
                             'status' => 'paid',
-                            'external_id' => $externalId !== '' ? $externalId : $order->order_number,
+                            'external_id' => $externalId !== '' ? $externalId : $ref,
                             'gateway_transaction_id' => $gatewayTxId,
                             'webhook_payload' => $rawPayload,
                             'paid_at' => $paidAt,
@@ -739,11 +934,16 @@ class PaymentService
                     }
 
                     $totalPaidSum = (float) $order->paidPayments()->sum('settled_amount');
-                    $orderTotal = (float) $order->total_amount;
+                    $itemsTotal = $lockedActiveItems->isNotEmpty()
+                        ? (float) $lockedActiveItems->sum('total_price')
+                        : (float) $order->total_amount;
+                    $orderTotal = max((float) $order->total_amount, $itemsTotal);
                     $isFullySettled = $totalPaidSum >= ($orderTotal - 0.01);
 
                     $previousOrderStatus = $order->order_status;
-                    $newOrderStatus = $order->order_status === 'pending' ? 'processing' : $order->order_status;
+                    $newOrderStatus = ($isFullySettled && $order->order_status === 'pending')
+                        ? 'processing'
+                        : $order->order_status;
 
                     if ($isFullySettled) {
                         $order->payments()
@@ -753,6 +953,8 @@ class PaymentService
                     }
 
                     $order->update([
+                        'subtotal' => $orderTotal,
+                        'total_amount' => $orderTotal,
                         'payment_status' => $isFullySettled ? 'paid' : 'unpaid',
                         'payment_method' => $resolvedMethod,
                         'payment_gateway' => $gatewaySource,
@@ -764,8 +966,16 @@ class PaymentService
                         'order_status' => $newOrderStatus,
                     ]);
 
+                    $this->allocatePaidStatusToActiveItems(
+                        $order,
+                        $targetPayment,
+                        $totalPaidSum,
+                        $isFullySettled,
+                        $paidAt,
+                    );
+
                     $gatewayLabel = $gatewaySource === 'xendit'
-                        ? 'Xendit Payment Gateway'
+                        ? 'Pembayaran Digital'
                         : ($gatewaySource === 'midtrans' ? 'Midtrans Snap' : 'Gateway');
 
                     OrderStatusHistory::create([
@@ -780,7 +990,7 @@ class PaymentService
                         'status' => 'ok',
                         'already_processed' => false,
                         'message' => 'Pembayaran berhasil diverifikasi.',
-                        'order' => $order->fresh(['table', 'latestPayment']),
+                        'order' => $order->fresh(['table', 'items.options', 'items.servedByUser:id,name', 'latestPayment']),
                         'dispatch_event' => true,
                         'prev_status' => $previousOrderStatus,
                         'new_status' => $newOrderStatus,
@@ -920,11 +1130,116 @@ class PaymentService
     }
 
     /**
-     * Rekonsiliasi status transaksi pending ke API gateway aktif (Xendit / Midtrans) dengan caching 5 detik.
+     * Kedaluwarsakan otomatis transaksi pembayaran digital (QRIS / gateway) yang sudah melewati `expired_at`
+     * dan kembalikan stok menu terbatas yang masih berstatus reserved.
+     */
+    public function expireOverduePendingPayments(?Order $targetOrder = null): bool
+    {
+        $now = now('Asia/Jakarta');
+
+        $query = Payment::query()
+            ->with('order')
+            ->where('status', 'pending')
+            ->whereNotNull('expired_at')
+            ->where('expired_at', '<=', $now)
+            ->where(function ($q): void {
+                $q->whereIn('gateway', ['xendit', 'midtrans'])
+                    ->orWhereIn('method', ['qris', 'transfer']);
+            });
+
+        if ($targetOrder !== null) {
+            $query->where('order_id', $targetOrder->id);
+        }
+
+        $overduePayments = $query->orderBy('id')->get();
+        if ($overduePayments->isEmpty()) {
+            return false;
+        }
+
+        $didChange = false;
+
+        foreach ($overduePayments as $pendingPayment) {
+            /** @var Order|null $order */
+            $order = $pendingPayment->order;
+            if (! $order || $order->order_status === 'cancelled') {
+                continue;
+            }
+
+            if (in_array($pendingPayment->gateway, ['xendit', 'midtrans'], true)) {
+                $driver = $this->driver($pendingPayment->gateway);
+                if ($driver->isConfigured()) {
+                    $cacheKey = 'gateway_status_check_'.$pendingPayment->payment_reference;
+                    /** @var array<string, mixed>|null $gatewayStatus */
+                    $gatewayStatus = Cache::remember($cacheKey, 5, fn () => $driver->checkTransactionStatus($pendingPayment));
+
+                    if (is_array($gatewayStatus) && ($gatewayStatus['normalized_status'] ?? null) === 'paid') {
+                        $paidRes = $this->processGatewayCallback([
+                            'external_id' => $pendingPayment->payment_reference ?: $order->order_number,
+                            'order_number' => $order->order_number,
+                            'payment_reference' => $pendingPayment->payment_reference ?: $order->order_number,
+                            'gateway_transaction_id' => (string) ($gatewayStatus['gateway_transaction_id'] ?? ('GW-'.$order->order_number)),
+                            'status' => 'paid',
+                            'amount' => (float) ($gatewayStatus['amount'] ?? $pendingPayment->amount),
+                            'method' => $pendingPayment->method ?: ($order->payment_method ?: 'qris'),
+                            'channel' => (string) ($gatewayStatus['channel'] ?? $pendingPayment->channel ?? 'QRIS'),
+                            'paid_at' => null,
+                            'raw' => is_array($gatewayStatus['raw'] ?? null) ? $gatewayStatus['raw'] : $gatewayStatus,
+                        ], $pendingPayment->gateway);
+
+                        if (! $paidRes['already_processed']) {
+                            $didChange = true;
+                        }
+
+                        continue;
+                    }
+                }
+            }
+
+            $expiredRes = $this->processGatewayCallback([
+                'external_id' => $pendingPayment->payment_reference ?: $order->order_number,
+                'order_number' => $order->order_number,
+                'payment_reference' => $pendingPayment->payment_reference ?: $order->order_number,
+                'gateway_transaction_id' => $pendingPayment->gateway_transaction_id ?: ('EXP-'.$pendingPayment->payment_reference),
+                'status' => 'expired',
+                'amount' => (float) $pendingPayment->amount,
+                'method' => $pendingPayment->method ?: ($order->payment_method ?: 'qris'),
+                'channel' => (string) ($pendingPayment->channel ?: $this->resolveDefaultChannelForMethod($pendingPayment->method ?: 'qris')),
+                'paid_at' => null,
+                'raw' => [
+                    'auto_expired' => true,
+                    'expired_at' => $pendingPayment->expired_at?->toIso8601String(),
+                ],
+            ], $pendingPayment->gateway ?: 'xendit');
+
+            if (! $expiredRes['already_processed']) {
+                $didChange = true;
+            }
+        }
+
+        return $didChange;
+    }
+
+    /**
+     * Rekonsiliasi status transaksi pending ke API gateway aktif (Xendit / Midtrans) serta kedaluwarsa lokal.
      */
     public function syncPaymentStatus(Order $order): Order
     {
-        if ($order->payment_status === 'paid' || $order->order_status === 'cancelled') {
+        if (
+            $order->order_status === 'cancelled'
+            || ($order->payment_status === 'paid' && $order->getUnpaidBalance() <= 0.01 && ! $order->hasUnpaidActiveItems())
+        ) {
+            return $order;
+        }
+
+        $didExpireOrSettle = $this->expireOverduePendingPayments($order);
+        if ($didExpireOrSettle) {
+            $order = $order->fresh(['table', 'items.options', 'items.rejectedByUser:id,name', 'items.servedByUser:id,name', 'statusHistories', 'latestPayment', 'payments']) ?? $order;
+        }
+
+        if (
+            $order->order_status === 'cancelled'
+            || ($order->payment_status === 'paid' && $order->getUnpaidBalance() <= 0.01 && ! $order->hasUnpaidActiveItems())
+        ) {
             return $order;
         }
 
@@ -980,9 +1295,11 @@ class PaymentService
                 'paid_at' => null,
                 'raw' => is_array($gatewayStatus['raw'] ?? null) ? $gatewayStatus['raw'] : $gatewayStatus,
             ], $gatewayName);
+
+            return $order->fresh(['table', 'items.options', 'items.rejectedByUser:id,name', 'items.servedByUser:id,name', 'statusHistories', 'latestPayment', 'payments']) ?? $order;
         }
 
-        return $order->fresh(['table', 'items.options', 'latestPayment']) ?? $order;
+        return $order;
     }
 
     /**
@@ -1084,5 +1401,60 @@ class PaymentService
         } while (Payment::where('payment_reference', $candidate)->exists());
 
         return $candidate;
+    }
+
+    /**
+     * Tandai status pembayaran pada baris `order_items` secara deterministik:
+     * - Jika seluruh tagihan pesanan lunas: seluruh item aktif ditandai `paid`.
+     * - Jika baru sebagian terbayar (misal susulan masuk bersamaan): alokasi berurutan berdasarkan batch & ID.
+     */
+    private function allocatePaidStatusToActiveItems(
+        Order $order,
+        ?Payment $settledPayment,
+        float $totalPaidAmount,
+        bool $isFullySettled,
+        CarbonInterface $paidAt
+    ): void {
+        if ($isFullySettled) {
+            $order->items()
+                ->where('status', 'active')
+                ->where('payment_status', '!=', OrderItem::PAYMENT_PAID)
+                ->update([
+                    'payment_status' => OrderItem::PAYMENT_PAID,
+                    'payment_id' => $settledPayment?->id,
+                    'paid_at' => $paidAt,
+                ]);
+
+            return;
+        }
+
+        $activeItems = $order->items()
+            ->where('status', 'active')
+            ->orderBy('batch_number', 'asc')
+            ->orderBy('id', 'asc')
+            ->get();
+
+        $alreadyPaidTotal = (float) $activeItems
+            ->where('payment_status', OrderItem::PAYMENT_PAID)
+            ->sum('total_price');
+        $remainingBudget = max(0.0, $totalPaidAmount - $alreadyPaidTotal);
+
+        foreach ($activeItems as $item) {
+            if ($item->isPaid()) {
+                continue;
+            }
+
+            $itemTotal = (float) $item->total_price;
+            if ($remainingBudget + 0.01 >= $itemTotal) {
+                $remainingBudget = max(0.0, $remainingBudget - $itemTotal);
+                $item->update([
+                    'payment_status' => OrderItem::PAYMENT_PAID,
+                    'payment_id' => $settledPayment?->id,
+                    'paid_at' => $paidAt,
+                ]);
+            } else {
+                break;
+            }
+        }
     }
 }

@@ -53,7 +53,7 @@ export function NavMain({ items }: { items: ExtendedNavItem[] }) {
                                         </span>
                                     </div>
                                     {item.badge && (
-                                        <span className="shrink-0 rounded-full bg-[#C52828] px-2 py-0.5 text-[10px] font-extrabold tracking-wide text-white shadow-2xs">
+                                        <span className="shrink-0 rounded-md bg-[#C52828] px-2 py-0.5 text-[10px] font-extrabold tracking-wide text-white shadow-2xs">
                                             {item.badge}
                                         </span>
                                     )}

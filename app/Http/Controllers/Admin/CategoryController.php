@@ -13,18 +13,11 @@ use Inertia\Response;
 class CategoryController extends Controller
 {
     /**
-     * Menampilkan daftar seluruh kategori.
+     * Alihkan daftar kategori ke tab terintegrasi di Manajemen Menu, Kategori & HPP.
      */
-    public function index(): Response
+    public function index(): RedirectResponse
     {
-        $categories = Category::withCount('menus')
-            ->orderBy('sort_order', 'asc')
-            ->orderBy('name', 'asc')
-            ->get();
-
-        return Inertia::render('admin/categories/index', [
-            'categories' => $categories,
-        ]);
+        return redirect()->route('admin.menus.index', ['tab' => 'categories']);
     }
 
     /**

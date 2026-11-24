@@ -52,9 +52,12 @@ class PaymentController extends Controller
         /** @var array<string, mixed>|null $gatewayResponse */
         $gatewayResponse = $result['gateway_response'];
 
+        $isExpired = (bool) ($result['is_expired'] ?? false);
+
         return response()->json([
             'success' => true,
             'already_paid' => $result['already_paid'],
+            'is_expired' => $isExpired,
             'reused' => $result['reused'],
             'gateway' => $this->paymentService->getPublicGatewayConfig(),
             'payment' => $payment ? $this->serializePublicPayment($payment, $gatewayResponse) : null,
@@ -87,11 +90,17 @@ class PaymentController extends Controller
 
         /** @var Payment|null $latestPayment */
         $latestPayment = $syncedOrder->latestPayment;
+        $isExpired = $syncedOrder->payment_status !== 'paid'
+            && (
+                $syncedOrder->payment_status === 'failed'
+                || ($latestPayment && in_array($latestPayment->status, ['expired', 'failed'], true))
+            );
 
         return response()->json([
             'success' => true,
             'order_number' => $syncedOrder->order_number,
             'is_paid' => $syncedOrder->payment_status === 'paid',
+            'is_expired' => $isExpired,
             'payment_status' => $syncedOrder->payment_status,
             'order_status' => $syncedOrder->order_status,
             'payment_method' => $syncedOrder->payment_method,

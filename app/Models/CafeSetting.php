@@ -12,6 +12,13 @@ use Illuminate\Support\Carbon;
  * @property int $id
  * @property string $cafe_name
  * @property string|null $address
+ * @property string|null $phone
+ * @property string|null $receipt_footer
+ * @property bool $is_ordering_enabled
+ * @property string|null $closed_message
+ * @property bool $allow_cash_payment
+ * @property bool $allow_xendit_payment
+ * @property int $payment_expiry_minutes
  * @property bool $is_location_restricted
  * @property float|null $latitude
  * @property float|null $longitude
@@ -29,9 +36,22 @@ class CafeSetting extends Model
 
     public const int MAX_RADIUS_METERS = 10000;
 
+    public const int DEFAULT_PAYMENT_EXPIRY_MINUTES = 15;
+
+    public const int MIN_PAYMENT_EXPIRY_MINUTES = 5;
+
+    public const int MAX_PAYMENT_EXPIRY_MINUTES = 120;
+
     protected $fillable = [
         'cafe_name',
         'address',
+        'phone',
+        'receipt_footer',
+        'is_ordering_enabled',
+        'closed_message',
+        'allow_cash_payment',
+        'allow_xendit_payment',
+        'payment_expiry_minutes',
         'is_location_restricted',
         'latitude',
         'longitude',
@@ -45,6 +65,10 @@ class CafeSetting extends Model
     protected function casts(): array
     {
         return [
+            'is_ordering_enabled' => 'boolean',
+            'allow_cash_payment' => 'boolean',
+            'allow_xendit_payment' => 'boolean',
+            'payment_expiry_minutes' => 'integer',
             'is_location_restricted' => 'boolean',
             'latitude' => 'float',
             'longitude' => 'float',
@@ -67,6 +91,13 @@ class CafeSetting extends Model
         return self::query()->create([
             'cafe_name' => 'Café SIDE LINE',
             'address' => null,
+            'phone' => null,
+            'receipt_footer' => 'Terima kasih atas kunjungan Anda! Nikmati momen hangat di SIDE LINE.',
+            'is_ordering_enabled' => true,
+            'closed_message' => 'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
+            'allow_cash_payment' => true,
+            'allow_xendit_payment' => true,
+            'payment_expiry_minutes' => self::DEFAULT_PAYMENT_EXPIRY_MINUTES,
             'is_location_restricted' => false,
             'latitude' => null,
             'longitude' => null,
