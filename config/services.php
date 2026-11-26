@@ -35,25 +35,4 @@ return [
         ],
     ],
 
-    'xendit' => [
-        'secret_key' => env('XENDIT_SECRET_KEY'),
-        'webhook_token' => env('XENDIT_WEBHOOK_TOKEN'),
-        'base_url' => env('XENDIT_BASE_URL', 'https://api.xendit.co'),
-        'is_production' => (bool) env('XENDIT_IS_PRODUCTION', false),
-    ],
-
-    'midtrans' => [
-        'server_key' => env('MIDTRANS_SERVER_KEY'),
-        'client_key' => env('MIDTRANS_CLIENT_KEY'),
-        'is_production' => (bool) env('MIDTRANS_IS_PRODUCTION', false),
-        'is_sanitized' => true,
-        'is_3ds' => true,
-    ],
-
-    'payment_gateway' => [
-        'default_driver' => env('PAYMENT_GATEWAY_DRIVER', 'xendit'),
-        'webhook_secret' => env('PAYMENT_WEBHOOK_SECRET'),
-        'invoice_duration_seconds' => 900,
-    ],
-
 ];

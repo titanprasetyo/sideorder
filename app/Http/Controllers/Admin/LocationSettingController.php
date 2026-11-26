@@ -108,7 +108,7 @@ class LocationSettingController extends Controller
                     'gateway_transaction_id' => $p->gateway_transaction_id,
                     'paid_at' => $p->paid_at ? Carbon::parse($p->paid_at)->timezone(self::TIMEZONE)->format('d M Y, H:i').' WIB' : null,
                     'created_at' => Carbon::parse($p->created_at)->timezone(self::TIMEZONE)->format('d M Y, H:i').' WIB',
-                    'actor_name' => $p->confirmedByUser?->name ?? ($p->gateway === 'xendit' ? 'Webhook / Gateway' : 'Sistem'),
+                    'actor_name' => $p->confirmedByUser?->name ?? ($p->gateway === 'manual' ? 'Sistem' : 'Gateway Digital'),
                 ];
             })
             ->values()
@@ -118,7 +118,7 @@ class LocationSettingController extends Controller
             'paid_count' => Payment::where('status', 'paid')->count(),
             'pending_count' => Payment::where('status', 'pending')->count(),
             'failed_or_expired_count' => Payment::whereIn('status', ['failed', 'expired'])->count(),
-            'xendit_paid_count' => Payment::where('gateway', 'xendit')->where('status', 'paid')->count(),
+            'digital_paid_count' => Payment::where('gateway', '!=', 'manual')->where('status', 'paid')->count(),
         ];
 
         // Log Audit Aktivitas Operasional & Penolakan Item Terbaru
@@ -181,7 +181,7 @@ class LocationSettingController extends Controller
                 'is_ordering_enabled' => (bool) $setting->is_ordering_enabled,
                 'closed_message' => $setting->closed_message,
                 'allow_cash_payment' => (bool) $setting->allow_cash_payment,
-                'allow_xendit_payment' => (bool) $setting->allow_xendit_payment,
+                'allow_digital_payment' => false,
                 'payment_expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
                 'min_payment_expiry_minutes' => CafeSetting::MIN_PAYMENT_EXPIRY_MINUTES,
                 'max_payment_expiry_minutes' => CafeSetting::MAX_PAYMENT_EXPIRY_MINUTES,
@@ -251,9 +251,7 @@ class LocationSettingController extends Controller
             'allow_cash_payment' => $request->has('allow_cash_payment')
                 ? $request->boolean('allow_cash_payment')
                 : (bool) $setting->allow_cash_payment,
-            'allow_xendit_payment' => $request->has('allow_xendit_payment')
-                ? $request->boolean('allow_xendit_payment')
-                : (bool) $setting->allow_xendit_payment,
+            'allow_xendit_payment' => false,
             'payment_expiry_minutes' => $request->has('payment_expiry_minutes')
                 ? (int) $validated['payment_expiry_minutes']
                 : (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),

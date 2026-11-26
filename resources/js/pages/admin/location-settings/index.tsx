@@ -54,7 +54,7 @@ interface CafeSystemSetting {
     is_ordering_enabled: boolean;
     closed_message: string | null;
     allow_cash_payment: boolean;
-    allow_xendit_payment: boolean;
+    allow_digital_payment?: boolean;
     payment_expiry_minutes: number;
     min_payment_expiry_minutes: number;
     max_payment_expiry_minutes: number;
@@ -77,14 +77,14 @@ interface GatewayConfigInfo {
     is_ready?: boolean;
     mode: string;
     supported_channels: string[];
-    webhook_endpoint: string;
+    webhook_endpoint: string | null;
 }
 
 interface GatewayStats {
     paid_count: number;
     pending_count: number;
     failed_or_expired_count: number;
-    xendit_paid_count: number;
+    digital_paid_count: number;
 }
 
 interface RecentPaymentLog {
@@ -189,9 +189,6 @@ export default function LocationSettingsPage({
     // State: Kebijakan Pembayaran & Gateway
     const [allowCashPayment, setAllowCashPayment] = useState<boolean>(
         setting.allow_cash_payment ?? true,
-    );
-    const [allowXenditPayment, setAllowXenditPayment] = useState<boolean>(
-        setting.allow_xendit_payment ?? true,
     );
     const [expiryMinutesInput, setExpiryMinutesInput] = useState<string>(
         String(setting.payment_expiry_minutes ?? 15),
@@ -312,9 +309,9 @@ export default function LocationSettingsPage({
             return;
         }
 
-        if (!allowCashPayment && !allowXenditPayment) {
+        if (!allowCashPayment) {
             toast.error(
-                'Minimal satu metode pembayaran (Tunai atau QRIS) harus diaktifkan.',
+                'Pembayaran tunai di kasir harus tetap aktif selama integrasi payment gateway belum tersedia.',
             );
             handleTabChange('gateway');
             return;
@@ -333,7 +330,6 @@ export default function LocationSettingsPage({
                 is_ordering_enabled: setting.is_ordering_enabled ?? true,
                 closed_message: setting.closed_message || null,
                 allow_cash_payment: allowCashPayment,
-                allow_xendit_payment: allowXenditPayment,
                 payment_expiry_minutes: Number.isNaN(expiryNum)
                     ? 15
                     : Math.min(
@@ -949,20 +945,27 @@ export default function LocationSettingsPage({
                                     </div>
 
                                     <ToggleField
-                                        id="allow_xendit_payment"
-                                        checked={allowXenditPayment}
-                                        onChange={setAllowXenditPayment}
-                                        label="Izinkan Pembayaran Digital (QRIS)"
-                                        description="Pelanggan dapat membayar langsung dari meja via QRIS dinamis."
-                                    />
-
-                                    <ToggleField
                                         id="allow_cash_payment"
                                         checked={allowCashPayment}
                                         onChange={setAllowCashPayment}
                                         label="Izinkan Pembayaran Tunai di Kasir"
-                                        description="Pelanggan memesan lewat QR lalu membayar uang tunai ke kasir."
+                                        description="Pelanggan memesan lewat QR meja lalu membayar uang tunai ke kasir."
                                     />
+
+                                    <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-950">
+                                        <p className="font-extrabold">
+                                            Pembayaran Digital (Payment Gateway)
+                                            Belum Aktif
+                                        </p>
+                                        <p className="mt-1 text-[11px] leading-relaxed text-amber-900">
+                                            Integrasi payment gateway saat ini
+                                            sedang dibersihkan dan menunggu
+                                            implementasi Midtrans sesuai
+                                            dokumentasi resmi yang akan
+                                            digunakan. Untuk sementara seluruh
+                                            pesanan menggunakan Tunai di Kasir.
+                                        </p>
+                                    </div>
 
                                     <FieldError
                                         message={errors.allow_cash_payment}
@@ -1038,80 +1041,21 @@ export default function LocationSettingsPage({
                                     <div className="flex items-center justify-between gap-2 border-b border-[#EFE5CF] pb-3">
                                         <div>
                                             <h2 className="text-sm font-extrabold text-[#18181B]">
-                                                Koneksi Payment Gateway (
+                                                Status Payment Gateway (
                                                 {gatewayConfig?.label ??
-                                                    'Pembayaran Digital'}
+                                                    'Kasir POS (Tunai)'}
                                                 )
                                             </h2>
                                             <p className="text-[11px] text-[#78716C]">
-                                                Endpoint webhook:{' '}
-                                                <code className="font-mono font-bold text-[#18181B]">
-                                                    {gatewayConfig?.webhook_endpoint ??
-                                                        '/payments/webhook'}
-                                                </code>
+                                                Integrasi payment gateway
+                                                eksternal belum dipasang
+                                                (menunggu dokumentasi Midtrans).
                                             </p>
                                         </div>
-                                        <StatusPill
-                                            tone={
-                                                (gatewayConfig?.is_ready ??
-                                                gatewayConfig?.is_configured)
-                                                    ? 'success'
-                                                    : 'warning'
-                                            }
-                                        >
-                                            {gatewayConfig?.mode ??
-                                                'sandbox_slot'}
+                                        <StatusPill tone="neutral">
+                                            Mode Tunai POS
                                         </StatusPill>
                                     </div>
-
-                                    {gatewayConfig?.driver === 'xendit' && (
-                                        <div className="space-y-2 rounded-xl border border-[#EFE5CF] bg-[#FAF6EC]/70 p-3.5 text-xs">
-                                            <p className="font-extrabold text-[#18181B]">
-                                                Status Kredensial Xendit (.env
-                                                Server)
-                                            </p>
-                                            <div className="flex flex-wrap gap-2">
-                                                <StatusPill
-                                                    tone={
-                                                        gatewayConfig.is_configured
-                                                            ? 'success'
-                                                            : 'warning'
-                                                    }
-                                                >
-                                                    API Secret Key:{' '}
-                                                    {gatewayConfig.is_configured
-                                                        ? 'Terisi'
-                                                        : 'Belum Diisi'}
-                                                </StatusPill>
-                                                <StatusPill
-                                                    tone={
-                                                        gatewayConfig.is_webhook_configured
-                                                            ? 'success'
-                                                            : 'warning'
-                                                    }
-                                                >
-                                                    Webhook Token:{' '}
-                                                    {gatewayConfig.is_webhook_configured
-                                                        ? 'Terisi'
-                                                        : 'Belum Diisi'}
-                                                </StatusPill>
-                                            </div>
-                                            {gatewayConfig.is_configured &&
-                                                !gatewayConfig.is_webhook_configured && (
-                                                    <p className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-2 text-[11px] font-semibold text-amber-900">
-                                                        Perhatian:{' '}
-                                                        <code className="font-mono font-bold">
-                                                            XENDIT_WEBHOOK_TOKEN
-                                                        </code>{' '}
-                                                        belum diisi. Callback
-                                                        otomatis dari Xendit
-                                                        akan ditolak (HTTP 401)
-                                                        sampai token diisi di
-                                                        environment server.
-                                                    </p>
-                                                )}
-                                        </div>
-                                    )}
 
                                     {gatewayStats && (
                                         <div className="grid grid-cols-2 gap-3 text-xs">
@@ -1124,7 +1068,7 @@ export default function LocationSettingsPage({
                                                     <span className="text-xs font-bold text-[#78716C]">
                                                         (
                                                         {
-                                                            gatewayStats.xendit_paid_count
+                                                            gatewayStats.digital_paid_count
                                                         }{' '}
                                                         Digital)
                                                     </span>

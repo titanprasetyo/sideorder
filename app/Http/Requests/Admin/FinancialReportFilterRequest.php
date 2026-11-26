@@ -37,7 +37,7 @@ class FinancialReportFilterRequest extends FormRequest
             'payment_status' => ['nullable', 'string', 'in:all,paid,unpaid,failed,refunded'],
             'order_status' => ['nullable', 'string', 'in:all,pending,processing,ready,completed,cancelled'],
             'payment_method' => ['nullable', 'string', 'in:all,cash,qris,transfer,debit'],
-            'payment_gateway' => ['nullable', 'string', 'in:all,xendit,midtrans,manual'],
+            'payment_gateway' => ['nullable', 'string', 'in:all,digital,manual'],
             'sort_by' => ['nullable', 'string', 'in:transaction_date,total_amount,order_number,created_at'],
             'sort_dir' => ['nullable', 'string', 'in:asc,desc'],
             'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],

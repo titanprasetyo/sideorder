@@ -395,7 +395,7 @@ test('partial item serving moves order into cashier and admin ready views and au
     $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Budi Multi Menu',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
         'items' => [
             ['menu_id' => $this->menuCroissant->id, 'quantity' => 1, 'selected_option_ids' => []],
             ['menu_id' => $this->menuCoffee->id, 'quantity' => 1, 'selected_option_ids' => []],
@@ -404,10 +404,12 @@ test('partial item serving moves order into cashier and admin ready views and au
 
     $order = Order::with('items')->latest('id')->firstOrFail();
 
-    // Pelanggan menyelesaikan QRIS -> otomatis diterima masuk ke processing & lunas
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk();
+    // Kasir mengonfirmasi pembayaran tunai -> masuk ke processing & lunas
+    $this->actingAs($this->cashier)
+        ->postJson(route('cashier.orders.confirm-payment', $order), [
+            'payment_method' => 'cash',
+            'cash_received' => 50000,
+        ])->assertOk();
 
     $items = $order->items()->orderBy('id')->get();
     $firstItem = $items[0];
@@ -503,76 +505,37 @@ test('checking all paid batch items does not auto-promote order to ready while u
         ->and($order->fresh()->payment_status)->toBe('unpaid');
 });
 
-test('cashier cannot manually confirm or accept unpaid qris orders until customer settles qris which auto-accepts to processing', function () {
+test('cashier cannot manually confirm unpaid legacy qris order until customer switches it to cash', function () {
     Event::fake([OrderStatusUpdated::class]);
 
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'customer_name' => 'Dina QRIS',
-        'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $this->menuCoffee->id, 'quantity' => 2, 'selected_option_ids' => []],
-        ],
-    ])->assertRedirect();
-
-    $order = Order::latest('id')->firstOrFail();
-    expect($order->order_status)->toBe('pending')
-        ->and($order->payment_status)->toBe('unpaid')
-        ->and($order->payment_method)->toBe('qris');
-
-    // 1. Kasir tidak boleh mengonfirmasi pembayaran manual saat metode pesanan adalah QRIS yang belum dibayar
-    $this->actingAs($this->cashier)
-        ->postJson(route('cashier.orders.confirm-payment', $order), [
-            'payment_method' => 'cash',
-            'cash_received' => 50000,
-        ])
-        ->assertStatus(422)
-        ->assertJsonPath('success', false);
-
-    $this->actingAs($this->cashier)
-        ->postJson(route('cashier.orders.confirm-payment', $order), [
-            'payment_method' => 'qris',
-        ])
-        ->assertStatus(422)
-        ->assertJsonPath('success', false);
-
-    // 2. Kasir tidak boleh memajukan status pesanan QRIS sebelum pelanggan melunasi QRIS
-    $this->actingAs($this->cashier)
-        ->postJson(route('cashier.orders.update-status', $order), [
-            'status' => 'processing',
-        ])
-        ->assertStatus(422)
-        ->assertJsonPath('success', false);
-
-    $order->refresh();
-    expect($order->order_status)->toBe('pending')
-        ->and($order->payment_status)->toBe('unpaid');
-
-    // 3. Pelanggan melunasi QRIS -> otomatis lunas & diterima langsung masuk ke 'processing' (Sedang Diracik)
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk()
-        ->assertJsonPath('status', 'paid')
-        ->assertJsonPath('order_status', 'processing');
-
-    $order->refresh();
-    expect($order->payment_status)->toBe('paid')
-        ->and($order->order_status)->toBe('processing');
-});
-
-test('cashier can confirm cash payment only after customer order is cash or switched from qris to cash', function () {
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
+    $order = Order::create([
+        'cafe_table_id' => $this->table->id,
         'customer_name' => 'Rama Switch',
+        'subtotal' => 25000,
+        'total_amount' => 25000,
+        'order_status' => 'pending',
+        'payment_status' => 'unpaid',
         'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $this->menuCroissant->id, 'quantity' => 1, 'selected_option_ids' => []],
-        ],
-    ])->assertRedirect();
+        'payment_gateway' => 'digital',
+    ]);
 
-    $order = Order::latest('id')->firstOrFail();
+    OrderItem::create([
+        'order_id' => $order->id,
+        'menu_id' => $this->menuCroissant->id,
+        'menu_name' => $this->menuCroissant->name,
+        'base_price' => 25000,
+        'quantity' => 1,
+        'batch_number' => 1,
+        'is_followup' => false,
+        'payment_status' => 'unpaid',
+        'subtotal_options' => 0,
+        'unit_price' => 25000,
+        'total_price' => 25000,
+        'status' => 'active',
+        'is_served' => false,
+    ]);
 
-    // Awal masih QRIS -> ditolak kasir
+    // 1. Awal masih QRIS -> ditolak kasir saat confirm-payment maupun update-status
     $this->actingAs($this->cashier)
         ->postJson(route('cashier.orders.confirm-payment', $order), [
             'payment_method' => 'cash',
@@ -580,7 +543,13 @@ test('cashier can confirm cash payment only after customer order is cash or swit
         ])
         ->assertStatus(422);
 
-    // Pelanggan beralih ke Tunai Kasir dari halaman status -> kini kasir dapat mengonfirmasi bayar tunai
+    $this->actingAs($this->cashier)
+        ->postJson(route('cashier.orders.update-status', $order), [
+            'status' => 'processing',
+        ])
+        ->assertStatus(422);
+
+    // 2. Pelanggan beralih ke Tunai Kasir dari halaman status -> kini kasir dapat mengonfirmasi bayar tunai
     $this->postJson(route('order.switch-payment-method', ['order_number' => $order->order_number]), [
         'payment_method' => 'cash',
     ])->assertOk()
@@ -598,51 +567,4 @@ test('cashier can confirm cash payment only after customer order is cash or swit
     expect($order->payment_status)->toBe('paid')
         ->and($order->payment_method)->toBe('cash')
         ->and($order->order_status)->toBe('processing');
-});
-
-test('cashier cannot manually settle unpaid qris follow-up items and must wait for qris payment', function () {
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'customer_name' => 'Sinta QRIS Susulan',
-        'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $this->menuCroissant->id, 'quantity' => 1, 'selected_option_ids' => []],
-        ],
-    ])->assertRedirect();
-
-    $order = Order::latest('id')->firstOrFail();
-
-    // Awal lunas via QRIS
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk();
-
-    // Tambah susulan dengan QRIS
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'order_number' => $order->order_number,
-        'customer_name' => 'Sinta QRIS Susulan',
-        'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $this->menuCoffee->id, 'quantity' => 1, 'selected_option_ids' => []],
-        ],
-    ])->assertRedirect();
-
-    // Kasir ditolak saat mencoba confirm-payment untuk susulan QRIS
-    $this->actingAs($this->cashier)
-        ->postJson(route('cashier.orders.confirm-payment', $order), [
-            'payment_method' => 'cash',
-            'cash_received' => 25000,
-        ])
-        ->assertStatus(422)
-        ->assertJsonPath('success', false);
-
-    // Pelanggan menyelesaikan susulan via QRIS -> seluruh pesanan lunas
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk()
-        ->assertJsonPath('status', 'paid');
-
-    expect($order->fresh()->payment_status)->toBe('paid')
-        ->and((float) $order->fresh()->unpaid_balance)->toBe(0.0);
 });

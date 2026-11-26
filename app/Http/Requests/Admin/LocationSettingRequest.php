@@ -32,7 +32,6 @@ class LocationSettingRequest extends FormRequest
             'is_ordering_enabled' => ['sometimes', 'boolean'],
             'closed_message' => ['nullable', 'string', 'max:255'],
             'allow_cash_payment' => ['sometimes', 'boolean'],
-            'allow_xendit_payment' => ['sometimes', 'boolean'],
             'payment_expiry_minutes' => [
                 'sometimes',
                 'integer',
@@ -85,18 +84,8 @@ class LocationSettingRequest extends FormRequest
     {
         return [
             function (Validator $validator): void {
-                if ($this->has('allow_cash_payment') || $this->has('allow_xendit_payment')) {
-                    $setting = CafeSetting::current();
-                    $cashAllowed = $this->has('allow_cash_payment')
-                        ? $this->boolean('allow_cash_payment')
-                        : (bool) $setting->allow_cash_payment;
-                    $xenditAllowed = $this->has('allow_xendit_payment')
-                        ? $this->boolean('allow_xendit_payment')
-                        : (bool) $setting->allow_xendit_payment;
-
-                    if (! $cashAllowed && ! $xenditAllowed) {
-                        $validator->errors()->add('allow_cash_payment', 'Minimal satu metode pembayaran (Tunai atau QRIS) harus tetap aktif.');
-                    }
+                if ($this->has('allow_cash_payment') && ! $this->boolean('allow_cash_payment')) {
+                    $validator->errors()->add('allow_cash_payment', 'Pembayaran tunai di kasir harus tetap aktif selama integrasi payment gateway belum tersedia.');
                 }
 
                 if (! $this->boolean('is_location_restricted')) {

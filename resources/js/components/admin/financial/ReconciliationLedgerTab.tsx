@@ -158,7 +158,7 @@ export default function ReconciliationLedgerTab({
                                 </h2>
                                 <p className="text-[11px] font-medium text-[#78716C]">
                                     Pembayaran Digital (
-                                    {summary.xendit_integration.mode}) vs Kasir
+                                    {summary.gateway_integration.mode}) vs Kasir
                                     POS Manual
                                 </p>
                             </div>
@@ -505,9 +505,7 @@ export default function ReconciliationLedgerTab({
                             className="h-10 rounded-xl border border-[#DFCFA9] bg-[#FFFDF9] px-3 text-xs font-bold text-[#3F2D1C] outline-none focus:border-[#C52828]"
                         >
                             <option value="all">Semua Gateway</option>
-                            <option value="xendit">
-                                Pembayaran Digital (QRIS)
-                            </option>
+                            <option value="digital">Pembayaran Digital</option>
                             <option value="manual">Kasir POS Manual</option>
                         </select>
 

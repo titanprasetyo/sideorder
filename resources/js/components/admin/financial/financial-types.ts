@@ -5,7 +5,7 @@ export interface SummaryPeriodCashFlow {
     inflow_qris: number;
     inflow_transfer: number;
     inflow_debit?: number;
-    inflow_xendit: number;
+    inflow_digital: number;
     outflow_refund: number;
     outflow_expenses_cash: number;
     outflow_expenses_bank: number;
@@ -123,13 +123,13 @@ export interface FinancialSummary {
     };
     payment_methods: PaymentMethodBreakdown[];
     payment_gateways: PaymentGatewayBreakdown[];
-    xendit_integration: {
+    gateway_integration: {
         driver: string;
         label: string;
         configured: boolean;
         is_production: boolean;
         mode: string;
-        webhook_endpoint: string;
+        webhook_endpoint: string | null;
         supported_channels: string[];
         transactions_count: number;
         net_revenue: number;

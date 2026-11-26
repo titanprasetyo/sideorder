@@ -391,18 +391,14 @@ class Order extends Model
             return $this->latestPayment->gateway;
         }
 
-        return match ($this->payment_method) {
-            'qris', 'transfer', 'debit' => 'xendit',
-            default => 'manual',
-        };
+        return 'manual';
     }
 
     public function resolvePaymentGatewayLabel(): string
     {
         return match ($this->resolveEffectivePaymentGateway()) {
-            'xendit' => 'Pembayaran Digital',
-            'midtrans' => 'Midtrans Snap',
-            default => 'Kasir POS',
+            'manual' => 'Kasir POS',
+            default => 'Pembayaran Digital',
         };
     }
 

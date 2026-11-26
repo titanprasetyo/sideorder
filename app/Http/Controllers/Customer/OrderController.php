@@ -14,7 +14,6 @@ use App\Models\Menu;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\OrderStatusHistory;
-use App\Models\Payment;
 use App\Services\Geofencing\LocationAccessService;
 use App\Services\Payments\PaymentService;
 use App\Services\Stock\MenuStockService;
@@ -23,7 +22,6 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -61,9 +59,9 @@ class OrderController extends Controller
         ];
         $paymentPolicy = [
             'allow_cash' => (bool) $setting->allow_cash_payment,
-            'allow_xendit' => (bool) $setting->allow_xendit_payment,
+            'allow_digital' => false,
             'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
-            'default_method' => $setting->allow_xendit_payment ? 'qris' : ($setting->allow_cash_payment ? 'cash' : 'qris'),
+            'default_method' => 'cash',
         ];
 
         if (! $setting->is_ordering_enabled) {
@@ -311,17 +309,17 @@ class OrderController extends Controller
 
         $requestedMethod = ! empty($validated['payment_method'])
             ? strtolower((string) $validated['payment_method'])
-            : ($setting->allow_xendit_payment ? 'qris' : ($setting->allow_cash_payment ? 'cash' : 'qris'));
+            : 'cash';
 
-        if ($requestedMethod === 'cash' && ! $setting->allow_cash_payment) {
+        if ($requestedMethod !== 'cash') {
             throw ValidationException::withMessages([
-                'payment_method' => 'Metode pembayaran tunai sedang dinonaktifkan sementara. Silakan gunakan QRIS / Transfer.',
+                'payment_method' => 'Pembayaran digital belum tersedia karena integrasi payment gateway sedang disiapkan. Silakan gunakan metode Tunai di Kasir.',
             ]);
         }
 
-        if (in_array($requestedMethod, ['qris', 'transfer'], true) && ! $setting->allow_xendit_payment) {
+        if (! $setting->allow_cash_payment) {
             throw ValidationException::withMessages([
-                'payment_method' => 'Pembayaran QRIS sedang dinonaktifkan sementara. Silakan bayar tunai langsung di kasir.',
+                'payment_method' => 'Metode pembayaran tunai sedang dinonaktifkan sementara oleh kafe. Silakan hubungi kasir.',
             ]);
         }
 
@@ -724,310 +722,22 @@ class OrderController extends Controller
 
         return Inertia::render('customer/status', [
             'order' => $order,
-            'initialView' => $request->query('view'),
-            'canSimulate' => app()->environment('local', 'testing') || ($request->user() && ($request->user()->isAdmin() || $request->user()->isCashier())),
             'paymentGateway' => $this->paymentService->getPublicGatewayConfig(),
             'paymentPolicy' => [
                 'allow_cash' => (bool) $setting->allow_cash_payment,
-                'allow_xendit' => (bool) $setting->allow_xendit_payment,
+                'allow_digital' => false,
                 'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
             ],
         ]);
     }
 
     /**
-     * Halaman khusus pembayaran QRIS / Gateway customer.
-     */
-    public function payment(string $order_number): Response
-    {
-        $order = Order::where('order_number', $order_number)
-            ->with([
-                'table',
-                'items.options',
-                'items.rejectedByUser:id,name',
-                'items.servedByUser:id,name',
-                'statusHistories',
-                'latestPayment',
-                'payments:id,order_id,payment_reference,gateway,method,channel,type,amount,settled_amount,status,checkout_url,qr_string,expired_at,paid_at',
-            ])
-            ->firstOrFail();
-
-        $order = $this->paymentService->syncPaymentStatus($order);
-
-        $setting = CafeSetting::current();
-
-        return Inertia::render('customer/status', [
-            'order' => $order,
-            'initialView' => 'qris',
-            'canSimulate' => app()->environment('local', 'testing') || (request()->user() && (request()->user()->isAdmin() || request()->user()->isCashier())),
-            'paymentGateway' => $this->paymentService->getPublicGatewayConfig(),
-            'paymentPolicy' => [
-                'allow_cash' => (bool) $setting->allow_cash_payment,
-                'allow_xendit' => (bool) $setting->allow_xendit_payment,
-                'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
-            ],
-        ]);
-    }
-
-    /**
-     * Endpoint simulasi pembayaran (Mendukung: Berhasil/Paid, Gagal/Failed, Kedaluwarsa/Expire, Pending).
-     * Dilindungi: Hanya aktif di environment local/testing atau untuk staf kasir/admin berwenang.
-     */
-    public function simulatePayment(Request $request, string $order_number): RedirectResponse|JsonResponse
-    {
-        $isStaff = $request->user() && ($request->user()->isAdmin() || $request->user()->isCashier());
-        if (! app()->environment('local', 'testing') && ! $isStaff) {
-            abort(403, 'Simulasi pembayaran dinonaktifkan di lingkungan produksi untuk keamanan transaksi.');
-        }
-
-        $status = strtolower((string) ($request->input('status', 'paid')));
-        $order = Order::where('order_number', $order_number)->firstOrFail();
-
-        if (! $isStaff && $order->payment_method === 'cash') {
-            $errMsg = 'Pesanan metode tunai hanya dapat dikonfirmasi oleh kasir atau ubah metode ke QRIS terlebih dahulu.';
-            if ($request->wantsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => $errMsg,
-                ], 422);
-            }
-
-            return back()->with('error', $errMsg);
-        }
-
-        if ($order->order_status === 'cancelled' || $order->payment_status === 'refunded') {
-            $errMsg = 'Pesanan sudah dibatalkan.';
-            if ($request->wantsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => $errMsg,
-                ], 422);
-            }
-
-            return back()->with('error', $errMsg);
-        }
-
-        if ($order->payment_status === 'paid' && $order->getUnpaidBalance() <= 0.01 && ! $order->hasUnpaidActiveItems()) {
-            if (in_array($status, ['paid', 'settlement', 'success'], true)) {
-                $infoMsg = "Pesanan #{$order->order_number} sudah berstatus lunas.";
-                if ($request->wantsJson()) {
-                    return response()->json([
-                        'success' => true,
-                        'status' => $order->payment_status,
-                        'order_status' => $order->order_status,
-                        'message' => $infoMsg,
-                        'order' => $order->fresh(['table', 'items.options', 'items.servedByUser:id,name', 'latestPayment']),
-                    ]);
-                }
-
-                return back()->with('info', $infoMsg);
-            }
-
-            $blockedMsg = "Pesanan #{$order->order_number} sudah lunas dan bersifat final (tidak dapat diubah menjadi gagal/pending).";
-            if ($request->wantsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => $blockedMsg,
-                ], 422);
-            }
-
-            return back()->with('error', $blockedMsg);
-        }
-
-        $gatewayName = in_array($order->payment_gateway, ['xendit', 'midtrans'], true)
-            ? $order->payment_gateway
-            : $this->paymentService->defaultGatewayName();
-        $method = in_array($order->payment_method, ['qris', 'transfer'], true)
-            ? $order->payment_method
-            : 'qris';
-        $channel = $this->paymentService->resolveDefaultChannelForMethod($method, $order->payment_channel);
-
-        /** @var Payment|null $pendingPayment */
-        $pendingPayment = $order->payments()->where('status', 'pending')->latest('id')->first();
-        $unpaidBalance = $order->getUnpaidBalance();
-
-        if (in_array($status, ['paid', 'settlement', 'success'], true)) {
-            if ($unpaidBalance > 0) {
-                $amountDue = $pendingPayment ? (float) $pendingPayment->amount : $unpaidBalance;
-                $externalId = $pendingPayment ? $pendingPayment->payment_reference : '';
-
-                $callbackResult = $this->paymentService->processGatewayCallback([
-                    'external_id' => $externalId,
-                    'order_number' => $order->order_number,
-                    'payment_reference' => $externalId,
-                    'gateway_transaction_id' => 'QRIS-SIM-'.strtoupper(Str::random(8)),
-                    'status' => 'paid',
-                    'amount' => $amountDue,
-                    'method' => $method,
-                    'channel' => $channel,
-                    'paid_at' => now('Asia/Jakarta')->toIso8601String(),
-                    'raw' => ['simulated' => true, 'gateway' => $gatewayName],
-                ], $gatewayName);
-
-                if ($callbackResult['http_status'] >= 400) {
-                    if ($request->wantsJson()) {
-                        return response()->json([
-                            'success' => false,
-                            'message' => $callbackResult['message'],
-                        ], $callbackResult['http_status']);
-                    }
-
-                    return back()->with('error', $callbackResult['message']);
-                }
-            } else {
-                // Sinkronisasi ulang jika ledger payments sudah terpenuhi namun status order di-reset manual saat pengujian
-                $prevStatus = $order->order_status;
-                $newOrderStatus = $order->order_status === 'pending' ? 'processing' : $order->order_status;
-                DB::transaction(function () use ($order, $method, $gatewayName, $channel, $newOrderStatus): void {
-                    /** @var Order $lockedOrder */
-                    $lockedOrder = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
-                    $this->menuStockService->confirmOrderStock($lockedOrder);
-                    $nowWib = now('Asia/Jakarta');
-                    $lockedOrder->update([
-                        'payment_status' => 'paid',
-                        'payment_method' => $method,
-                        'payment_gateway' => $gatewayName,
-                        'payment_channel' => $channel,
-                        'paid_at' => $lockedOrder->paid_at ?? $nowWib,
-                        'payment_reference' => $lockedOrder->payment_reference ?: ('QRIS-SIM-'.strtoupper(Str::random(8))),
-                        'cash_received' => max((float) ($lockedOrder->cash_received ?? 0), (float) $lockedOrder->total_amount),
-                        'change_amount' => 0.0,
-                        'order_status' => $newOrderStatus,
-                    ]);
-                    $lockedOrder->items()
-                        ->where('status', 'active')
-                        ->where('payment_status', '!=', OrderItem::PAYMENT_PAID)
-                        ->update([
-                            'payment_status' => OrderItem::PAYMENT_PAID,
-                            'paid_at' => $nowWib,
-                        ]);
-                    OrderStatusHistory::create([
-                        'order_id' => $lockedOrder->id,
-                        'user_id' => null,
-                        'status' => $newOrderStatus,
-                        'notes' => 'Pembayaran QRIS berhasil dikonfirmasi (Simulasi Settlement).',
-                    ]);
-                });
-                $order->refresh();
-                try {
-                    event(new OrderStatusUpdated($order, $prevStatus, $newOrderStatus));
-                } catch (\Throwable) {
-                }
-            }
-
-            $msg = '🎉 Pembayaran QRIS berhasil diverifikasi dan pesanan diteruskan ke Barista!';
-        } elseif (in_array($status, ['failed', 'deny', 'expire'], true)) {
-            $externalId = $pendingPayment ? $pendingPayment->payment_reference : $order->order_number;
-
-            $this->paymentService->processGatewayCallback([
-                'external_id' => $externalId,
-                'order_number' => $order->order_number,
-                'payment_reference' => $externalId,
-                'gateway_transaction_id' => $pendingPayment && $pendingPayment->gateway_transaction_id
-                    ? $pendingPayment->gateway_transaction_id
-                    : ('QRIS-SIM-'.strtoupper(Str::random(8))),
-                'status' => $status,
-                'amount' => $pendingPayment ? (float) $pendingPayment->amount : max(0.0, $unpaidBalance),
-                'method' => $method,
-                'channel' => $channel,
-                'paid_at' => null,
-                'raw' => ['simulated' => true, 'gateway' => $gatewayName, 'status' => $status],
-            ], $gatewayName);
-
-            $msg = $status === 'expire'
-                ? 'Batas waktu pembayaran QRIS telah kedaluwarsa.'
-                : 'Pembayaran QRIS gagal atau ditolak oleh sistem perbankan.';
-        } else {
-            // status === 'pending'
-            $prevStatus = $order->order_status;
-            if (! $order->hasAnySettlement()) {
-                $order->update([
-                    'payment_status' => 'unpaid',
-                ]);
-            }
-
-            OrderStatusHistory::create([
-                'order_id' => $order->id,
-                'user_id' => null,
-                'status' => $order->order_status,
-                'notes' => 'Status pembayaran diatur kembali ke menunggu pembayaran (Simulasi Gateway Pending).',
-            ]);
-
-            try {
-                event(new OrderStatusUpdated($order, $prevStatus, $order->order_status));
-            } catch (\Throwable) {
-            }
-
-            $msg = 'Status pembayaran: Menunggu pembayaran customer.';
-        }
-
-        $order = $order->fresh(['table', 'items.options', 'latestPayment', 'payments']) ?? $order;
-
-        if ($request->wantsJson()) {
-            return response()->json([
-                'success' => true,
-                'status' => $order->payment_status,
-                'order_status' => $order->order_status,
-                'message' => $msg,
-                'order' => $order,
-            ]);
-        }
-
-        return back()->with('success', $msg);
-    }
-
-    /**
-     * Endpoint polling / verifikasi status pembayaran terbaru dari database atau Payment Gateway (Xendit / Midtrans).
-     */
-    public function checkPayment(Request $request, string $order_number): JsonResponse
-    {
-        $order = Order::where('order_number', $order_number)
-            ->with(['table', 'items.options', 'latestPayment', 'payments'])
-            ->firstOrFail();
-
-        $order = $this->paymentService->syncPaymentStatus($order);
-        $isExpired = $order->payment_status !== 'paid'
-            && (
-                $order->payment_status === 'failed'
-                || ($order->latestPayment && in_array($order->latestPayment->status, ['expired', 'failed'], true))
-            );
-
-        return response()->json([
-            'order_number' => $order->order_number,
-            'is_paid' => $order->payment_status === 'paid',
-            'is_expired' => $isExpired,
-            'payment_status' => $order->payment_status,
-            'order_status' => $order->order_status,
-            'payment_gateway' => $order->resolveEffectivePaymentGateway(),
-            'payment_gateway_label' => $order->resolvePaymentGatewayLabel(),
-            'payment_channel' => $order->payment_channel,
-            'settled_amount' => $order->getSettledAmount(),
-            'unpaid_balance' => $order->getUnpaidBalance(),
-            'total_amount' => (float) $order->total_amount,
-            'latest_payment' => $order->latestPayment ? [
-                'payment_reference' => $order->latestPayment->payment_reference,
-                'gateway' => $order->latestPayment->gateway,
-                'channel' => $order->latestPayment->channel,
-                'status' => $order->latestPayment->status,
-                'checkout_url' => $order->latestPayment->checkout_url,
-                'qr_string' => $order->latestPayment->qr_string,
-                'expired_at' => $order->latestPayment->expired_at?->toIso8601String(),
-            ] : null,
-            'message' => match (true) {
-                $order->payment_status === 'paid' => 'Pembayaran lunas terverifikasi.',
-                $isExpired => 'Pembayaran gagal atau kedaluwarsa.',
-                default => 'Menunggu pembayaran QRIS.',
-            },
-        ]);
-    }
-
-    /**
-     * Mengganti pilihan metode pembayaran pada pesanan aktif yang belum lunas.
+     * Mengganti pilihan metode pembayaran pada pesanan aktif yang belum lunas ke Tunai di Kasir.
      */
     public function switchPaymentMethod(Request $request, string $order_number): RedirectResponse|JsonResponse
     {
         $validated = $request->validate([
-            'payment_method' => ['required', 'string', 'in:cash,qris,transfer,debit'],
+            'payment_method' => ['required', 'string', 'in:cash'],
             'payment_channel' => ['nullable', 'string', 'max:50'],
         ]);
 
@@ -1050,17 +760,8 @@ class OrderController extends Controller
 
         $method = strtolower((string) $validated['payment_method']);
         $setting = CafeSetting::current();
-        if ($method === 'cash' && ! $setting->allow_cash_payment) {
+        if (! $setting->allow_cash_payment) {
             $errMsg = 'Metode pembayaran tunai sedang dinonaktifkan sementara oleh kafe.';
-            if ($request->wantsJson()) {
-                return response()->json(['success' => false, 'message' => $errMsg], 422);
-            }
-
-            return back()->with('error', $errMsg);
-        }
-
-        if (in_array($method, ['qris', 'transfer'], true) && ! $setting->allow_xendit_payment) {
-            $errMsg = 'Pembayaran QRIS sedang dinonaktifkan sementara.';
             if ($request->wantsJson()) {
                 return response()->json(['success' => false, 'message' => $errMsg], 422);
             }

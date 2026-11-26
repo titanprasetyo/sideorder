@@ -96,7 +96,7 @@ class CafeSetting extends Model
             'is_ordering_enabled' => true,
             'closed_message' => 'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
             'allow_cash_payment' => true,
-            'allow_xendit_payment' => true,
+            'allow_xendit_payment' => false,
             'payment_expiry_minutes' => self::DEFAULT_PAYMENT_EXPIRY_MINUTES,
             'is_location_restricted' => false,
             'latitude' => null,

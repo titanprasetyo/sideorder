@@ -115,9 +115,8 @@ class Payment extends Model
     public function resolveGatewayLabel(): string
     {
         return match ($this->gateway) {
-            'xendit' => 'Pembayaran Digital',
-            'midtrans' => 'Midtrans Snap',
-            default => 'Kasir POS',
+            'manual' => 'Kasir POS',
+            default => 'Pembayaran Digital',
         };
     }
 

@@ -230,7 +230,7 @@ class DashboardController extends Controller
         $gateway = $paymentService->getPublicGatewayConfig();
         $paymentCounts = Payment::query()
             ->selectRaw("
-                COUNT(CASE WHEN gateway = 'xendit' AND status = 'pending' THEN 1 END) as xendit_pending_payments,
+                COUNT(CASE WHEN gateway != 'manual' AND status = 'pending' THEN 1 END) as digital_pending_payments,
                 COUNT(CASE WHEN status IN ('failed', 'expired') THEN 1 END) as failed_payments_recent
             ")
             ->first();
@@ -242,12 +242,12 @@ class DashboardController extends Controller
             'is_enforcement_active' => $setting->isEnforcementActive(),
             'access_radius_meters' => (int) $setting->access_radius_meters,
             'allow_cash_payment' => (bool) $setting->allow_cash_payment,
-            'allow_xendit_payment' => (bool) $setting->allow_xendit_payment,
+            'allow_digital_payment' => false,
             'payment_expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
             'gateway_label' => $gateway['label'],
             'gateway_mode' => $gateway['mode'],
             'gateway_configured' => $gateway['is_configured'],
-            'xendit_pending_payments' => (int) ($paymentCounts->xendit_pending_payments ?? 0),
+            'digital_pending_payments' => (int) ($paymentCounts->digital_pending_payments ?? 0),
             'failed_payments_recent' => (int) ($paymentCounts->failed_payments_recent ?? 0),
         ];
     }

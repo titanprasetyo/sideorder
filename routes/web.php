@@ -11,8 +11,6 @@ use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\Cashier\OrderController as CashierOrderController;
 use App\Http\Controllers\Customer\OrderController as CustomerOrderController;
 use App\Http\Controllers\DashboardController;
-use App\Http\Controllers\PaymentController;
-use App\Http\Controllers\PaymentWebhookController;
 use Illuminate\Support\Facades\Route;
 
 Route::inertia('/', 'welcome')->name('home');
@@ -25,23 +23,9 @@ Route::post('order/checkout', [CustomerOrderController::class, 'checkout'])
     ->middleware('throttle:60,1')
     ->name('order.checkout');
 Route::get('order/status/{order_number}', [CustomerOrderController::class, 'status'])->name('order.status');
-Route::get('order/payment/{order_number}', [CustomerOrderController::class, 'payment'])->name('order.payment');
-Route::get('order/check-payment/{order_number}', [CustomerOrderController::class, 'checkPayment'])->name('order.check-payment');
-Route::post('order/simulate-payment/{order_number}', [CustomerOrderController::class, 'simulatePayment'])
-    ->middleware('throttle:60,1')
-    ->name('order.simulate-payment');
 Route::post('order/switch-payment-method/{order_number}', [CustomerOrderController::class, 'switchPaymentMethod'])
     ->middleware('throttle:60,1')
     ->name('order.switch-payment-method');
-
-// RUTE TERPISAH PAYMENT GATEWAY (Xendit / Midtrans Slot & Terverifikasi Webhook)
-Route::prefix('payments')->name('payments.')->group(function () {
-    Route::post('orders/{order_number}/initiate', [PaymentController::class, 'initiate'])
-        ->middleware('throttle:60,1')
-        ->name('initiate');
-    Route::get('orders/{order_number}/status', [PaymentController::class, 'status'])->name('status');
-    Route::post('webhook/{driver?}', [PaymentWebhookController::class, 'handle'])->name('webhook');
-});
 
 // Rute Dashboard Autentikasi Staf (Admin diarahkan ke Dashboard Terpadu, Kasir otomatis dialihkan ke Pesanan Masuk)
 Route::middleware(['auth'])->group(function () {

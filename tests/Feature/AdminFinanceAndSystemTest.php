@@ -7,7 +7,6 @@ use App\Models\Expense;
 use App\Models\Menu;
 use App\Models\Order;
 use App\Models\OrderItem;
-use App\Models\Payment;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -47,7 +46,7 @@ beforeEach(function () {
         'is_ordering_enabled' => true,
         'closed_message' => 'Pemesanan mandiri sedang ditutup sementara.',
         'allow_cash_payment' => true,
-        'allow_xendit_payment' => true,
+        'allow_xendit_payment' => false,
         'payment_expiry_minutes' => 15,
         'is_location_restricted' => false,
         'access_radius_meters' => 150,
@@ -213,14 +212,13 @@ test('admin can manage operational expenses which flow into net profit, cash flo
         ->assertJsonPath('summary.period.net_profit', 40000);
 });
 
-test('admin can update system management policies and cannot disable both payment methods', function () {
-    // Disabling both payment methods must fail validation
+test('admin can update system management policies and cannot disable cash payment while digital gateway is unconfigured', function () {
+    // Disabling cash payment while no digital gateway is active must fail validation
     $this->actingAs($this->admin)
         ->put(route('admin.location-settings.update'), [
             'cafe_name' => 'Café SIDE LINE',
             'is_ordering_enabled' => true,
             'allow_cash_payment' => false,
-            'allow_xendit_payment' => false,
             'payment_expiry_minutes' => 15,
             'is_location_restricted' => false,
             'access_radius_meters' => 150,
@@ -236,8 +234,7 @@ test('admin can update system management policies and cannot disable both paymen
             'receipt_footer' => 'Sampai jumpa lagi di SIDE LINE Roastery!',
             'is_ordering_enabled' => false,
             'closed_message' => 'Sedang jam istirahat barista hingga 14:00.',
-            'allow_cash_payment' => false,
-            'allow_xendit_payment' => true,
+            'allow_cash_payment' => true,
             'payment_expiry_minutes' => 30,
             'is_location_restricted' => false,
             'access_radius_meters' => 200,
@@ -247,8 +244,7 @@ test('admin can update system management policies and cannot disable both paymen
     $setting = CafeSetting::current();
     expect($setting->cafe_name)->toBe('SIDE LINE Roastery')
         ->and($setting->is_ordering_enabled)->toBeFalse()
-        ->and($setting->allow_cash_payment)->toBeFalse()
-        ->and($setting->allow_xendit_payment)->toBeTrue()
+        ->and($setting->allow_cash_payment)->toBeTrue()
         ->and($setting->payment_expiry_minutes)->toBe(30);
 });
 
@@ -279,19 +275,17 @@ test('customer self ordering and payment endpoints strictly enforce admin system
     $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Rani',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
         'items' => [['menu_id' => $menu->id, 'quantity' => 1, 'option_item_ids' => []]],
     ])->assertSessionHasErrors('ordering');
 
-    // 2. Re-enable ordering, disable Cash, set expiry to 30 minutes
+    // 2. Re-enable ordering, disable Cash -> checkout with cash is blocked
     CafeSetting::current()->update([
         'is_ordering_enabled' => true,
         'allow_cash_payment' => false,
-        'allow_xendit_payment' => true,
         'payment_expiry_minutes' => 30,
     ]);
 
-    // Checkout with disabled cash is blocked
     $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Rani',
@@ -299,38 +293,32 @@ test('customer self ordering and payment endpoints strictly enforce admin system
         'items' => [['menu_id' => $menu->id, 'quantity' => 1, 'option_item_ids' => []]],
     ])->assertSessionHasErrors('payment_method');
 
-    // Checkout with allowed QRIS succeeds and applies dynamic 30-minute expiry window
+    // 3. Re-enable cash -> checkout with cash succeeds, while qris is rejected
+    CafeSetting::current()->update([
+        'allow_cash_payment' => true,
+    ]);
+
     $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Rani',
         'payment_method' => 'qris',
+        'items' => [['menu_id' => $menu->id, 'quantity' => 1, 'option_item_ids' => []]],
+    ])->assertSessionHasErrors('payment_method');
+
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Rani',
+        'payment_method' => 'cash',
         'items' => [['menu_id' => $menu->id, 'quantity' => 1, 'option_item_ids' => []]],
     ])->assertRedirect();
 
     $order = Order::where('customer_name', 'Rani')->firstOrFail();
 
     // Switching to disabled cash is rejected with 422 JSON
+    CafeSetting::current()->update(['allow_cash_payment' => false]);
+
     $this->postJson(route('order.switch-payment-method', ['order_number' => $order->order_number]), [
         'payment_method' => 'cash',
-    ])->assertStatus(422);
-
-    // Payment ledger initiation honours custom 30-minute expiry window
-    $payment = Payment::where('order_id', $order->id)->latest('id')->first();
-    if ($payment && $payment->expired_at) {
-        $minutesUntilExpiry = (int) round(Carbon::now()->diffInMinutes($payment->expired_at, false));
-        expect($minutesUntilExpiry)->toBeGreaterThanOrEqual(28)
-            ->and($minutesUntilExpiry)->toBeLessThanOrEqual(31);
-    }
-
-    // Disabling Xendit blocks PaymentController initiate endpoint with 422
-    CafeSetting::current()->update([
-        'allow_cash_payment' => true,
-        'allow_xendit_payment' => false,
-    ]);
-
-    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
     ])->assertStatus(422);
 });
 

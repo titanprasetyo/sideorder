@@ -135,7 +135,7 @@ class FinancialReportController extends Controller
             fputcsv($handle, ['Periode Laporan', $resolved['label'].' ('.$resolved['start']->format('d/m/Y').' - '.$resolved['end_inclusive']->format('d/m/Y').' WIB)']);
             fputcsv($handle, ['Waktu Cetak', Carbon::now(self::TIMEZONE)->format('d/m/Y H:i:s').' WIB']);
             fputcsv($handle, ['Dicetak Oleh', $printedBy]);
-            fputcsv($handle, ['Integrasi Payment Gateway', $summary['xendit_integration']['label'].' ('.$summary['xendit_integration']['mode'].')']);
+            fputcsv($handle, ['Integrasi Payment Gateway', $summary['gateway_integration']['label'].' ('.$summary['gateway_integration']['mode'].')']);
             fputcsv($handle, ['Dasar Perhitungan', 'Pendapatan Bersih Terealisasi dihitung dari transaksi berstatus pembayaran PAID (Lunas) dan status pesanan non-cancelled berdasarkan waktu pembayaran (WIB).']);
             fputcsv($handle, []);
 
@@ -446,15 +446,15 @@ class FinancialReportController extends Controller
             $resolved['end_inclusive']->format('Ymd')
         );
 
-        $xenditRow = null;
+        $digitalRow = null;
         $manualRow = null;
         if (is_array($summary['payment_gateways'])) {
             foreach ($summary['payment_gateways'] as $gwRow) {
                 if (! is_array($gwRow)) {
                     continue;
                 }
-                if (($gwRow['gateway'] ?? '') === 'xendit') {
-                    $xenditRow = $gwRow;
+                if (($gwRow['gateway'] ?? '') === 'digital') {
+                    $digitalRow = $gwRow;
                 } elseif (($gwRow['gateway'] ?? '') === 'manual') {
                     $manualRow = $gwRow;
                 }
@@ -467,14 +467,14 @@ class FinancialReportController extends Controller
         $lines[] = 'Periode Laporan : '.$resolved['label'].' ('.$resolved['start']->format('d M Y').' - '.$resolved['end_inclusive']->format('d M Y').' WIB)';
         $lines[] = 'Waktu Cetak     : '.Carbon::now(self::TIMEZONE)->format('d M Y H:i:s').' WIB';
         $lines[] = 'Dicetak Oleh    : '.$printedBy;
-        $lines[] = 'Payment Gateway : '.$summary['xendit_integration']['label'].' ('.$summary['xendit_integration']['mode'].')';
+        $lines[] = 'Payment Gateway : '.$summary['gateway_integration']['label'].' ('.$summary['gateway_integration']['mode'].')';
         $lines[] = str_repeat('-', 95);
         $lines[] = '1. RINGKASAN PENDAPATAN & OPERASIONAL';
         $lines[] = sprintf('   - Pendapatan Bersih Periode Terpilih : %s (%d transaksi lunas)', $this->formatRupiah($summary['period']['net_revenue']), $summary['period']['paid_transactions_count']);
         $lines[] = sprintf('   - Total Bruto Transaksi Lunas        : %s', $this->formatRupiah($summary['period']['gross_revenue']));
         $lines[] = sprintf('   - Rata-rata Nilai Transaksi (AOV)    : %s', $this->formatRupiah($summary['period']['average_order_value']));
         $lines[] = sprintf('   - Total Porsi Menu Terjual           : %d porsi', $summary['period']['items_sold']);
-        $lines[] = sprintf('   - Pembayaran Digital (QRIS / VA)   : %d lunas (%s)', $xenditRow['transactions_count'] ?? 0, $this->formatRupiah((float) ($xenditRow['net_revenue'] ?? 0)));
+        $lines[] = sprintf('   - Pembayaran Digital (QRIS / VA)   : %d lunas (%s)', $digitalRow['transactions_count'] ?? 0, $this->formatRupiah((float) ($digitalRow['net_revenue'] ?? 0)));
         $lines[] = sprintf('   - Pembayaran Tunai Kasir (Manual)    : %d lunas (%s)', $manualRow['transactions_count'] ?? 0, $this->formatRupiah((float) ($manualRow['net_revenue'] ?? 0)));
         $lines[] = sprintf('   - Menunggu Pembayaran (Unpaid)       : %d pesanan (%s - Belum Terealisasi)', $summary['period']['pending_payments_count'], $this->formatRupiah($summary['period']['pending_payments_amount']));
         $lines[] = sprintf('   - Pesanan Dibatalkan / Item Ditolak  : %d batal (%s) | %d item ditolak (%s)', $summary['period']['cancelled_orders_count'], $this->formatRupiah($summary['period']['cancelled_amount']), $ops['pipeline']['rejected_items_count'], $this->formatRupiah($ops['pipeline']['rejected_items_amount']));
@@ -521,11 +521,7 @@ class FinancialReportController extends Controller
         $totalTableNet = 0.0;
         foreach ($transactions as $tx) {
             $totalTableNet += $tx['net_revenue'];
-            $gatewayTag = match ($tx['payment_gateway']) {
-                'xendit' => 'Digital',
-                'midtrans' => 'Midtrn',
-                default => 'Kasir',
-            };
+            $gatewayTag = $tx['payment_gateway'] === 'manual' ? 'Kasir' : 'Digital';
             $lines[] = sprintf(
                 '%-16s | %-16s | %-7s | %-10s | %-11s | %-16s',
                 substr($tx['transaction_date_formatted'], 0, 16),
@@ -758,7 +754,7 @@ class FinancialReportController extends Controller
 
         $totalAmount = (float) $rows->sum('amount');
         $cashAmount = (float) $rows->where('payment_source', 'cash')->sum('amount');
-        $bankAmount = (float) $rows->whereIn('payment_source', ['bank', 'xendit_balance'])->sum('amount');
+        $bankAmount = (float) $rows->where('payment_source', '!=', 'cash')->sum('amount');
 
         $byCategory = [];
         foreach (Expense::CATEGORIES as $catKey => $catLabel) {
@@ -789,7 +785,7 @@ class FinancialReportController extends Controller
                 'title' => $exp->title,
                 'amount' => (float) $exp->amount,
                 'payment_source' => $exp->payment_source,
-                'payment_source_label' => Expense::PAYMENT_SOURCES[$exp->payment_source] ?? ucfirst((string) $exp->payment_source),
+                'payment_source_label' => $exp->payment_source_label,
                 'notes' => $exp->notes,
                 'recorded_by_name' => $exp->recordedByUser?->name ?? 'Admin',
                 'created_at_formatted' => $exp->created_at
@@ -1132,7 +1128,7 @@ class FinancialReportController extends Controller
         if (DB::connection()->getDriverName() === 'pgsql') {
             $netAmountExpr = 'GREATEST(0, orders.total_amount - COALESCE(orders.refunded_amount, 0))';
         }
-        $effectiveGatewayExpr = "COALESCE(NULLIF(orders.payment_gateway, ''), CASE WHEN orders.payment_method IN ('qris', 'transfer', 'debit') THEN 'xendit' ELSE 'manual' END)";
+        $effectiveGatewayExpr = "CASE WHEN COALESCE(NULLIF(orders.payment_gateway, ''), CASE WHEN orders.payment_method IN ('qris', 'transfer') THEN 'digital' ELSE 'manual' END) = 'manual' THEN 'manual' ELSE 'digital' END";
 
         $metrics = DB::table('orders')
             ->selectRaw("
@@ -1323,21 +1319,16 @@ class FinancialReportController extends Controller
             ];
         }
 
-        $activeDriver = (string) config('services.payment_gateway.default_driver', 'xendit');
+        $activeDriver = 'manual';
         $gatewayDefinitions = [
-            'xendit' => 'Pembayaran Digital',
             'manual' => 'Kasir POS (Tunai Manual)',
-            'midtrans' => 'Midtrans Snap',
+            'digital' => 'Pembayaran Digital',
         ];
         $paymentGateways = [];
         foreach ($gatewayDefinitions as $gwCode => $gwLabel) {
             $gwRow = $gatewayBreakdownRows->get($gwCode);
             $gwPaidCount = (int) ($gwRow->paid_count ?? 0);
             $gwPaidNetRev = (float) ($gwRow->paid_net_revenue ?? 0);
-
-            if ($gwCode === 'midtrans' && $gwPaidCount === 0 && (int) ($gwRow->unpaid_count ?? 0) === 0 && $activeDriver !== 'midtrans') {
-                continue;
-            }
 
             $paymentGateways[] = [
                 'gateway' => $gwCode,
@@ -1353,9 +1344,6 @@ class FinancialReportController extends Controller
                 'is_active_slot' => $gwCode === $activeDriver,
             ];
         }
-
-        $xenditConfigured = ! empty(config('services.xendit.secret_key'));
-        $xenditProduction = (bool) config('services.xendit.is_production', false);
 
         // Hitung Kuantitas Item Menu Terjual Aktual & HPP / COGS Riil dalam 1 query gabungan
         $todayStartStr = $todayStart->format('Y-m-d H:i:s');
@@ -1441,7 +1429,7 @@ class FinancialReportController extends Controller
                     COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN amount ELSE 0 END), 0) as period_expenses_total,
                     COUNT(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN 1 END) as period_expenses_count,
                     COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? AND payment_source = 'cash' THEN amount ELSE 0 END), 0) as period_expenses_cash,
-                    COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? AND payment_source IN ('bank', 'xendit_balance') THEN amount ELSE 0 END), 0) as period_expenses_bank,
+                    COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? AND payment_source != 'cash' THEN amount ELSE 0 END), 0) as period_expenses_bank,
                     COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN amount ELSE 0 END), 0) as prev_period_expenses,
                     COALESCE(SUM(CASE WHEN {$expDateExpr} = ? THEN amount ELSE 0 END), 0) as today_expenses,
                     COALESCE(SUM(CASE WHEN {$expDateExpr} >= ? AND {$expDateExpr} <= ? THEN amount ELSE 0 END), 0) as this_month_expenses
@@ -1519,7 +1507,7 @@ class FinancialReportController extends Controller
         $todayNetProfit = round($todayRevenue - $todayCogsAmount - $todayExpenses, 2);
         $thisMonthNetProfit = round($thisMonthRevenue - $thisMonthCogsAmount - $thisMonthExpenses, 2);
 
-        $inflowXendit = (float) ($gatewayBreakdownRows->get('xendit')->paid_net_revenue ?? 0);
+        $inflowDigital = (float) ($gatewayBreakdownRows->get('digital')->paid_net_revenue ?? 0);
         $inflowCash = (float) ($methodBreakdownRows->get('cash')->paid_net_revenue ?? 0);
         $inflowQris = (float) ($methodBreakdownRows->get('qris')->paid_net_revenue ?? 0);
         $inflowTransfer = (float) ($methodBreakdownRows->get('transfer')->paid_net_revenue ?? 0);
@@ -1665,31 +1653,31 @@ class FinancialReportController extends Controller
                     'inflow_qris' => $inflowQris,
                     'inflow_transfer' => $inflowTransfer,
                     'inflow_debit' => $inflowDebit,
-                    'inflow_xendit' => $inflowXendit,
+                    'inflow_digital' => $inflowDigital,
                     'outflow_refund' => $periodRefundAmount,
                     'outflow_expenses_cash' => $periodExpensesCash,
                     'outflow_expenses_bank' => $periodExpensesBank,
                     'outflow_expenses_total' => $periodExpensesTotal,
                     'net_cash_drawer' => round($inflowCash - $periodExpensesCash, 2),
-                    'net_bank_digital' => round(($inflowXendit + $inflowDebit) - $periodExpensesBank, 2),
+                    'net_bank_digital' => round(($inflowDigital + $inflowDebit) - $periodExpensesBank, 2),
                     'net_cash_flow' => round($periodNetRevenue - $periodExpensesTotal, 2),
                 ],
             ],
 
             'payment_methods' => $paymentMethods,
             'payment_gateways' => $paymentGateways,
-            'xendit_integration' => [
+            'gateway_integration' => [
                 'driver' => $activeDriver,
-                'label' => 'Pembayaran Digital',
-                'configured' => $xenditConfigured,
-                'is_production' => $xenditProduction,
-                'mode' => $xenditConfigured ? ($xenditProduction ? 'Production Live' : 'Sandbox Active') : 'Sandbox Ready Slot',
-                'webhook_endpoint' => '/payments/webhook',
-                'supported_channels' => ['QRIS', 'Tunai (Cash)'],
-                'transactions_count' => (int) ($gatewayBreakdownRows->get('xendit')->paid_count ?? 0),
-                'net_revenue' => $inflowXendit,
-                'pending_count' => (int) ($gatewayBreakdownRows->get('xendit')->unpaid_count ?? 0),
-                'pending_amount' => (float) ($gatewayBreakdownRows->get('xendit')->unpaid_amount ?? 0),
+                'label' => 'Kasir POS (Tunai)',
+                'configured' => false,
+                'is_production' => false,
+                'mode' => 'Belum Terintegrasi (Tunai POS)',
+                'webhook_endpoint' => null,
+                'supported_channels' => ['Tunai (Cash)'],
+                'transactions_count' => (int) ($gatewayBreakdownRows->get('digital')->paid_count ?? 0),
+                'net_revenue' => $inflowDigital,
+                'pending_count' => (int) ($gatewayBreakdownRows->get('digital')->unpaid_count ?? 0),
+                'pending_amount' => (float) ($gatewayBreakdownRows->get('digital')->unpaid_amount ?? 0),
             ],
         ];
     }
@@ -2780,7 +2768,7 @@ class FinancialReportController extends Controller
 
         $paymentGateway = (string) $request->query('payment_gateway', 'all');
         if ($paymentGateway !== 'all') {
-            $effectiveGatewayExpr = "COALESCE(NULLIF(orders.payment_gateway, ''), CASE WHEN orders.payment_method IN ('qris', 'transfer', 'debit') THEN 'xendit' ELSE 'manual' END)";
+            $effectiveGatewayExpr = "CASE WHEN COALESCE(NULLIF(orders.payment_gateway, ''), CASE WHEN orders.payment_method IN ('qris', 'transfer') THEN 'digital' ELSE 'manual' END) = 'manual' THEN 'manual' ELSE 'digital' END";
             $query->whereRaw("{$effectiveGatewayExpr} = ?", [$paymentGateway]);
         }
 

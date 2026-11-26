@@ -44,9 +44,9 @@ class ExcelReportService
         /** @var Carbon $endInclusiveCarbon */
         $endInclusiveCarbon = $resolved['end_inclusive'];
         $periodLabel = $resolved['label'].' ('.$startCarbon->format('d/m/Y').' - '.$endInclusiveCarbon->format('d/m/Y').' WIB)';
-        $xenditInfo = $summary['xendit_integration'] ?? [
-            'label' => 'Pembayaran Digital',
-            'mode' => 'Sandbox Ready Slot',
+        $gatewayInfo = $summary['gateway_integration'] ?? [
+            'label' => 'Kasir POS (Tunai)',
+            'mode' => 'Belum Terintegrasi (Tunai POS)',
             'transactions_count' => 0,
             'net_revenue' => 0.0,
         ];
@@ -58,7 +58,7 @@ class ExcelReportService
             ['Periode Laporan', $periodLabel],
             ['Waktu Pembuatan', $nowStr],
             ['Dicetak Oleh', $printedBy ?? 'Administrator'],
-            ['Payment Gateway', ($xenditInfo['label'] ?? 'Pembayaran Digital').' ('.($xenditInfo['mode'] ?? 'Sandbox Ready Slot').')'],
+            ['Payment Gateway', ($gatewayInfo['label'] ?? 'Kasir POS (Tunai)').' ('.($gatewayInfo['mode'] ?? 'Belum Terintegrasi').')'],
             ['Zona Waktu', 'Asia/Jakarta (WIB)'],
             [],
             ['METRIK KEUANGAN', 'NILAI AKTUAL (RP)', 'FORMAT RUPIAH', 'PERIODE PEMBANDING', 'PERTUMBUHAN (%)'],
@@ -78,9 +78,9 @@ class ExcelReportService
             ],
             [
                 'Pendapatan Via Pembayaran Digital',
-                (float) ($xenditInfo['net_revenue'] ?? 0),
-                $this->formatRupiah((float) ($xenditInfo['net_revenue'] ?? 0)),
-                ($xenditInfo['transactions_count'] ?? 0).' transaksi lunas',
+                (float) ($gatewayInfo['net_revenue'] ?? 0),
+                $this->formatRupiah((float) ($gatewayInfo['net_revenue'] ?? 0)),
+                ($gatewayInfo['transactions_count'] ?? 0).' transaksi lunas',
                 '-',
             ],
             [
@@ -342,7 +342,7 @@ class ExcelReportService
             ['SHEET 5: REKAPITULASI PAYMENT GATEWAY & METODE PEMBAYARAN'],
             ['Periode Laporan', $periodLabel],
             ['Waktu Pembuatan', $nowStr],
-            ['Status Integrasi Gateway', ($xenditInfo['label'] ?? 'Pembayaran Digital').' ('.($xenditInfo['mode'] ?? 'Sandbox Ready Slot').')'],
+            ['Status Integrasi Gateway', ($gatewayInfo['label'] ?? 'Kasir POS (Tunai)').' ('.($gatewayInfo['mode'] ?? 'Belum Terintegrasi').')'],
             [],
             ['=== RINGKASAN PER PAYMENT GATEWAY ==='],
             ['Kode Gateway', 'Nama Payment Gateway', 'Transaksi Lunas', 'Pangsa Transaksi (%)', 'Total Omzet Lunas (Rp)', 'Pangsa Omzet (%)', 'Menunggu Pembayaran', 'Nominal Menunggu (Rp)', 'Pesanan Batal', 'Nominal Batal (Rp)'],

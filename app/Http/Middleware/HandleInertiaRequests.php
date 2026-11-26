@@ -36,9 +36,6 @@ class HandleInertiaRequests extends Middleware
      */
     public function share(Request $request): array
     {
-        $driver = (string) config('services.payment_gateway.default_driver', 'xendit');
-        $xenditConfigured = ! empty(config('services.xendit.secret_key'));
-
         return [
             ...parent::share($request),
             'name' => config('app.name'),
@@ -63,7 +60,7 @@ class HandleInertiaRequests extends Middleware
                         'is_ordering_enabled' => (bool) $setting->is_ordering_enabled,
                         'closed_message' => $setting->closed_message,
                         'allow_cash_payment' => (bool) $setting->allow_cash_payment,
-                        'allow_xendit_payment' => (bool) $setting->allow_xendit_payment,
+                        'allow_digital_payment' => false,
                         'payment_expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
                     ];
                 } catch (\Throwable) {
@@ -75,16 +72,16 @@ class HandleInertiaRequests extends Middleware
                         'is_ordering_enabled' => true,
                         'closed_message' => 'Pemesanan mandiri sedang ditutup sementara.',
                         'allow_cash_payment' => true,
-                        'allow_xendit_payment' => true,
+                        'allow_digital_payment' => false,
                         'payment_expiry_minutes' => 15,
                     ];
                 }
             },
             'paymentGateway' => [
-                'driver' => $driver,
-                'label' => $driver === 'midtrans' ? 'Midtrans Snap' : 'Pembayaran Digital',
-                'isConfigured' => $xenditConfigured,
-                'mode' => $xenditConfigured && config('services.xendit.is_production', false) ? 'production' : 'sandbox',
+                'driver' => 'manual',
+                'label' => 'Kasir POS (Tunai)',
+                'isConfigured' => false,
+                'mode' => 'manual_only',
             ],
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];

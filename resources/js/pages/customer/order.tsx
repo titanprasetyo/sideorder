@@ -12,7 +12,6 @@ import {
     NotePencil,
     PencilSimpleLine,
     Plus as PhPlus,
-    QrCode as PhQrCode,
     ShoppingBagOpen,
     ShoppingCart,
     SlidersHorizontal as PhSlidersHorizontal,
@@ -172,9 +171,9 @@ interface Props {
     };
     paymentPolicy?: {
         allow_cash: boolean;
-        allow_xendit: boolean;
+        allow_digital?: boolean;
         expiry_minutes: number;
-        default_method: 'qris' | 'cash';
+        default_method: 'cash';
     };
 }
 
@@ -482,9 +481,9 @@ export default function CustomerOrder({
     },
     paymentPolicy = {
         allow_cash: true,
-        allow_xendit: true,
+        allow_digital: false,
         expiry_minutes: 15,
-        default_method: 'qris',
+        default_method: 'cash',
     },
 }: Props) {
     const [searchQuery, setSearchQuery] = useState('');
@@ -719,30 +718,8 @@ export default function CustomerOrder({
         () => activeOrder?.customer_name || '',
     );
     const [orderNotes, setOrderNotes] = useState('');
-    const [paymentMethod, setPaymentMethod] = useState<'qris' | 'cash'>(
-        () =>
-            paymentPolicy.default_method ??
-            (!paymentPolicy.allow_xendit && paymentPolicy.allow_cash
-                ? 'cash'
-                : 'qris'),
-    );
+    const paymentMethod = 'cash' as const;
     const [isSubmitting, setIsSubmitting] = useState(false);
-
-    useEffect(() => {
-        if (
-            !paymentPolicy.allow_xendit &&
-            paymentMethod === 'qris' &&
-            paymentPolicy.allow_cash
-        ) {
-            setPaymentMethod('cash');
-        } else if (
-            !paymentPolicy.allow_cash &&
-            paymentMethod === 'cash' &&
-            paymentPolicy.allow_xendit
-        ) {
-            setPaymentMethod('qris');
-        }
-    }, [paymentPolicy.allow_xendit, paymentPolicy.allow_cash, paymentMethod]);
 
     // Ref guard untuk mencegah klik berulang (double-click / rapid tap)
     const quickAddLockRef = useRef<Record<number, number>>({});
@@ -3114,198 +3091,72 @@ export default function CustomerOrder({
 
                                     <div className="h-px w-full bg-[#EBE5DC]" />
 
-                                    {/* PILIHAN METODE PEMBAYARAN */}
+                                    {/* METODE PEMBAYARAN */}
                                     <div className="space-y-2">
                                         <div className="flex items-center justify-between">
                                             <Label className="text-[11px] font-bold text-[#1A1A1A]">
                                                 Metode Pembayaran
                                             </Label>
                                             <span className="rounded-md bg-[#FDECEB] px-1.5 py-0.5 text-[9.5px] font-semibold text-[#C52828]">
-                                                {paymentPolicy.allow_xendit &&
-                                                paymentPolicy.allow_cash
-                                                    ? 'Pilih 1 Metode'
-                                                    : paymentPolicy.allow_xendit ||
-                                                        paymentPolicy.allow_cash
-                                                      ? 'Tersedia 1 Metode'
-                                                      : 'Nonaktif'}
+                                                {paymentPolicy.allow_cash
+                                                    ? 'Tunai di Kasir'
+                                                    : 'Nonaktif'}
                                             </span>
                                         </div>
 
-                                        {!paymentPolicy.allow_xendit &&
-                                        !paymentPolicy.allow_cash ? (
+                                        {!paymentPolicy.allow_cash ? (
                                             <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-[#C52828]">
-                                                Semua metode pembayaran sedang
+                                                Metode pembayaran sedang
                                                 dinonaktifkan oleh pengelola
                                                 kafe. Silakan hubungi kasir.
                                             </div>
                                         ) : (
-                                            <div
-                                                className={cn(
-                                                    'grid gap-1.5 sm:gap-2',
-                                                    paymentPolicy.allow_xendit &&
-                                                        paymentPolicy.allow_cash
-                                                        ? 'grid-cols-2'
-                                                        : 'grid-cols-1',
-                                                )}
-                                            >
-                                                {/* Opsi 1: QRIS */}
-                                                {paymentPolicy.allow_xendit && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() =>
-                                                            setPaymentMethod(
-                                                                'qris',
-                                                            )
-                                                        }
-                                                        className={cn(
-                                                            'relative flex cursor-pointer flex-col justify-between rounded-xl p-2.5 text-left transition-all',
-                                                            paymentMethod ===
-                                                                'qris'
-                                                                ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
-                                                                : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
-                                                        )}
-                                                    >
-                                                        {paymentMethod ===
-                                                            'qris' && (
-                                                            <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
-                                                                <Check
-                                                                    weight="bold"
-                                                                    className="size-2"
-                                                                />
-                                                            </span>
-                                                        )}
+                                            <div className="relative flex flex-col justify-between rounded-xl border-[1.5px] border-[#C52828] bg-white p-2.5 text-left shadow-xs">
+                                                <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
+                                                    <Check
+                                                        weight="bold"
+                                                        className="size-2"
+                                                    />
+                                                </span>
 
-                                                        <div className="flex items-center gap-1.5 pr-4">
-                                                            <div
-                                                                className={cn(
-                                                                    'flex size-6.5 shrink-0 items-center justify-center rounded-lg transition-colors',
-                                                                    paymentMethod ===
-                                                                        'qris'
-                                                                        ? 'bg-[#C52828] text-white'
-                                                                        : 'bg-[#E8E2D8] text-[#4A2C18]',
-                                                                )}
-                                                            >
-                                                                <PhQrCode
-                                                                    weight="bold"
-                                                                    className="size-3.5"
-                                                                />
-                                                            </div>
-                                                            <div className="min-w-0">
-                                                                <div className="text-[11.5px] leading-tight font-bold text-[#1A1A1A]">
-                                                                    QRIS
-                                                                </div>
-                                                                <div className="mt-0.5 truncate text-[9.5px] font-medium text-[#7C756B]">
-                                                                    Batas waktu:{' '}
-                                                                    {
-                                                                        paymentPolicy.expiry_minutes
-                                                                    }{' '}
-                                                                    mnt
-                                                                </div>
-                                                            </div>
+                                                <div className="flex items-center gap-2 pr-4">
+                                                    <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-[#C52828] text-white">
+                                                        <Money
+                                                            weight="bold"
+                                                            className="size-4"
+                                                        />
+                                                    </div>
+                                                    <div className="min-w-0">
+                                                        <div className="text-[11.5px] leading-tight font-bold text-[#1A1A1A]">
+                                                            Tunai di Kasir
                                                         </div>
-
-                                                        <p className="mt-1.5 text-[9.5px] leading-tight text-[#7C756B]">
-                                                            GoPay, OVO, Dana,
-                                                            BCA, Mandiri dsb.
-                                                        </p>
-                                                    </button>
-                                                )}
-
-                                                {/* Opsi 2: Tunai Kasir */}
-                                                {paymentPolicy.allow_cash && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() =>
-                                                            setPaymentMethod(
-                                                                'cash',
-                                                            )
-                                                        }
-                                                        className={cn(
-                                                            'relative flex cursor-pointer flex-col justify-between rounded-xl p-2.5 text-left transition-all',
-                                                            paymentMethod ===
-                                                                'cash'
-                                                                ? 'border-[1.5px] border-[#C52828] bg-white shadow-xs'
-                                                                : 'border border-[#E4DCD0] bg-[#F7F4EE] hover:bg-[#EFE9DF]',
-                                                        )}
-                                                    >
-                                                        {paymentMethod ===
-                                                            'cash' && (
-                                                            <span className="absolute top-1.5 right-1.5 flex size-3.5 items-center justify-center rounded-full bg-[#C52828] text-white">
-                                                                <Check
-                                                                    weight="bold"
-                                                                    className="size-2"
-                                                                />
-                                                            </span>
-                                                        )}
-
-                                                        <div className="flex items-center gap-1.5 pr-4">
-                                                            <div
-                                                                className={cn(
-                                                                    'flex size-6.5 shrink-0 items-center justify-center rounded-lg transition-colors',
-                                                                    paymentMethod ===
-                                                                        'cash'
-                                                                        ? 'bg-[#C52828] text-white'
-                                                                        : 'bg-[#E8E2D8] text-[#4A2C18]',
-                                                                )}
-                                                            >
-                                                                <Money
-                                                                    weight="bold"
-                                                                    className="size-3.5"
-                                                                />
-                                                            </div>
-                                                            <div className="min-w-0">
-                                                                <div className="text-[11.5px] leading-tight font-bold text-[#1A1A1A]">
-                                                                    Tunai
-                                                                </div>
-                                                                <div className="mt-0.5 truncate text-[9.5px] font-medium text-[#7C756B]">
-                                                                    Bayar di
-                                                                    Kasir
-                                                                </div>
-                                                            </div>
+                                                        <div className="mt-0.5 text-[9.5px] font-medium text-[#7C756B]">
+                                                            Kirim pesanan lalu
+                                                            bayar langsung di
+                                                            meja kasir.
                                                         </div>
-
-                                                        <p className="mt-1.5 text-[9.5px] leading-tight text-[#7C756B]">
-                                                            Kirim sekarang,
-                                                            bayar cash di kasir.
-                                                        </p>
-                                                    </button>
-                                                )}
+                                                    </div>
+                                                </div>
                                             </div>
                                         )}
 
                                         {/* Info Box */}
                                         <div className="rounded-xl border border-[#E6DFD3] bg-[#F7F4EE] p-2 text-[10.5px] text-[#3F3A34]">
                                             <div className="flex items-center gap-1.5 font-bold text-[#1A1A1A]">
-                                                {paymentMethod === 'qris' ? (
-                                                    <>
-                                                        <PhQrCode
-                                                            weight="bold"
-                                                            className="size-3 text-[#C52828]"
-                                                        />
-                                                        <span>
-                                                            {activeOrder
-                                                                ? `Digabung ke Pesanan #${activeOrder.order_number} (QRIS)`
-                                                                : 'Pembayaran QRIS Instan'}
-                                                        </span>
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <Money
-                                                            weight="bold"
-                                                            className="size-3 text-[#4A2C18]"
-                                                        />
-                                                        <span>
-                                                            {activeOrder
-                                                                ? `Digabung ke Pesanan #${activeOrder.order_number} (Tunai)`
-                                                                : 'Pembayaran Tunai di Meja Kasir'}
-                                                        </span>
-                                                    </>
-                                                )}
+                                                <Money
+                                                    weight="bold"
+                                                    className="size-3 text-[#4A2C18]"
+                                                />
+                                                <span>
+                                                    {activeOrder
+                                                        ? `Digabung ke Pesanan #${activeOrder.order_number} (Tunai)`
+                                                        : 'Pembayaran Tunai di Meja Kasir'}
+                                                </span>
                                             </div>
                                             <p className="mt-0.5 text-[10px] leading-snug text-[#7C756B]">
-                                                {paymentMethod === 'qris'
-                                                    ? 'Setelah kirim, kode QRIS otomatis tampil di layar HP untuk di-scan.'
-                                                    : 'Setelah kirim, silakan sebutkan nama pemesan di meja kasir untuk membayar.'}
+                                                Setelah kirim, silakan sebutkan
+                                                nama pemesan di meja kasir untuk
+                                                menyelesaikan pembayaran.
                                             </p>
                                         </div>
                                     </div>
@@ -3409,8 +3260,7 @@ export default function CustomerOrder({
                                             disabled={
                                                 isSubmitting ||
                                                 cart.length === 0 ||
-                                                (!paymentPolicy.allow_xendit &&
-                                                    !paymentPolicy.allow_cash)
+                                                !paymentPolicy.allow_cash
                                             }
                                             className="flex h-9 min-w-0 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-xl bg-[#C52828] px-3 text-[11.5px] font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-[0.99] disabled:opacity-50"
                                         >
@@ -3418,25 +3268,14 @@ export default function CustomerOrder({
                                                 <span>Mengirim Pesanan...</span>
                                             ) : (
                                                 <>
-                                                    {paymentMethod ===
-                                                    'qris' ? (
-                                                        <PhQrCode
-                                                            weight="bold"
-                                                            className="size-3.5 shrink-0"
-                                                        />
-                                                    ) : (
-                                                        <Money
-                                                            weight="bold"
-                                                            className="size-3.5 shrink-0"
-                                                        />
-                                                    )}
+                                                    <Money
+                                                        weight="bold"
+                                                        className="size-3.5 shrink-0"
+                                                    />
                                                     <span className="truncate">
                                                         {activeOrder
                                                             ? `Kirim (#${activeOrder.order_number})`
-                                                            : paymentMethod ===
-                                                                'qris'
-                                                              ? 'Kirim & Bayar QRIS'
-                                                              : 'Kirim Pesanan'}
+                                                            : 'Kirim Pesanan'}
                                                     </span>
                                                     <PhArrowRight
                                                         weight="bold"

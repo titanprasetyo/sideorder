@@ -151,28 +151,28 @@ test('dashboard sync with scope=dashboard returns real-time KPI cards, tracking 
             'order_status' => 'processing',
             'payment_status' => 'paid',
             'payment_method' => 'qris',
-            'payment_gateway' => 'xendit',
+            'payment_gateway' => 'digital',
             'paid_at' => Carbon::create(2026, 11, 18, 11, 0, 0, 'Asia/Jakarta'),
             'created_at' => Carbon::create(2026, 11, 18, 10, 55, 0, 'Asia/Jakarta'),
         ]);
 
-        // 2. Pesanan QRIS belum bayar yang sudah melewati batas kedaluwarsa: Rp 40.000
+        // 2. Pesanan digital belum bayar yang sudah melewati batas kedaluwarsa: Rp 40.000
         $overdueOrder = Order::create([
             'cafe_table_id' => $table->id,
-            'customer_name' => 'QRIS Kedaluwarsa',
+            'customer_name' => 'Digital Kedaluwarsa',
             'subtotal' => 40000,
             'total_amount' => 40000,
             'order_status' => 'pending',
             'payment_status' => 'unpaid',
             'payment_method' => 'qris',
-            'payment_gateway' => 'xendit',
+            'payment_gateway' => 'digital',
             'created_at' => Carbon::create(2026, 11, 18, 12, 0, 0, 'Asia/Jakarta'),
         ]);
 
         Payment::create([
             'order_id' => $overdueOrder->id,
             'payment_reference' => 'PAY-EXP-DASH-01',
-            'gateway' => 'xendit',
+            'gateway' => 'digital',
             'method' => 'qris',
             'channel' => 'QRIS',
             'type' => 'initial',
@@ -290,14 +290,14 @@ test('dashboard sync accurately counts limited-stock and missing-cost menu alert
             'order_status' => 'pending',
             'payment_status' => 'unpaid',
             'payment_method' => 'qris',
-            'payment_gateway' => 'xendit',
+            'payment_gateway' => 'digital',
             'created_at' => Carbon::create(2026, 11, 18, 13, 0, 0, 'Asia/Jakarta'),
         ]);
 
         Payment::create([
             'order_id' => $overdueOrder->id,
             'payment_reference' => 'PAY-EXP-FIN-01',
-            'gateway' => 'xendit',
+            'gateway' => 'digital',
             'method' => 'qris',
             'channel' => 'QRIS',
             'type' => 'initial',

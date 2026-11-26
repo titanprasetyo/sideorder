@@ -22,7 +22,6 @@ import { Bell, Volume2, VolumeX } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
-import { QrisPaymentView } from '@/components/payment/QrisPaymentModal';
 import {
     getOrderItemPaymentStatus,
     getOrderPaymentSummary,
@@ -114,8 +113,6 @@ interface Order {
 
 interface Props {
     order: Order;
-    initialView?: string | null;
-    canSimulate?: boolean;
     paymentGateway?: {
         driver?: string;
         label?: string;
@@ -126,19 +123,17 @@ interface Props {
     };
     paymentPolicy?: {
         allow_cash: boolean;
-        allow_xendit: boolean;
+        allow_digital?: boolean;
         expiry_minutes: number;
     };
 }
 
 export default function OrderStatusPage({
     order,
-    initialView,
-    canSimulate = false,
     paymentGateway,
     paymentPolicy = {
         allow_cash: true,
-        allow_xendit: true,
+        allow_digital: false,
         expiry_minutes: 15,
     },
 }: Props) {
@@ -159,21 +154,6 @@ export default function OrderStatusPage({
                 Date.parse(String(latestDigitalPayment.expired_at)) <=
                     Date.now()));
 
-    const [isQrisPageOpen, setIsQrisPageOpen] = useState(() => {
-        if (initialView === 'status') {
-            return false;
-        }
-        if (initialView === 'qris') {
-            return order.payment_status !== 'paid';
-        }
-        return (
-            order.payment_status === 'unpaid' &&
-            order.payment_method === 'qris' &&
-            !isFollowupQrisExpired
-        );
-    });
-    const [isResettingQris, setIsResettingQris] = useState(false);
-
     const [soundEnabled, setSoundEnabled] = useState(() => {
         if (typeof window === 'undefined') return true;
         try {
@@ -185,13 +165,6 @@ export default function OrderStatusPage({
         }
     });
     const notifiedServedIdsRef = useRef<Set<number>>(new Set());
-
-    // Jika pembayaran sudah lunas dari hasil polling/webhook, otomatis tampilkan halaman status pesanan
-    useEffect(() => {
-        if (order.payment_status === 'paid' && isQrisPageOpen) {
-            setIsQrisPageOpen(false);
-        }
-    }, [order.payment_status, isQrisPageOpen]);
 
     useEffect(() => {
         notifyRealtimeSync('customer-order');
@@ -237,16 +210,6 @@ export default function OrderStatusPage({
         }
     }, [order.table.qr_token, order.order_number, order.order_status]);
 
-    const openQrisPage = () => {
-        setIsQrisPageOpen(true);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-    };
-
-    const closeQrisPage = () => {
-        setIsQrisPageOpen(false);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-    };
-
     const formatRupiah = (amount: number | string) => {
         const numeric =
             typeof amount === 'string' ? parseFloat(amount) : amount;
@@ -263,70 +226,6 @@ export default function OrderStatusPage({
         toast.success('Nomor pesanan disalin ke clipboard!');
     };
 
-    const handleSimulateQrisSuccess = () => {
-        router.reload({ only: ['order'] });
-    };
-
-    const handleResetExpiredQris = async () => {
-        if (isResettingQris) return;
-        setIsResettingQris(true);
-        try {
-            const csrfToken = document
-                .querySelector('meta[name="csrf-token"]')
-                ?.getAttribute('content');
-
-            const res = await fetch(
-                `/payments/orders/${order.order_number}/initiate`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Accept: 'application/json',
-                        'X-CSRF-TOKEN': csrfToken || '',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
-                    body: JSON.stringify({
-                        payment_method: 'qris',
-                        gateway:
-                            order.payment_gateway ??
-                            order.latest_payment?.gateway ??
-                            paymentGateway?.driver ??
-                            'xendit',
-                        channel:
-                            order.payment_channel ??
-                            order.latest_payment?.channel ??
-                            'QRIS',
-                        force_new: true,
-                    }),
-                },
-            );
-
-            const data = await res.json().catch(() => null);
-            if (!res.ok || !data?.success) {
-                throw new Error(
-                    data?.message ||
-                        'Gagal mereset dan membuat kode QRIS baru.',
-                );
-            }
-
-            toast.success('Kode QRIS baru berhasil dibuat!');
-            router.reload({
-                only: ['order'],
-                onSuccess: () => {
-                    openQrisPage();
-                },
-            });
-        } catch (err: unknown) {
-            const message =
-                err instanceof Error
-                    ? err.message
-                    : 'Gagal mereset dan membuat kode QRIS baru.';
-            toast.error(message);
-        } finally {
-            setIsResettingQris(false);
-        }
-    };
-
     const handleSwitchToCash = () => {
         router.post(
             `/order/switch-payment-method/${order.order_number}`,
@@ -334,7 +233,6 @@ export default function OrderStatusPage({
             {
                 preserveScroll: true,
                 onSuccess: () => {
-                    setIsQrisPageOpen(false);
                     window.scrollTo({ top: 0, behavior: 'smooth' });
                     toast.success(
                         'Metode pembayaran dialihkan ke Tunai di Kasir.',
@@ -346,29 +244,6 @@ export default function OrderStatusPage({
                         typeof firstErr === 'string' && firstErr !== ''
                             ? firstErr
                             : 'Gagal mengalihkan metode ke Tunai di Kasir.',
-                    );
-                },
-            },
-        );
-    };
-
-    const handleSwitchToQris = () => {
-        router.post(
-            `/order/switch-payment-method/${order.order_number}`,
-            { payment_method: 'qris' },
-            {
-                preserveScroll: true,
-                onSuccess: () => {
-                    setIsQrisPageOpen(true);
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                    toast.success('Metode pembayaran dialihkan ke QRIS.');
-                },
-                onError: (errors) => {
-                    const firstErr = Object.values(errors)[0];
-                    toast.error(
-                        typeof firstErr === 'string' && firstErr !== ''
-                            ? firstErr
-                            : 'Gagal mengalihkan metode ke QRIS.',
                     );
                 },
             },
@@ -614,1143 +489,964 @@ export default function OrderStatusPage({
 
     return (
         <>
-            <Head
-                title={
-                    isQrisPageOpen
-                        ? `Pembayaran QRIS #${order.order_number} • SIDE LINE`
-                        : `Status Pesanan #${order.order_number} • SIDE LINE`
-                }
-            />
+            <Head title={`Status Pesanan #${order.order_number} • SIDE LINE`} />
 
             {/* WRAPPER DESKTOP FRAME */}
             <div className="flex min-h-screen items-start justify-center bg-[#141413] font-sans selection:bg-[#C52828] selection:text-white md:py-6">
                 <div className="relative flex min-h-screen w-full max-w-md flex-col overflow-x-hidden bg-[#FAF8F4] pb-10 shadow-2xl sm:max-w-lg md:min-h-[92vh] md:rounded-2xl md:border-[8px] md:border-[#242321]">
-                    {isQrisPageOpen ? (
-                        /* ========================================================================= */
-                        /* HALAMAN PEMBAYARAN QRIS PENUH (BUKAN MODAL POPUP)                         */
-                        /* ========================================================================= */
-                        <QrisPaymentView
-                            orderNumber={order.order_number}
-                            tableNumber={order.table.table_number}
-                            tableName={order.table.name}
-                            customerName={order.customer_name}
-                            totalAmount={
-                                unpaidBalance > 0
-                                    ? unpaidBalance
-                                    : Number(order.total_amount)
-                            }
-                            onBackToStatus={closeQrisPage}
-                            onSimulateSuccess={handleSimulateQrisSuccess}
-                            onSwitchToCash={
-                                paymentPolicy.allow_cash
-                                    ? handleSwitchToCash
-                                    : undefined
-                            }
-                            expiryMinutes={paymentPolicy.expiry_minutes}
-                            showSimulator={canSimulate}
-                            paymentGateway={
-                                order.payment_gateway ??
-                                latestDigitalPayment?.gateway ??
-                                paymentGateway?.driver ??
-                                'xendit'
-                            }
-                            paymentGatewayLabel={
-                                latestDigitalPayment?.gateway_label ??
-                                paymentGateway?.label ??
-                                'Pembayaran Digital'
-                            }
-                            paymentGatewayMode={paymentGateway?.mode ?? null}
-                            paymentChannel={
-                                order.payment_channel ??
-                                latestDigitalPayment?.channel ??
-                                'QRIS'
-                            }
-                            paymentReference={
-                                latestDigitalPayment?.payment_reference ??
-                                (order.payment_method === 'qris' &&
-                                !hasPartialPayment
-                                    ? order.payment_reference
-                                    : null) ??
-                                null
-                            }
-                            checkoutUrl={
-                                latestDigitalPayment?.checkout_url ?? null
-                            }
-                            qrString={latestDigitalPayment?.qr_string ?? null}
-                            expiredAt={latestDigitalPayment?.expired_at ?? null}
-                            paymentStatus={latestDigitalPayment?.status ?? null}
-                            orderPaymentStatus={order.payment_status}
-                        />
-                    ) : (
-                        /* ========================================================================= */
-                        /* HALAMAN MENUNGGU PESANAN / STATUS & NOTA PEMESANAN                        */
-                        /* ========================================================================= */
-                        <>
-                            {/* Top Sticky Header */}
-                            <header className="sticky top-0 z-20 flex items-center justify-between border-b border-[#EBE5DC] bg-[#FAF8F4]/95 px-4 py-3 backdrop-blur-xs">
-                                <Link
-                                    href={
-                                        order.order_status === 'pending' ||
-                                        order.order_status === 'processing'
-                                            ? `/order?table=${order.table.qr_token}&order=${order.order_number}`
-                                            : `/order?table=${order.table.qr_token}`
-                                    }
-                                    className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-3 py-1.5 text-[11px] leading-none font-semibold whitespace-nowrap text-[#1A1A1A] transition hover:bg-[#EAE3D5]"
+                    {/* ========================================================================= */}
+                    {/* HALAMAN MENUNGGU PESANAN / STATUS & NOTA PEMESANAN                        */}
+                    {/* ========================================================================= */}
+                    <>
+                        {/* Top Sticky Header */}
+                        <header className="sticky top-0 z-20 flex items-center justify-between border-b border-[#EBE5DC] bg-[#FAF8F4]/95 px-4 py-3 backdrop-blur-xs">
+                            <Link
+                                href={
+                                    order.order_status === 'pending' ||
+                                    order.order_status === 'processing'
+                                        ? `/order?table=${order.table.qr_token}&order=${order.order_number}`
+                                        : `/order?table=${order.table.qr_token}`
+                                }
+                                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-3 py-1.5 text-[11px] leading-none font-semibold whitespace-nowrap text-[#1A1A1A] transition hover:bg-[#EAE3D5]"
+                            >
+                                <ArrowLeft weight="bold" className="size-3.5" />
+                                <span>Kembali ke Menu</span>
+                            </Link>
+
+                            <div className="flex items-center gap-2">
+                                {order.order_status !== 'completed' &&
+                                    order.order_status !== 'cancelled' && (
+                                        <button
+                                            type="button"
+                                            onClick={toggleCustomerSound}
+                                            className={cn(
+                                                'inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] leading-none font-bold transition',
+                                                soundEnabled
+                                                    ? 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                                                    : 'border-[#E6DFD3] bg-[#F3EFE6] text-[#6E6A64] hover:bg-[#EAE3D5]',
+                                            )}
+                                            title="Aktifkan/Matikan suara notifikasi saat menu siap diantar"
+                                        >
+                                            {soundEnabled ? (
+                                                <Volume2 className="size-3" />
+                                            ) : (
+                                                <VolumeX className="size-3" />
+                                            )}
+                                            <span>
+                                                {soundEnabled
+                                                    ? 'Notif Aktif'
+                                                    : 'Notif Senyap'}
+                                            </span>
+                                        </button>
+                                    )}
+                                <span className="rounded-[4px] bg-[#1A1A1A] px-2.5 py-1.5 text-[10px] leading-none font-bold whitespace-nowrap text-white">
+                                    MEJA {order.table.table_number}
+                                </span>
+                            </div>
+                        </header>
+
+                        <main className="flex-1 space-y-4 p-4 sm:p-5">
+                            {/* KARTU 1: Status Utama & Stepper Progres */}
+                            <div className="space-y-4 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-5 text-center shadow-[0_2px_12px_rgba(26,26,26,0.03)] sm:p-6">
+                                <div
+                                    className={cn(
+                                        'mx-auto flex size-16 items-center justify-center rounded-full',
+                                        statusConfig.iconCircleStyle,
+                                    )}
                                 >
-                                    <ArrowLeft
-                                        weight="bold"
-                                        className="size-3.5"
+                                    <StatusIcon
+                                        weight="duotone"
+                                        className="size-8"
                                     />
-                                    <span>Kembali ke Menu</span>
-                                </Link>
-
-                                <div className="flex items-center gap-2">
-                                    {order.order_status !== 'completed' &&
-                                        order.order_status !== 'cancelled' && (
-                                            <button
-                                                type="button"
-                                                onClick={toggleCustomerSound}
-                                                className={cn(
-                                                    'inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] leading-none font-bold transition',
-                                                    soundEnabled
-                                                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-                                                        : 'border-[#E6DFD3] bg-[#F3EFE6] text-[#6E6A64] hover:bg-[#EAE3D5]',
-                                                )}
-                                                title="Aktifkan/Matikan suara notifikasi saat menu siap diantar"
-                                            >
-                                                {soundEnabled ? (
-                                                    <Volume2 className="size-3" />
-                                                ) : (
-                                                    <VolumeX className="size-3" />
-                                                )}
-                                                <span>
-                                                    {soundEnabled
-                                                        ? 'Notif Aktif'
-                                                        : 'Notif Senyap'}
-                                                </span>
-                                            </button>
-                                        )}
-                                    <span className="rounded-[4px] bg-[#1A1A1A] px-2.5 py-1.5 text-[10px] leading-none font-bold whitespace-nowrap text-white">
-                                        MEJA {order.table.table_number}
-                                    </span>
                                 </div>
-                            </header>
 
-                            <main className="flex-1 space-y-4 p-4 sm:p-5">
-                                {/* KARTU 1: Status Utama & Stepper Progres */}
-                                <div className="space-y-4 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-5 text-center shadow-[0_2px_12px_rgba(26,26,26,0.03)] sm:p-6">
-                                    <div
+                                <div className="space-y-1.5">
+                                    <span
                                         className={cn(
-                                            'mx-auto flex size-16 items-center justify-center rounded-full',
-                                            statusConfig.iconCircleStyle,
+                                            'inline-flex items-center gap-1.5 rounded-[4px] px-3 py-1 text-xs font-bold',
+                                            statusConfig.badgeStyle,
                                         )}
                                     >
-                                        <StatusIcon
-                                            weight="duotone"
-                                            className="size-8"
-                                        />
-                                    </div>
-
-                                    <div className="space-y-1.5">
-                                        <span
-                                            className={cn(
-                                                'inline-flex items-center gap-1.5 rounded-[4px] px-3 py-1 text-xs font-bold',
-                                                statusConfig.badgeStyle,
-                                            )}
-                                        >
-                                            <span>{statusConfig.title}</span>
-                                        </span>
-                                        <p className="mx-auto max-w-xs pt-0.5 text-[13px] leading-relaxed text-[#6E6A64]">
-                                            {statusConfig.description}
-                                        </p>
-                                    </div>
-
-                                    {/* Stepper Progres */}
-                                    {order.order_status !== 'cancelled' && (
-                                        <div className="space-y-2.5 pt-2">
-                                            <div className="grid grid-cols-4 gap-1.5">
-                                                {progressSteps.map((item) => {
-                                                    const isReached =
-                                                        statusConfig.step >=
-                                                        item.step;
-                                                    const isCurrent =
-                                                        statusConfig.step ===
-                                                        item.step;
-
-                                                    return (
-                                                        <div
-                                                            key={item.step}
-                                                            className="flex flex-col items-center gap-1.5"
-                                                        >
-                                                            <div
-                                                                className={cn(
-                                                                    'flex size-6 items-center justify-center rounded-full text-[10px] font-bold transition-all',
-                                                                    isReached
-                                                                        ? 'bg-[#C52828] text-white shadow-[0_2px_8px_rgba(197,40,40,0.28)]'
-                                                                        : 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#8C857B]',
-                                                                    isCurrent &&
-                                                                        'ring-3 ring-[#C52828]/20',
-                                                                )}
-                                                            >
-                                                                {isReached ? (
-                                                                    <Check
-                                                                        weight="bold"
-                                                                        className="size-3"
-                                                                    />
-                                                                ) : (
-                                                                    item.step
-                                                                )}
-                                                            </div>
-                                                            <span
-                                                                className={cn(
-                                                                    'text-[11px] font-semibold',
-                                                                    isReached
-                                                                        ? 'font-bold text-[#1A1A1A]'
-                                                                        : 'text-[#8C857B]',
-                                                                )}
-                                                            >
-                                                                {item.label}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-
-                                            <div className="h-1.5 overflow-hidden rounded-full bg-[#F3EFE6]">
-                                                <div
-                                                    className="h-full rounded-full bg-[#C52828] transition-all duration-500"
-                                                    style={{
-                                                        width: `${(statusConfig.step / 4) * 100}%`,
-                                                    }}
-                                                />
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* Auto-update notice */}
-                                    {order.order_status !== 'completed' &&
-                                        order.order_status !== 'cancelled' && (
-                                            <div className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[#F3EFE6] px-3 py-1 text-[11px] font-medium text-[#6E6A64]">
-                                                <ArrowsClockwise
-                                                    weight="bold"
-                                                    className="size-3.5 animate-spin text-[#C52828]"
-                                                />
-                                                <span>
-                                                    Status diperbarui otomatis
-                                                    secara real-time
-                                                </span>
-                                            </div>
-                                        )}
+                                        <span>{statusConfig.title}</span>
+                                    </span>
+                                    <p className="mx-auto max-w-xs pt-0.5 text-[13px] leading-relaxed text-[#6E6A64]">
+                                        {statusConfig.description}
+                                    </p>
                                 </div>
 
-                                {/* BANNER NOTIFIKASI MENU SIAP DIANTARKAN */}
-                                {order.order_status !== 'completed' &&
-                                    order.order_status !== 'cancelled' &&
-                                    servingProgress.servedPaidItems.length >
-                                        0 && (
-                                        <div className="space-y-2.5 rounded-xl border-[1.5px] border-emerald-400 bg-emerald-50/90 p-4 shadow-[0_4px_16px_rgba(16,185,129,0.12)]">
-                                            <div className="flex items-start justify-between gap-2">
-                                                <div className="flex items-center gap-2.5">
-                                                    <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-xs">
-                                                        <Bell className="size-4.5 animate-bounce" />
-                                                    </div>
-                                                    <div>
-                                                        <p className="text-[13.5px] leading-tight font-extrabold text-emerald-950">
-                                                            Menu Siap Diantarkan
-                                                            ke Meja{' '}
-                                                            {
-                                                                order.table
-                                                                    .table_number
-                                                            }
-                                                            !
-                                                        </p>
-                                                        <p className="mt-0.5 text-[11px] font-medium text-emerald-800">
-                                                            {servingProgress.remainingTotalCount >
-                                                            0
-                                                                ? `${servingProgress.servedCount} menu didahulukan siap diantar; sisa ${servingProgress.remainingTotalCount} menu sedang diracik.`
-                                                                : 'Seluruh menu pesanan Anda sudah siap disajikan ke meja.'}
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                                <span className="shrink-0 rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">
-                                                    {
-                                                        servingProgress.servedCount
-                                                    }
-                                                    /
-                                                    {
-                                                        servingProgress.totalActiveCount
-                                                    }
-                                                </span>
-                                            </div>
+                                {/* Stepper Progres */}
+                                {order.order_status !== 'cancelled' && (
+                                    <div className="space-y-2.5 pt-2">
+                                        <div className="grid grid-cols-4 gap-1.5">
+                                            {progressSteps.map((item) => {
+                                                const isReached =
+                                                    statusConfig.step >=
+                                                    item.step;
+                                                const isCurrent =
+                                                    statusConfig.step ===
+                                                    item.step;
 
-                                            <div className="space-y-1.5 border-t border-emerald-200/80 pt-2">
-                                                {servingProgress.servedPaidItems.map(
-                                                    (readyItem) => (
+                                                return (
+                                                    <div
+                                                        key={item.step}
+                                                        className="flex flex-col items-center gap-1.5"
+                                                    >
                                                         <div
-                                                            key={readyItem.id}
-                                                            className="flex items-center justify-between gap-2 rounded-lg bg-white/90 px-3 py-1.5 text-xs shadow-2xs"
+                                                            className={cn(
+                                                                'flex size-6 items-center justify-center rounded-full text-[10px] font-bold transition-all',
+                                                                isReached
+                                                                    ? 'bg-[#C52828] text-white shadow-[0_2px_8px_rgba(197,40,40,0.28)]'
+                                                                    : 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#8C857B]',
+                                                                isCurrent &&
+                                                                    'ring-3 ring-[#C52828]/20',
+                                                            )}
                                                         >
-                                                            <div className="min-w-0 font-bold text-[#1A1A1A]">
-                                                                <span>
-                                                                    {
-                                                                        readyItem.quantity
-                                                                    }
-                                                                    x{' '}
-                                                                    {
-                                                                        readyItem.menu_name
-                                                                    }
-                                                                </span>
-                                                                {readyItem.options &&
-                                                                    readyItem
-                                                                        .options
-                                                                        .length >
-                                                                        0 && (
-                                                                        <span className="ml-1 text-[10.5px] font-normal text-[#6E6A64]">
-                                                                            (
-                                                                            {readyItem.options
-                                                                                .map(
-                                                                                    (
-                                                                                        o,
-                                                                                    ) =>
-                                                                                        o.option_name,
-                                                                                )
-                                                                                .join(
-                                                                                    ', ',
-                                                                                )}
-                                                                            )
-                                                                        </span>
-                                                                    )}
-                                                            </div>
-                                                            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                                                            {isReached ? (
                                                                 <Check
                                                                     weight="bold"
-                                                                    className="size-2.5"
+                                                                    className="size-3"
                                                                 />
-                                                                Siap Diantarkan
-                                                            </span>
+                                                            ) : (
+                                                                item.step
+                                                            )}
                                                         </div>
-                                                    ),
-                                                )}
-                                            </div>
+                                                        <span
+                                                            className={cn(
+                                                                'text-[11px] font-semibold',
+                                                                isReached
+                                                                    ? 'font-bold text-[#1A1A1A]'
+                                                                    : 'text-[#8C857B]',
+                                                            )}
+                                                        >
+                                                            {item.label}
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+
+                                        <div className="h-1.5 overflow-hidden rounded-full bg-[#F3EFE6]">
+                                            <div
+                                                className="h-full rounded-full bg-[#C52828] transition-all duration-500"
+                                                style={{
+                                                    width: `${(statusConfig.step / 4) * 100}%`,
+                                                }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Auto-update notice */}
+                                {order.order_status !== 'completed' &&
+                                    order.order_status !== 'cancelled' && (
+                                        <div className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[#F3EFE6] px-3 py-1 text-[11px] font-medium text-[#6E6A64]">
+                                            <ArrowsClockwise
+                                                weight="bold"
+                                                className="size-3.5 animate-spin text-[#C52828]"
+                                            />
+                                            <span>
+                                                Status diperbarui otomatis
+                                                secara real-time
+                                            </span>
                                         </div>
                                     )}
+                            </div>
 
-                                {/* KARTU 2: Status Pembayaran (Lunas vs Gagal vs QRIS vs Tunai Kasir) */}
-                                {order.payment_status === 'paid' ? (
-                                    /* 2A: Tampilan Lunas Berhasil */
-                                    <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-200/90 bg-[#FFFDFB] p-4 shadow-[0_2px_10px_rgba(16,185,129,0.05)]">
-                                        <div className="flex items-center gap-3">
-                                            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white">
-                                                <CheckCircle
+                            {/* BANNER NOTIFIKASI MENU SIAP DIANTARKAN */}
+                            {order.order_status !== 'completed' &&
+                                order.order_status !== 'cancelled' &&
+                                servingProgress.servedPaidItems.length > 0 && (
+                                    <div className="space-y-2.5 rounded-xl border-[1.5px] border-emerald-400 bg-emerald-50/90 p-4 shadow-[0_4px_16px_rgba(16,185,129,0.12)]">
+                                        <div className="flex items-start justify-between gap-2">
+                                            <div className="flex items-center gap-2.5">
+                                                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-xs">
+                                                    <Bell className="size-4.5 animate-bounce" />
+                                                </div>
+                                                <div>
+                                                    <p className="text-[13.5px] leading-tight font-extrabold text-emerald-950">
+                                                        Menu Siap Diantarkan ke
+                                                        Meja{' '}
+                                                        {
+                                                            order.table
+                                                                .table_number
+                                                        }
+                                                        !
+                                                    </p>
+                                                    <p className="mt-0.5 text-[11px] font-medium text-emerald-800">
+                                                        {servingProgress.remainingTotalCount >
+                                                        0
+                                                            ? `${servingProgress.servedCount} menu didahulukan siap diantar; sisa ${servingProgress.remainingTotalCount} menu sedang diracik.`
+                                                            : 'Seluruh menu pesanan Anda sudah siap disajikan ke meja.'}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <span className="shrink-0 rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">
+                                                {servingProgress.servedCount}/
+                                                {
+                                                    servingProgress.totalActiveCount
+                                                }
+                                            </span>
+                                        </div>
+
+                                        <div className="space-y-1.5 border-t border-emerald-200/80 pt-2">
+                                            {servingProgress.servedPaidItems.map(
+                                                (readyItem) => (
+                                                    <div
+                                                        key={readyItem.id}
+                                                        className="flex items-center justify-between gap-2 rounded-lg bg-white/90 px-3 py-1.5 text-xs shadow-2xs"
+                                                    >
+                                                        <div className="min-w-0 font-bold text-[#1A1A1A]">
+                                                            <span>
+                                                                {
+                                                                    readyItem.quantity
+                                                                }
+                                                                x{' '}
+                                                                {
+                                                                    readyItem.menu_name
+                                                                }
+                                                            </span>
+                                                            {readyItem.options &&
+                                                                readyItem
+                                                                    .options
+                                                                    .length >
+                                                                    0 && (
+                                                                    <span className="ml-1 text-[10.5px] font-normal text-[#6E6A64]">
+                                                                        (
+                                                                        {readyItem.options
+                                                                            .map(
+                                                                                (
+                                                                                    o,
+                                                                                ) =>
+                                                                                    o.option_name,
+                                                                            )
+                                                                            .join(
+                                                                                ', ',
+                                                                            )}
+                                                                        )
+                                                                    </span>
+                                                                )}
+                                                        </div>
+                                                        <span className="inline-flex shrink-0 items-center gap-1 rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                                                            <Check
+                                                                weight="bold"
+                                                                className="size-2.5"
+                                                            />
+                                                            Siap Diantarkan
+                                                        </span>
+                                                    </div>
+                                                ),
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+
+                            {/* KARTU 2: Status Pembayaran (Lunas vs Gagal vs QRIS vs Tunai Kasir) */}
+                            {order.payment_status === 'paid' ? (
+                                /* 2A: Tampilan Lunas Berhasil */
+                                <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-200/90 bg-[#FFFDFB] p-4 shadow-[0_2px_10px_rgba(16,185,129,0.05)]">
+                                    <div className="flex items-center gap-3">
+                                        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white">
+                                            <CheckCircle
+                                                weight="fill"
+                                                className="size-5.5"
+                                            />
+                                        </div>
+                                        <div>
+                                            <div className="text-[13px] font-bold text-[#1A1A1A]">
+                                                {order.payment_method === 'qris'
+                                                    ? 'Pembayaran QRIS Berhasil'
+                                                    : 'Pembayaran Tunai Diterima'}
+                                            </div>
+                                            <div className="text-[11px] text-[#6E6A64]">
+                                                {order.payment_method === 'qris'
+                                                    ? `Terverifikasi via ${order.latest_payment?.gateway_label ?? paymentGateway?.label ?? 'Pembayaran Digital'}`
+                                                    : 'Dikonfirmasi lunas oleh kasir'}
+                                            </div>
+                                            {(order.latest_payment
+                                                ?.payment_reference ||
+                                                order.payment_reference) && (
+                                                <div className="mt-0.5 font-mono text-[10px] text-[#6E6A64]">
+                                                    Ref:{' '}
+                                                    {order.latest_payment
+                                                        ?.payment_reference ??
+                                                        order.payment_reference}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="shrink-0 text-right">
+                                        <span className="inline-block rounded-[4px] border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                                            LUNAS
+                                        </span>
+                                        <div className="mt-0.5 text-xs font-bold text-[#1A1A1A] tabular-nums">
+                                            {formatRupiah(order.total_amount)}
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : order.payment_status === 'failed' ||
+                              isFollowupQrisExpired ? (
+                                /* 2B: Tampilan Pembayaran Gagal / Kedaluwarsa */
+                                <div className="space-y-3 rounded-xl border-[1.5px] border-[#C52828] bg-[#FFFDFB] p-5 shadow-[0_2px_12px_rgba(197,40,40,0.06)]">
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[#FDECEB] text-[#C52828]">
+                                                <WarningCircle
                                                     weight="fill"
-                                                    className="size-5.5"
+                                                    className="size-5"
                                                 />
                                             </div>
                                             <div>
-                                                <div className="text-[13px] font-bold text-[#1A1A1A]">
-                                                    {order.payment_method ===
-                                                    'qris'
-                                                        ? 'Pembayaran QRIS Berhasil'
-                                                        : 'Pembayaran Tunai Diterima'}
+                                                <div className="text-[14px] font-bold text-[#1A1A1A]">
+                                                    Pembayaran Digital
+                                                    Kedaluwarsa
                                                 </div>
                                                 <div className="text-[11px] text-[#6E6A64]">
-                                                    {order.payment_method ===
-                                                    'qris'
-                                                        ? `Terverifikasi via ${order.latest_payment?.gateway_label ?? paymentGateway?.label ?? 'Pembayaran Digital'}`
-                                                        : 'Dikonfirmasi lunas oleh kasir'}
+                                                    Silakan alihkan ke
+                                                    pembayaran tunai di kasir
                                                 </div>
-                                                {(order.latest_payment
-                                                    ?.payment_reference ||
-                                                    order.payment_reference) && (
-                                                    <div className="mt-0.5 font-mono text-[10px] text-[#6E6A64]">
-                                                        Ref:{' '}
-                                                        {order.latest_payment
-                                                            ?.payment_reference ??
-                                                            order.payment_reference}
-                                                    </div>
-                                                )}
                                             </div>
                                         </div>
-                                        <div className="shrink-0 text-right">
-                                            <span className="inline-block rounded-[4px] border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700">
-                                                LUNAS
-                                            </span>
-                                            <div className="mt-0.5 text-xs font-bold text-[#1A1A1A] tabular-nums">
-                                                {formatRupiah(
-                                                    order.total_amount,
-                                                )}
-                                            </div>
-                                        </div>
+                                        <span className="shrink-0 rounded-[4px] bg-[#FDECEB] px-2.5 py-0.5 text-[10px] font-bold text-[#C52828]">
+                                            Kedaluwarsa
+                                        </span>
                                     </div>
-                                ) : order.payment_status === 'failed' ||
-                                  isFollowupQrisExpired ? (
-                                    /* 2B: Tampilan Pembayaran Gagal / Kedaluwarsa */
-                                    <div className="space-y-3 rounded-xl border-[1.5px] border-[#C52828] bg-[#FFFDFB] p-5 shadow-[0_2px_12px_rgba(197,40,40,0.06)]">
-                                        <div className="flex items-start justify-between gap-2">
-                                            <div className="flex items-center gap-2.5">
-                                                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[#FDECEB] text-[#C52828]">
-                                                    <WarningCircle
-                                                        weight="fill"
-                                                        className="size-5"
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <div className="text-[14px] font-bold text-[#1A1A1A]">
-                                                        {isFollowupQrisExpired
-                                                            ? 'Tagihan QRIS Tambahan Kedaluwarsa'
-                                                            : 'Pembayaran QRIS Kedaluwarsa'}
-                                                    </div>
-                                                    <div className="text-[11px] text-[#6E6A64]">
-                                                        Silakan reset kode QRIS
-                                                        baru atau bayar di kasir
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <span className="shrink-0 rounded-[4px] bg-[#FDECEB] px-2.5 py-0.5 text-[10px] font-bold text-[#C52828]">
-                                                Kedaluwarsa
-                                            </span>
-                                        </div>
 
-                                        <p className="text-xs leading-relaxed text-[#6E6A64]">
-                                            Kode QRIS sebelumnya melewati batas
-                                            waktu pembayaran (
-                                            {paymentPolicy.expiry_minutes}{' '}
-                                            menit) dan tidak otomatis
-                                            diperpanjang. Tekan tombol reset
-                                            untuk membuat QRIS baru atau beralih
-                                            ke pembayaran tunai.
-                                        </p>
+                                    <p className="text-xs leading-relaxed text-[#6E6A64]">
+                                        Sesi pembayaran digital sebelumnya telah
+                                        berakhir. Silakan beralih ke pembayaran
+                                        tunai di meja kasir untuk melanjutkan
+                                        pesanan Anda.
+                                    </p>
 
-                                        <div
-                                            className={cn(
-                                                'grid grid-cols-1 gap-2 border-t border-[#EBE5DC] pt-2',
-                                                paymentPolicy.allow_xendit &&
-                                                    paymentPolicy.allow_cash &&
-                                                    'sm:grid-cols-2',
-                                            )}
-                                        >
-                                            {paymentPolicy.allow_xendit && (
-                                                <button
-                                                    type="button"
-                                                    onClick={
-                                                        handleResetExpiredQris
-                                                    }
-                                                    disabled={isResettingQris}
-                                                    className="flex h-10 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-xs transition hover:bg-[#B02222] disabled:opacity-60"
-                                                >
-                                                    <ArrowsClockwise
-                                                        weight="bold"
-                                                        className={cn(
-                                                            'size-4',
-                                                            isResettingQris &&
-                                                                'animate-spin',
-                                                        )}
-                                                    />
-                                                    <span>
-                                                        {isResettingQris
-                                                            ? 'Mereset QRIS...'
-                                                            : 'Reset / Buat QRIS Baru'}
-                                                    </span>
-                                                </button>
-                                            )}
-                                            {paymentPolicy.allow_cash && (
-                                                <button
-                                                    type="button"
-                                                    onClick={handleSwitchToCash}
-                                                    disabled={isResettingQris}
-                                                    className="flex h-10 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] px-4 text-xs font-semibold text-[#1A1A1A] transition hover:bg-[#EAE3D5] disabled:opacity-60"
-                                                >
-                                                    <Money
-                                                        weight="bold"
-                                                        className="size-4 text-[#4A2C18]"
-                                                    />
-                                                    <span>
-                                                        Bayar Tunai di Kasir
-                                                    </span>
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                ) : order.payment_method === 'qris' ? (
-                                    /* 2C: Tampilan Tagihan QRIS Online */
-                                    <div className="space-y-4 rounded-xl border-[1.5px] border-[#C52828] bg-[#FFFDFB] p-5 shadow-[0_4px_16px_rgba(197,40,40,0.06)]">
-                                        <div className="flex items-center justify-between gap-2">
-                                            <div className="flex min-w-0 items-center gap-2.5">
-                                                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-[#C52828] text-white shadow-xs">
-                                                    <QrCode
-                                                        weight="bold"
-                                                        className="size-5"
-                                                    />
-                                                </div>
-                                                <div className="min-w-0">
-                                                    <span className="block text-[14px] leading-snug font-bold text-[#1A1A1A]">
-                                                        {hasPartialPayment
-                                                            ? 'Tagihan Tambahan via QRIS'
-                                                            : 'Menunggu Pembayaran QRIS'}
-                                                    </span>
-                                                    <span className="block truncate text-[11px] text-[#6E6A64]">
-                                                        Scan via{' '}
-                                                        {order.latest_payment
-                                                            ?.gateway_label ??
-                                                            paymentGateway?.label ??
-                                                            'Pembayaran Digital'}
-                                                    </span>
-                                                    {(order.latest_payment
-                                                        ?.payment_reference ||
-                                                        order.payment_reference) && (
-                                                        <span className="block truncate font-mono text-[10px] text-[#6E6A64]">
-                                                            Ref:{' '}
-                                                            {order
-                                                                .latest_payment
-                                                                ?.payment_reference ??
-                                                                order.payment_reference}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <span className="shrink-0 rounded-[4px] bg-[#FDECEB] px-2.5 py-1 text-[10px] font-bold text-[#C52828]">
-                                                QRIS
-                                            </span>
-                                        </div>
-
-                                        <div className="flex items-center justify-between rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-4 py-3">
-                                            <div>
-                                                <span className="block text-[10px] font-semibold tracking-wider text-[#6E6A64] uppercase">
-                                                    Total Tagihan QRIS
-                                                </span>
-                                                <span className="text-[20px] font-bold text-[#C52828] tabular-nums">
-                                                    {formatRupiah(
-                                                        unpaidBalance > 0
-                                                            ? unpaidBalance
-                                                            : order.total_amount,
-                                                    )}
-                                                </span>
-                                            </div>
+                                    {paymentPolicy.allow_cash && (
+                                        <div className="border-t border-[#EBE5DC] pt-2">
                                             <button
                                                 type="button"
-                                                onClick={openQrisPage}
-                                                className="flex h-10 cursor-pointer items-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-95"
+                                                onClick={handleSwitchToCash}
+                                                className="flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-xs transition hover:bg-[#B02222]"
                                             >
-                                                <QrCode
+                                                <Money
                                                     weight="bold"
                                                     className="size-4"
                                                 />
-                                                <span>Buka Halaman QRIS</span>
+                                                <span>
+                                                    Bayar Tunai di Kasir
+                                                </span>
                                             </button>
                                         </div>
-
-                                        {paymentPolicy.allow_cash && (
-                                            <div className="flex items-center justify-between gap-2 pt-1 text-xs">
-                                                <span className="text-[11.5px] text-[#6E6A64]">
-                                                    Ingin bayar tunai di kasir
-                                                    saja?
+                                    )}
+                                </div>
+                            ) : order.payment_method === 'qris' ? (
+                                /* 2C: Pesanan QRIS historis yang belum lunas -> arahkan ke Tunai Kasir */
+                                <div className="space-y-3.5 rounded-xl border-[1.5px] border-[#C52828] bg-[#FFFDFB] p-5 shadow-[0_4px_16px_rgba(197,40,40,0.06)]">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="flex min-w-0 items-center gap-2.5">
+                                            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-[#C52828] text-white shadow-xs">
+                                                <QrCode
+                                                    weight="bold"
+                                                    className="size-5"
+                                                />
+                                            </div>
+                                            <div className="min-w-0">
+                                                <span className="block text-[14px] leading-snug font-bold text-[#1A1A1A]">
+                                                    Pembayaran Digital Sedang
+                                                    Disiapkan
                                                 </span>
-                                                <button
-                                                    type="button"
-                                                    onClick={handleSwitchToCash}
-                                                    className="cursor-pointer text-[11.5px] font-bold text-[#1A1A1A] underline underline-offset-4 transition hover:text-[#C52828]"
-                                                >
-                                                    Ganti ke Tunai Kasir
-                                                </button>
+                                                <span className="block text-[11px] text-[#6E6A64]">
+                                                    Silakan alihkan tagihan ini
+                                                    ke Tunai di Kasir
+                                                </span>
                                             </div>
-                                        )}
-                                    </div>
-                                ) : (
-                                    /* 2D: Tampilan Tagihan Tunai di Meja Kasir */
-                                    <div className="space-y-3.5 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
-                                        <div className="flex items-center justify-between gap-2">
-                                            <div className="flex items-center gap-2.5">
-                                                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] text-[#4A2C18]">
-                                                    <Money
-                                                        weight="duotone"
-                                                        className="size-5.5"
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <span className="block text-[14px] leading-snug font-bold text-[#1A1A1A]">
-                                                        Menunggu Pembayaran di
-                                                        Kasir
-                                                    </span>
-                                                    <span className="text-[11px] text-[#6E6A64]">
-                                                        Sebutkan nama pemesan
-                                                        atau nomor meja
-                                                    </span>
-                                                </div>
-                                            </div>
-                                            <span className="rounded-[4px] border border-[#E6DFD3] bg-[#F3EFE6] px-3 py-1 text-[10.5px] font-bold text-[#4A2C18]">
-                                                Tunai Kasir
-                                            </span>
                                         </div>
+                                        <span className="shrink-0 rounded-[4px] bg-[#FDECEB] px-2.5 py-1 text-[10px] font-bold text-[#C52828]">
+                                            Belum Bayar
+                                        </span>
+                                    </div>
 
-                                        <div className="rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] p-3.5 text-xs leading-relaxed text-[#3F3A34]">
-                                            Silakan menuju ke meja kasir untuk
-                                            menyelesaikan pembayaran tunai
-                                            sebesar{' '}
-                                            <strong className="text-[14px] font-bold text-[#C52828] tabular-nums">
+                                    <div className="flex items-center justify-between rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-4 py-3">
+                                        <div>
+                                            <span className="block text-[10px] font-semibold tracking-wider text-[#6E6A64] uppercase">
+                                                Total Tagihan
+                                            </span>
+                                            <span className="text-[20px] font-bold text-[#C52828] tabular-nums">
                                                 {formatRupiah(
                                                     unpaidBalance > 0
                                                         ? unpaidBalance
                                                         : order.total_amount,
                                                 )}
-                                            </strong>{' '}
-                                            atas nama{' '}
-                                            <strong className="text-[#1A1A1A]">
-                                                {order.customer_name}
-                                            </strong>{' '}
-                                            (Meja {order.table.table_number}).
-                                        </div>
-
-                                        {paymentPolicy.allow_xendit && (
-                                            <div className="flex items-center justify-between pt-1">
-                                                <button
-                                                    type="button"
-                                                    onClick={handleSwitchToQris}
-                                                    className="flex cursor-pointer items-center gap-1.5 text-xs font-bold text-[#C52828] hover:underline"
-                                                >
-                                                    <QrCode
-                                                        weight="bold"
-                                                        className="size-4"
-                                                    />
-                                                    <span>
-                                                        Mau bayar praktis via
-                                                        QRIS saja? Klik di sini
-                                                    </span>
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-
-                                {/* KARTU 3: Rincian Nota Digital */}
-                                <div className="space-y-4 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
-                                    <div className="flex items-center justify-between border-b border-[#EBE5DC] pb-3.5">
-                                        <div className="flex items-center gap-2 text-[15px] font-bold text-[#1A1A1A]">
-                                            <Receipt
-                                                weight="duotone"
-                                                className="size-5 text-[#4A2C18]"
-                                            />
-                                            <span>
-                                                {order.payment_status === 'paid'
-                                                    ? 'Nota Pembelian'
-                                                    : 'Nota Pemesanan'}
                                             </span>
                                         </div>
-                                        <span
-                                            className={cn(
-                                                'rounded-[4px] px-2.5 py-0.5 text-[10.5px] font-bold',
-                                                order.payment_status === 'paid'
-                                                    ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
-                                                    : hasPartialPayment
-                                                      ? 'border border-[#F3D9B1] bg-[#FFF3E0] text-[#9A5B13]'
-                                                      : 'bg-[#FDECEB] text-[#C52828]',
-                                            )}
-                                        >
-                                            {order.payment_status === 'paid'
-                                                ? 'LUNAS'
-                                                : hasPartialPayment
-                                                  ? 'TAGIHAN TAMBAHAN'
-                                                  : 'BELUM DIBAYAR'}
+                                        {paymentPolicy.allow_cash && (
+                                            <button
+                                                type="button"
+                                                onClick={handleSwitchToCash}
+                                                className="flex h-10 cursor-pointer items-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-95"
+                                            >
+                                                <Money
+                                                    weight="bold"
+                                                    className="size-4"
+                                                />
+                                                <span>
+                                                    Bayar Tunai di Kasir
+                                                </span>
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : (
+                                /* 2D: Tampilan Tagihan Tunai di Meja Kasir */
+                                <div className="space-y-3.5 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-[#E6DFD3] bg-[#F3EFE6] text-[#4A2C18]">
+                                                <Money
+                                                    weight="duotone"
+                                                    className="size-5.5"
+                                                />
+                                            </div>
+                                            <div>
+                                                <span className="block text-[14px] leading-snug font-bold text-[#1A1A1A]">
+                                                    Menunggu Pembayaran di Kasir
+                                                </span>
+                                                <span className="text-[11px] text-[#6E6A64]">
+                                                    Sebutkan nama pemesan atau
+                                                    nomor meja
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <span className="rounded-[4px] border border-[#E6DFD3] bg-[#F3EFE6] px-3 py-1 text-[10.5px] font-bold text-[#4A2C18]">
+                                            Tunai Kasir
                                         </span>
                                     </div>
 
-                                    {/* Metadata Order */}
-                                    <div className="grid grid-cols-2 gap-3 border-b border-[#EBE5DC] pb-3.5 text-xs text-[#6E6A64]">
-                                        <div>
-                                            <span className="block text-[10.5px] text-[#8C857B]">
-                                                No. Pesanan
+                                    <div className="rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] p-3.5 text-xs leading-relaxed text-[#3F3A34]">
+                                        Silakan menuju ke meja kasir untuk
+                                        menyelesaikan pembayaran tunai sebesar{' '}
+                                        <strong className="text-[14px] font-bold text-[#C52828] tabular-nums">
+                                            {formatRupiah(
+                                                unpaidBalance > 0
+                                                    ? unpaidBalance
+                                                    : order.total_amount,
+                                            )}
+                                        </strong>{' '}
+                                        atas nama{' '}
+                                        <strong className="text-[#1A1A1A]">
+                                            {order.customer_name}
+                                        </strong>{' '}
+                                        (Meja {order.table.table_number}).
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* KARTU 3: Rincian Nota Digital */}
+                            <div className="space-y-4 rounded-xl border border-[#E8E2D9] bg-[#FFFDFB] p-5 shadow-[0_2px_12px_rgba(26,26,26,0.03)]">
+                                <div className="flex items-center justify-between border-b border-[#EBE5DC] pb-3.5">
+                                    <div className="flex items-center gap-2 text-[15px] font-bold text-[#1A1A1A]">
+                                        <Receipt
+                                            weight="duotone"
+                                            className="size-5 text-[#4A2C18]"
+                                        />
+                                        <span>
+                                            {order.payment_status === 'paid'
+                                                ? 'Nota Pembelian'
+                                                : 'Nota Pemesanan'}
+                                        </span>
+                                    </div>
+                                    <span
+                                        className={cn(
+                                            'rounded-[4px] px-2.5 py-0.5 text-[10.5px] font-bold',
+                                            order.payment_status === 'paid'
+                                                ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
+                                                : hasPartialPayment
+                                                  ? 'border border-[#F3D9B1] bg-[#FFF3E0] text-[#9A5B13]'
+                                                  : 'bg-[#FDECEB] text-[#C52828]',
+                                        )}
+                                    >
+                                        {order.payment_status === 'paid'
+                                            ? 'LUNAS'
+                                            : hasPartialPayment
+                                              ? 'TAGIHAN TAMBAHAN'
+                                              : 'BELUM DIBAYAR'}
+                                    </span>
+                                </div>
+
+                                {/* Metadata Order */}
+                                <div className="grid grid-cols-2 gap-3 border-b border-[#EBE5DC] pb-3.5 text-xs text-[#6E6A64]">
+                                    <div>
+                                        <span className="block text-[10.5px] text-[#8C857B]">
+                                            No. Pesanan
+                                        </span>
+                                        <div className="flex items-center gap-1.5 pt-0.5 font-bold text-[#1A1A1A] tabular-nums">
+                                            <span>{order.order_number}</span>
+                                            <button
+                                                type="button"
+                                                onClick={copyOrderNumber}
+                                                className="cursor-pointer text-[#8C857B] transition hover:text-[#1A1A1A]"
+                                                title="Salin No. Pesanan"
+                                            >
+                                                <Copy
+                                                    weight="bold"
+                                                    className="size-3.5"
+                                                />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                        <span className="block text-[10.5px] text-[#8C857B]">
+                                            Nama Pemesan
+                                        </span>
+                                        <p className="pt-0.5 font-bold text-[#1A1A1A]">
+                                            {order.customer_name}
+                                        </p>
+                                    </div>
+                                    <div>
+                                        <span className="block text-[10.5px] text-[#8C857B]">
+                                            Lokasi Meja
+                                        </span>
+                                        <p className="pt-0.5 font-semibold text-[#3F3A34]">
+                                            Meja {order.table.table_number} (
+                                            {order.table.name || 'Dine-In'})
+                                        </p>
+                                    </div>
+                                    <div className="text-right">
+                                        <span className="block text-[10.5px] text-[#8C857B]">
+                                            Waktu Pesan
+                                        </span>
+                                        <p className="pt-0.5 font-semibold text-[#3F3A34] tabular-nums">
+                                            {new Date(
+                                                order.created_at,
+                                            ).toLocaleTimeString('id-ID', {
+                                                hour: '2-digit',
+                                                minute: '2-digit',
+                                            })}{' '}
+                                            WIB
+                                        </p>
+                                    </div>
+                                    <div className="col-span-2 space-y-1.5 border-t border-dashed border-[#E6DFD3] pt-2 text-xs">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[11px] text-[#6E6A64]">
+                                                Metode Pembayaran
                                             </span>
-                                            <div className="flex items-center gap-1.5 pt-0.5 font-bold text-[#1A1A1A] tabular-nums">
-                                                <span>
-                                                    {order.order_number}
-                                                </span>
-                                                <button
-                                                    type="button"
-                                                    onClick={copyOrderNumber}
-                                                    className="cursor-pointer text-[#8C857B] transition hover:text-[#1A1A1A]"
-                                                    title="Salin No. Pesanan"
-                                                >
-                                                    <Copy
+                                            <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-[#E6DFD3] bg-[#F3EFE6] px-2.5 py-0.5 text-[11px] font-bold text-[#1A1A1A]">
+                                                {order.payment_method ===
+                                                'qris' ? (
+                                                    <QrCode
                                                         weight="bold"
-                                                        className="size-3.5"
+                                                        className="size-3.5 text-[#C52828]"
                                                     />
-                                                </button>
-                                            </div>
-                                        </div>
-                                        <div className="text-right">
-                                            <span className="block text-[10.5px] text-[#8C857B]">
-                                                Nama Pemesan
-                                            </span>
-                                            <p className="pt-0.5 font-bold text-[#1A1A1A]">
-                                                {order.customer_name}
-                                            </p>
-                                        </div>
-                                        <div>
-                                            <span className="block text-[10.5px] text-[#8C857B]">
-                                                Lokasi Meja
-                                            </span>
-                                            <p className="pt-0.5 font-semibold text-[#3F3A34]">
-                                                Meja {order.table.table_number}{' '}
-                                                ({order.table.name || 'Dine-In'}
-                                                )
-                                            </p>
-                                        </div>
-                                        <div className="text-right">
-                                            <span className="block text-[10.5px] text-[#8C857B]">
-                                                Waktu Pesan
-                                            </span>
-                                            <p className="pt-0.5 font-semibold text-[#3F3A34] tabular-nums">
-                                                {new Date(
-                                                    order.created_at,
-                                                ).toLocaleTimeString('id-ID', {
-                                                    hour: '2-digit',
-                                                    minute: '2-digit',
-                                                })}{' '}
-                                                WIB
-                                            </p>
-                                        </div>
-                                        <div className="col-span-2 space-y-1.5 border-t border-dashed border-[#E6DFD3] pt-2 text-xs">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[11px] text-[#6E6A64]">
-                                                    Metode Pembayaran
-                                                </span>
-                                                <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-[#E6DFD3] bg-[#F3EFE6] px-2.5 py-0.5 text-[11px] font-bold text-[#1A1A1A]">
-                                                    {order.payment_method ===
-                                                    'qris' ? (
-                                                        <QrCode
-                                                            weight="bold"
-                                                            className="size-3.5 text-[#C52828]"
-                                                        />
-                                                    ) : (
-                                                        <Money
-                                                            weight="bold"
-                                                            className="size-3.5 text-[#4A2C18]"
-                                                        />
-                                                    )}
-                                                    <span>
-                                                        {order.payment_method ===
-                                                        'qris'
-                                                            ? 'QRIS Online (Scan QR)'
-                                                            : 'Tunai di Kasir'}
-                                                    </span>
-                                                </span>
-                                            </div>
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[11px] text-[#6E6A64]">
-                                                    Gateway Pembayaran
-                                                </span>
-                                                <span className="text-[11px] font-semibold text-[#1A1A1A]">
+                                                ) : (
+                                                    <Money
+                                                        weight="bold"
+                                                        className="size-3.5 text-[#4A2C18]"
+                                                    />
+                                                )}
+                                                <span>
                                                     {order.payment_method ===
                                                     'qris'
-                                                        ? (order.latest_payment
-                                                              ?.gateway_label ??
-                                                          paymentGateway?.label ??
-                                                          'Pembayaran Digital')
-                                                        : 'Kasir POS'}
+                                                        ? 'QRIS Online (Scan QR)'
+                                                        : 'Tunai di Kasir'}
                                                 </span>
-                                            </div>
-                                            {(order.latest_payment
-                                                ?.payment_reference ||
-                                                order.payment_reference) && (
-                                                <div className="flex items-center justify-between gap-2">
-                                                    <span className="text-[11px] text-[#6E6A64]">
-                                                        Ref. Transaksi
-                                                    </span>
-                                                    <span className="truncate font-mono text-[10.5px] font-semibold text-[#1A1A1A]">
-                                                        {order.latest_payment
-                                                            ?.payment_reference ??
-                                                            order.payment_reference}
-                                                    </span>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {/* Daftar Item Menu Terkelompok (Pesanan Awal vs Pesanan Susulan) */}
-                                    <div className="space-y-4">
-                                        {groupOrderItemsByBatch(
-                                            order.items,
-                                            order.payment_status,
-                                            true,
-                                        ).map((group) => {
-                                            const totalActiveInGroup =
-                                                group.activeItems.length;
-                                            return (
-                                                <div
-                                                    key={group.batchNumber}
-                                                    className={cn(
-                                                        'space-y-2.5',
-                                                        group.isFollowup &&
-                                                            'rounded-xl border border-dashed border-[#D6CBB8] bg-[#FAF8F4] p-3',
-                                                    )}
-                                                >
-                                                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFEAE0] pb-2">
-                                                        <div className="flex items-center gap-1.5">
-                                                            <span
-                                                                className={cn(
-                                                                    'inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-extrabold tracking-wide uppercase',
-                                                                    group.isFollowup
-                                                                        ? 'border border-amber-300 bg-amber-100 text-amber-900'
-                                                                        : 'bg-[#1A1A1A] text-white',
-                                                                )}
-                                                            >
-                                                                {group.label}
-                                                            </span>
-                                                            {totalActiveInGroup >
-                                                                0 &&
-                                                                group.isBatchPaid &&
-                                                                order.order_status !==
-                                                                    'pending' &&
-                                                                order.order_status !==
-                                                                    'cancelled' && (
-                                                                    <span className="text-[10.5px] font-semibold text-[#6E6A64]">
-                                                                        {
-                                                                            group.servedCount
-                                                                        }
-                                                                        /
-                                                                        {
-                                                                            totalActiveInGroup
-                                                                        }{' '}
-                                                                        diantar
-                                                                    </span>
-                                                                )}
-                                                        </div>
-
-                                                        <span
-                                                            className={cn(
-                                                                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase',
-                                                                group.isBatchPaid
-                                                                    ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
-                                                                    : 'border border-amber-300 bg-amber-50 text-amber-800',
-                                                            )}
-                                                        >
-                                                            {group.isBatchPaid ? (
-                                                                <>
-                                                                    <CheckCircle
-                                                                        weight="fill"
-                                                                        className="size-3"
-                                                                    />
-                                                                    <span>
-                                                                        Lunas •{' '}
-                                                                        {formatRupiah(
-                                                                            group.batchTotal,
-                                                                        )}
-                                                                    </span>
-                                                                </>
-                                                            ) : (
-                                                                <>
-                                                                    <Lock
-                                                                        weight="bold"
-                                                                        className="size-3"
-                                                                    />
-                                                                    <span>
-                                                                        Belum
-                                                                        Dibayar
-                                                                        •{' '}
-                                                                        {formatRupiah(
-                                                                            group.batchTotal,
-                                                                        )}
-                                                                    </span>
-                                                                </>
-                                                            )}
-                                                        </span>
-                                                    </div>
-
-                                                    <div className="space-y-3 divide-y divide-[#F0EAE1]">
-                                                        {group.items.map(
-                                                            (item) => {
-                                                                const isRejected =
-                                                                    item.status ===
-                                                                    'rejected';
-
-                                                                if (
-                                                                    isRejected
-                                                                ) {
-                                                                    return (
-                                                                        <div
-                                                                            key={
-                                                                                item.id
-                                                                            }
-                                                                            className="space-y-1 rounded-lg border border-[#F5C6C4] bg-[#FDECEB]/60 p-3 pt-2.5 first:pt-2.5"
-                                                                        >
-                                                                            <div className="flex items-start justify-between text-xs">
-                                                                                <div className="pr-2 font-bold text-[#8C857B] line-through">
-                                                                                    <span>
-                                                                                        {
-                                                                                            item.menu_name
-                                                                                        }
-                                                                                    </span>
-                                                                                    <span className="ml-1.5 font-normal tabular-nums">
-                                                                                        &times;
-                                                                                        {
-                                                                                            item.quantity
-                                                                                        }
-                                                                                    </span>
-                                                                                </div>
-                                                                                <span className="text-[#8C857B] tabular-nums line-through">
-                                                                                    {formatRupiah(
-                                                                                        item.total_price,
-                                                                                    )}
-                                                                                </span>
-                                                                            </div>
-                                                                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#C52828]">
-                                                                                <Prohibit
-                                                                                    weight="bold"
-                                                                                    className="size-3.5"
-                                                                                />
-                                                                                <span>
-                                                                                    Ditolak:{' '}
-                                                                                    {item.rejection_reason ||
-                                                                                        'Stok bahan habis'}
-                                                                                </span>
-                                                                            </div>
-                                                                        </div>
-                                                                    );
-                                                                }
-
-                                                                const itemPaid =
-                                                                    getOrderItemPaymentStatus(
-                                                                        item,
-                                                                        order.payment_status,
-                                                                    ) ===
-                                                                    'paid';
-                                                                const itemServed =
-                                                                    Boolean(
-                                                                        item.is_served,
-                                                                    );
-
-                                                                return (
-                                                                    <div
-                                                                        key={
-                                                                            item.id
-                                                                        }
-                                                                        className="space-y-1.5 pt-2.5 first:pt-0"
-                                                                    >
-                                                                        <div className="flex items-start justify-between text-[13.5px]">
-                                                                            <div className="space-y-1 pr-2">
-                                                                                <div className="font-bold text-[#1A1A1A]">
-                                                                                    <span>
-                                                                                        {
-                                                                                            item.menu_name
-                                                                                        }
-                                                                                    </span>
-                                                                                    <span className="ml-1.5 font-semibold text-[#6E6A64] tabular-nums">
-                                                                                        &times;
-                                                                                        {
-                                                                                            item.quantity
-                                                                                        }
-                                                                                    </span>
-                                                                                </div>
-                                                                                {order.order_status !==
-                                                                                    'cancelled' && (
-                                                                                    <div className="flex flex-wrap items-center gap-1.5">
-                                                                                        {!itemPaid ? (
-                                                                                            <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
-                                                                                                <Lock
-                                                                                                    weight="bold"
-                                                                                                    className="size-2.5"
-                                                                                                />
-                                                                                                Menunggu
-                                                                                                Pembayaran
-                                                                                            </span>
-                                                                                        ) : itemServed ? (
-                                                                                            <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
-                                                                                                <Check
-                                                                                                    weight="bold"
-                                                                                                    className="size-2.5"
-                                                                                                />
-                                                                                                {order.order_status ===
-                                                                                                'completed'
-                                                                                                    ? 'Sudah Diantar'
-                                                                                                    : 'Siap Diantarkan'}
-                                                                                            </span>
-                                                                                        ) : order.order_status ===
-                                                                                          'processing' ? (
-                                                                                            <span className="inline-flex items-center gap-1 rounded bg-[#FFF3E0] px-1.5 py-0.5 text-[10px] font-bold text-[#9A5B13]">
-                                                                                                <Clock
-                                                                                                    weight="bold"
-                                                                                                    className="size-2.5"
-                                                                                                />
-                                                                                                Sedang
-                                                                                                Disiapkan
-                                                                                            </span>
-                                                                                        ) : null}
-                                                                                    </div>
-                                                                                )}
-                                                                            </div>
-                                                                            <span className="font-bold text-[#1A1A1A] tabular-nums">
-                                                                                {formatRupiah(
-                                                                                    item.total_price,
-                                                                                )}
-                                                                            </span>
-                                                                        </div>
-
-                                                                        {item
-                                                                            .options
-                                                                            .length >
-                                                                            0 && (
-                                                                            <div className="flex flex-wrap gap-1.5">
-                                                                                {item.options.map(
-                                                                                    (
-                                                                                        o,
-                                                                                    ) => (
-                                                                                        <span
-                                                                                            key={
-                                                                                                o.id
-                                                                                            }
-                                                                                            className="inline-flex items-center rounded-[4px] border border-[#E8E2D9] bg-[#F5F1E9] px-2 py-0.5 text-[10.5px] font-medium text-[#3F3A34]"
-                                                                                        >
-                                                                                            {
-                                                                                                o.group_name
-                                                                                            }
-                                                                                            :{' '}
-                                                                                            {
-                                                                                                o.option_name
-                                                                                            }
-                                                                                        </span>
-                                                                                    ),
-                                                                                )}
-                                                                            </div>
-                                                                        )}
-
-                                                                        {item.customer_notes && (
-                                                                            <p className="flex items-center gap-1 text-[11px] text-[#5E5850] italic">
-                                                                                <PencilSimpleLine
-                                                                                    weight="regular"
-                                                                                    className="size-3 text-[#4A2C18]"
-                                                                                />
-                                                                                <span>
-                                                                                    &ldquo;
-                                                                                    {
-                                                                                        item.customer_notes
-                                                                                    }
-                                                                                    &rdquo;
-                                                                                </span>
-                                                                            </p>
-                                                                        )}
-                                                                    </div>
-                                                                );
-                                                            },
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-
-                                    {/* Ringkasan Total Tagihan */}
-                                    <div className="space-y-2 border-t border-[#EBE5DC] pt-3.5 text-xs">
-                                        <div className="flex items-center justify-between text-[#6E6A64]">
-                                            <span>Subtotal Pesanan</span>
-                                            <span className="font-medium text-[#1A1A1A] tabular-nums">
-                                                {formatRupiah(order.subtotal)}
                                             </span>
                                         </div>
-                                        <div className="flex items-center justify-between border-t border-[#F0EAE1] pt-2 text-sm font-bold text-[#1A1A1A]">
-                                            <span>Total Tagihan</span>
-                                            <span className="text-[19px] font-bold text-[#C52828] tabular-nums">
-                                                {formatRupiah(
-                                                    order.total_amount,
-                                                )}
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[11px] text-[#6E6A64]">
+                                                Gateway Pembayaran
+                                            </span>
+                                            <span className="text-[11px] font-semibold text-[#1A1A1A]">
+                                                {order.payment_method === 'qris'
+                                                    ? (order.latest_payment
+                                                          ?.gateway_label ??
+                                                      paymentGateway?.label ??
+                                                      'Pembayaran Digital')
+                                                    : 'Kasir POS'}
                                             </span>
                                         </div>
-                                        {hasPartialPayment && (
-                                            <div className="mt-1 space-y-1 border-t border-dashed border-[#E6DFD3] pt-2">
-                                                <div className="flex items-center justify-between text-[11.5px] font-semibold text-emerald-700">
-                                                    <span>
-                                                        Sudah Dibayar Sebelumnya
-                                                    </span>
-                                                    <span className="tabular-nums">
-                                                        {formatRupiah(
-                                                            settledAmount,
-                                                        )}
-                                                    </span>
-                                                </div>
-                                                <div className="flex items-center justify-between text-xs font-bold text-[#C52828]">
-                                                    <span>
-                                                        Sisa Tagihan Menu
-                                                        Tambahan
-                                                    </span>
-                                                    <span className="tabular-nums">
-                                                        {formatRupiah(
-                                                            unpaidBalance,
-                                                        )}
-                                                    </span>
-                                                </div>
+                                        {(order.latest_payment
+                                            ?.payment_reference ||
+                                            order.payment_reference) && (
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span className="text-[11px] text-[#6E6A64]">
+                                                    Ref. Transaksi
+                                                </span>
+                                                <span className="truncate font-mono text-[10.5px] font-semibold text-[#1A1A1A]">
+                                                    {order.latest_payment
+                                                        ?.payment_reference ??
+                                                        order.payment_reference}
+                                                </span>
                                             </div>
                                         )}
                                     </div>
                                 </div>
 
-                                {/* Tombol Aksi Tambah Menu ke Pesanan Ini / Pesan Baru */}
-                                <div className="space-y-2.5 pt-1">
-                                    {order.order_status === 'pending' ||
-                                    order.order_status === 'processing' ? (
-                                        <>
-                                            <Link
-                                                href={`/order?table=${order.table.qr_token}&order=${order.order_number}`}
-                                                className="block"
+                                {/* Daftar Item Menu Terkelompok (Pesanan Awal vs Pesanan Susulan) */}
+                                <div className="space-y-4">
+                                    {groupOrderItemsByBatch(
+                                        order.items,
+                                        order.payment_status,
+                                        true,
+                                    ).map((group) => {
+                                        const totalActiveInGroup =
+                                            group.activeItems.length;
+                                        return (
+                                            <div
+                                                key={group.batchNumber}
+                                                className={cn(
+                                                    'space-y-2.5',
+                                                    group.isFollowup &&
+                                                        'rounded-xl border border-dashed border-[#D6CBB8] bg-[#FAF8F4] p-3',
+                                                )}
                                             >
-                                                <button
-                                                    type="button"
-                                                    className="flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] text-[14px] font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99]"
-                                                >
-                                                    <PlusCircle
-                                                        weight="bold"
-                                                        className="size-5"
-                                                    />
-                                                    <span>
-                                                        Tambah Menu ke Pesanan
-                                                        Ini
+                                                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFEAE0] pb-2">
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span
+                                                            className={cn(
+                                                                'inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-extrabold tracking-wide uppercase',
+                                                                group.isFollowup
+                                                                    ? 'border border-amber-300 bg-amber-100 text-amber-900'
+                                                                    : 'bg-[#1A1A1A] text-white',
+                                                            )}
+                                                        >
+                                                            {group.label}
+                                                        </span>
+                                                        {totalActiveInGroup >
+                                                            0 &&
+                                                            group.isBatchPaid &&
+                                                            order.order_status !==
+                                                                'pending' &&
+                                                            order.order_status !==
+                                                                'cancelled' && (
+                                                                <span className="text-[10.5px] font-semibold text-[#6E6A64]">
+                                                                    {
+                                                                        group.servedCount
+                                                                    }
+                                                                    /
+                                                                    {
+                                                                        totalActiveInGroup
+                                                                    }{' '}
+                                                                    diantar
+                                                                </span>
+                                                            )}
+                                                    </div>
+
+                                                    <span
+                                                        className={cn(
+                                                            'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase',
+                                                            group.isBatchPaid
+                                                                ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
+                                                                : 'border border-amber-300 bg-amber-50 text-amber-800',
+                                                        )}
+                                                    >
+                                                        {group.isBatchPaid ? (
+                                                            <>
+                                                                <CheckCircle
+                                                                    weight="fill"
+                                                                    className="size-3"
+                                                                />
+                                                                <span>
+                                                                    Lunas •{' '}
+                                                                    {formatRupiah(
+                                                                        group.batchTotal,
+                                                                    )}
+                                                                </span>
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <Lock
+                                                                    weight="bold"
+                                                                    className="size-3"
+                                                                />
+                                                                <span>
+                                                                    Belum
+                                                                    Dibayar •{' '}
+                                                                    {formatRupiah(
+                                                                        group.batchTotal,
+                                                                    )}
+                                                                </span>
+                                                            </>
+                                                        )}
                                                     </span>
-                                                </button>
-                                            </Link>
-                                            <p className="text-center text-xs text-[#6E6A64]">
-                                                Menu baru akan digabung ke
-                                                pesanan{' '}
-                                                <strong className="font-bold text-[#1A1A1A]">
-                                                    #{order.order_number}
-                                                </strong>
-                                                .
-                                            </p>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Link
-                                                href={`/order?table=${order.table.qr_token}`}
-                                                className="block"
-                                            >
-                                                <button
-                                                    type="button"
-                                                    className="flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] text-[14px] font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99]"
-                                                >
-                                                    <Coffee
-                                                        weight="bold"
-                                                        className="size-5"
-                                                    />
-                                                    <span>
-                                                        Pesan Lagi dari Meja Ini
-                                                    </span>
-                                                </button>
-                                            </Link>
-                                            <p className="text-center text-xs text-[#6E6A64]">
-                                                Pesanan berikutnya akan
-                                                dibuatkan{' '}
-                                                <strong className="text-[#1A1A1A]">
-                                                    nota baru
-                                                </strong>{' '}
-                                                pada{' '}
-                                                <strong className="text-[#1A1A1A]">
-                                                    Meja{' '}
-                                                    {order.table.table_number}
-                                                </strong>
-                                                .
-                                            </p>
-                                        </>
+                                                </div>
+
+                                                <div className="space-y-3 divide-y divide-[#F0EAE1]">
+                                                    {group.items.map((item) => {
+                                                        const isRejected =
+                                                            item.status ===
+                                                            'rejected';
+
+                                                        if (isRejected) {
+                                                            return (
+                                                                <div
+                                                                    key={
+                                                                        item.id
+                                                                    }
+                                                                    className="space-y-1 rounded-lg border border-[#F5C6C4] bg-[#FDECEB]/60 p-3 pt-2.5 first:pt-2.5"
+                                                                >
+                                                                    <div className="flex items-start justify-between text-xs">
+                                                                        <div className="pr-2 font-bold text-[#8C857B] line-through">
+                                                                            <span>
+                                                                                {
+                                                                                    item.menu_name
+                                                                                }
+                                                                            </span>
+                                                                            <span className="ml-1.5 font-normal tabular-nums">
+                                                                                &times;
+                                                                                {
+                                                                                    item.quantity
+                                                                                }
+                                                                            </span>
+                                                                        </div>
+                                                                        <span className="text-[#8C857B] tabular-nums line-through">
+                                                                            {formatRupiah(
+                                                                                item.total_price,
+                                                                            )}
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#C52828]">
+                                                                        <Prohibit
+                                                                            weight="bold"
+                                                                            className="size-3.5"
+                                                                        />
+                                                                        <span>
+                                                                            Ditolak:{' '}
+                                                                            {item.rejection_reason ||
+                                                                                'Stok bahan habis'}
+                                                                        </span>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        }
+
+                                                        const itemPaid =
+                                                            getOrderItemPaymentStatus(
+                                                                item,
+                                                                order.payment_status,
+                                                            ) === 'paid';
+                                                        const itemServed =
+                                                            Boolean(
+                                                                item.is_served,
+                                                            );
+
+                                                        return (
+                                                            <div
+                                                                key={item.id}
+                                                                className="space-y-1.5 pt-2.5 first:pt-0"
+                                                            >
+                                                                <div className="flex items-start justify-between text-[13.5px]">
+                                                                    <div className="space-y-1 pr-2">
+                                                                        <div className="font-bold text-[#1A1A1A]">
+                                                                            <span>
+                                                                                {
+                                                                                    item.menu_name
+                                                                                }
+                                                                            </span>
+                                                                            <span className="ml-1.5 font-semibold text-[#6E6A64] tabular-nums">
+                                                                                &times;
+                                                                                {
+                                                                                    item.quantity
+                                                                                }
+                                                                            </span>
+                                                                        </div>
+                                                                        {order.order_status !==
+                                                                            'cancelled' && (
+                                                                            <div className="flex flex-wrap items-center gap-1.5">
+                                                                                {!itemPaid ? (
+                                                                                    <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                                                                                        <Lock
+                                                                                            weight="bold"
+                                                                                            className="size-2.5"
+                                                                                        />
+                                                                                        Menunggu
+                                                                                        Pembayaran
+                                                                                    </span>
+                                                                                ) : itemServed ? (
+                                                                                    <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                                                                                        <Check
+                                                                                            weight="bold"
+                                                                                            className="size-2.5"
+                                                                                        />
+                                                                                        {order.order_status ===
+                                                                                        'completed'
+                                                                                            ? 'Sudah Diantar'
+                                                                                            : 'Siap Diantarkan'}
+                                                                                    </span>
+                                                                                ) : order.order_status ===
+                                                                                  'processing' ? (
+                                                                                    <span className="inline-flex items-center gap-1 rounded bg-[#FFF3E0] px-1.5 py-0.5 text-[10px] font-bold text-[#9A5B13]">
+                                                                                        <Clock
+                                                                                            weight="bold"
+                                                                                            className="size-2.5"
+                                                                                        />
+                                                                                        Sedang
+                                                                                        Disiapkan
+                                                                                    </span>
+                                                                                ) : null}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                    <span className="font-bold text-[#1A1A1A] tabular-nums">
+                                                                        {formatRupiah(
+                                                                            item.total_price,
+                                                                        )}
+                                                                    </span>
+                                                                </div>
+
+                                                                {item.options
+                                                                    .length >
+                                                                    0 && (
+                                                                    <div className="flex flex-wrap gap-1.5">
+                                                                        {item.options.map(
+                                                                            (
+                                                                                o,
+                                                                            ) => (
+                                                                                <span
+                                                                                    key={
+                                                                                        o.id
+                                                                                    }
+                                                                                    className="inline-flex items-center rounded-[4px] border border-[#E8E2D9] bg-[#F5F1E9] px-2 py-0.5 text-[10.5px] font-medium text-[#3F3A34]"
+                                                                                >
+                                                                                    {
+                                                                                        o.group_name
+                                                                                    }
+                                                                                    :{' '}
+                                                                                    {
+                                                                                        o.option_name
+                                                                                    }
+                                                                                </span>
+                                                                            ),
+                                                                        )}
+                                                                    </div>
+                                                                )}
+
+                                                                {item.customer_notes && (
+                                                                    <p className="flex items-center gap-1 text-[11px] text-[#5E5850] italic">
+                                                                        <PencilSimpleLine
+                                                                            weight="regular"
+                                                                            className="size-3 text-[#4A2C18]"
+                                                                        />
+                                                                        <span>
+                                                                            &ldquo;
+                                                                            {
+                                                                                item.customer_notes
+                                                                            }
+                                                                            &rdquo;
+                                                                        </span>
+                                                                    </p>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Ringkasan Total Tagihan */}
+                                <div className="space-y-2 border-t border-[#EBE5DC] pt-3.5 text-xs">
+                                    <div className="flex items-center justify-between text-[#6E6A64]">
+                                        <span>Subtotal Pesanan</span>
+                                        <span className="font-medium text-[#1A1A1A] tabular-nums">
+                                            {formatRupiah(order.subtotal)}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center justify-between border-t border-[#F0EAE1] pt-2 text-sm font-bold text-[#1A1A1A]">
+                                        <span>Total Tagihan</span>
+                                        <span className="text-[19px] font-bold text-[#C52828] tabular-nums">
+                                            {formatRupiah(order.total_amount)}
+                                        </span>
+                                    </div>
+                                    {hasPartialPayment && (
+                                        <div className="mt-1 space-y-1 border-t border-dashed border-[#E6DFD3] pt-2">
+                                            <div className="flex items-center justify-between text-[11.5px] font-semibold text-emerald-700">
+                                                <span>
+                                                    Sudah Dibayar Sebelumnya
+                                                </span>
+                                                <span className="tabular-nums">
+                                                    {formatRupiah(
+                                                        settledAmount,
+                                                    )}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center justify-between text-xs font-bold text-[#C52828]">
+                                                <span>
+                                                    Sisa Tagihan Menu Tambahan
+                                                </span>
+                                                <span className="tabular-nums">
+                                                    {formatRupiah(
+                                                        unpaidBalance,
+                                                    )}
+                                                </span>
+                                            </div>
+                                        </div>
                                     )}
                                 </div>
-                            </main>
-                        </>
-                    )}
+                            </div>
+
+                            {/* Tombol Aksi Tambah Menu ke Pesanan Ini / Pesan Baru */}
+                            <div className="space-y-2.5 pt-1">
+                                {order.order_status === 'pending' ||
+                                order.order_status === 'processing' ? (
+                                    <>
+                                        <Link
+                                            href={`/order?table=${order.table.qr_token}&order=${order.order_number}`}
+                                            className="block"
+                                        >
+                                            <button
+                                                type="button"
+                                                className="flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] text-[14px] font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99]"
+                                            >
+                                                <PlusCircle
+                                                    weight="bold"
+                                                    className="size-5"
+                                                />
+                                                <span>
+                                                    Tambah Menu ke Pesanan Ini
+                                                </span>
+                                            </button>
+                                        </Link>
+                                        <p className="text-center text-xs text-[#6E6A64]">
+                                            Menu baru akan digabung ke pesanan{' '}
+                                            <strong className="font-bold text-[#1A1A1A]">
+                                                #{order.order_number}
+                                            </strong>
+                                            .
+                                        </p>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Link
+                                            href={`/order?table=${order.table.qr_token}`}
+                                            className="block"
+                                        >
+                                            <button
+                                                type="button"
+                                                className="flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#C52828] text-[14px] font-bold text-white shadow-[0_6px_18px_rgba(197,40,40,0.28)] transition hover:bg-[#B02222] active:scale-[0.99]"
+                                            >
+                                                <Coffee
+                                                    weight="bold"
+                                                    className="size-5"
+                                                />
+                                                <span>
+                                                    Pesan Lagi dari Meja Ini
+                                                </span>
+                                            </button>
+                                        </Link>
+                                        <p className="text-center text-xs text-[#6E6A64]">
+                                            Pesanan berikutnya akan dibuatkan{' '}
+                                            <strong className="text-[#1A1A1A]">
+                                                nota baru
+                                            </strong>{' '}
+                                            pada{' '}
+                                            <strong className="text-[#1A1A1A]">
+                                                Meja {order.table.table_number}
+                                            </strong>
+                                            .
+                                        </p>
+                                    </>
+                                )}
+                            </div>
+                        </main>
+                    </>
                 </div>
             </div>
         </>

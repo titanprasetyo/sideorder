@@ -364,7 +364,6 @@ test('admin cannot delete a menu that is currently used in a processing order', 
 
 test('expired additional payment on tambah menu order releases newly added reserved stock while keeping initial confirmed stock', function () {
     Event::fake([OrderCreated::class, OrderStatusUpdated::class]);
-    config()->set('services.xendit.webhook_token', 'test-xendit-stock-secret');
 
     // 1. Order awal 2 porsi -> lunas via cashier (confirmed stock)
     $this->post(route('order.checkout'), [
@@ -394,7 +393,7 @@ test('expired additional payment on tambah menu order releases newly added reser
         'qr_token' => $this->tableA->qr_token,
         'order_number' => $order->order_number,
         'customer_name' => 'Adit Initial',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $this->limitedMenu->id,
@@ -406,25 +405,20 @@ test('expired additional payment on tambah menu order releases newly added reser
 
     expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(1);
 
-    // 3. Additional payment failed/expired via Xendit webhook callback
+    // 3. Additional pending digital payment expires locally -> hanya stok reserved batch susulan yang dikembalikan
     $order->refresh();
-    $targetPayment = $order->payments()->create([
-        'payment_reference' => 'PAY-XENDIT-ADD',
-        'gateway' => 'xendit',
+    $order->payments()->create([
+        'payment_reference' => 'PAY-DIGITAL-ADD',
+        'gateway' => 'digital',
         'method' => 'qris',
-        'external_id' => 'xendit_add_'.$order->id.'_'.time(),
+        'external_id' => 'digital_add_'.$order->id.'_'.time(),
         'amount' => 90000,
         'status' => 'pending',
+        'expired_at' => now('Asia/Jakarta')->subMinutes(2),
     ]);
 
-    $this->withHeaders([
-        'X-CALLBACK-TOKEN' => 'test-xendit-stock-secret',
-    ])->postJson(route('payments.webhook', ['driver' => 'xendit']), [
-        'id' => 'inv_expired_add_001',
-        'external_id' => $targetPayment->payment_reference,
-        'status' => 'EXPIRED',
-        'amount' => 90000,
-    ])->assertOk();
+    $this->get(route('order.status', ['order_number' => $order->order_number]))
+        ->assertOk();
 
     // Sisa stok harus kembali menjadi 3 (2 porsi reserved dikembalikan, 2 porsi awal tetap confirmed)
     expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(3);
@@ -457,15 +451,14 @@ test('deactivating category prevents checkout and marks menus inactive in stock-
     $this->category->update(['is_active' => true]);
 });
 
-test('gateway webhook paid confirms stock and expired releases stock safely with retry re-reservation', function () {
+test('overdue pending payment releases stock safely and switch-to-cash re-reserves or rejects when stock depletes', function () {
     Event::fake([OrderCreated::class, OrderStatusUpdated::class]);
-    config()->set('services.xendit.webhook_token', 'test-xendit-stock-secret');
 
-    // Order 1: Checkout -> Initiate -> EXPIRED webhook -> stok dilepas
+    // Order 1: Checkout -> Pending digital overdue -> stok dilepas
     $this->post(route('order.checkout'), [
         'qr_token' => $this->tableA->qr_token,
         'customer_name' => 'Gibran',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $this->limitedMenu->id,
@@ -478,56 +471,46 @@ test('gateway webhook paid confirms stock and expired releases stock safely with
     expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(2);
 
     $order1 = Order::latest('id')->firstOrFail();
-    $initRes1 = $this->postJson(route('payments.initiate', ['order_number' => $order1->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk();
-    $paymentRef1 = $initRes1->json('payment.payment_reference');
-
-    $this->withHeaders([
-        'X-CALLBACK-TOKEN' => 'test-xendit-stock-secret',
-    ])->postJson(route('payments.webhook', ['driver' => 'xendit']), [
-        'id' => 'inv_expired_001',
-        'external_id' => $paymentRef1,
-        'status' => 'EXPIRED',
+    $order1->update(['payment_method' => 'qris', 'payment_gateway' => 'digital']);
+    $order1->payments()->create([
+        'payment_reference' => 'PAY-DIG-EXP-001',
+        'gateway' => 'digital',
+        'method' => 'qris',
         'amount' => $order1->total_amount,
-    ])->assertOk();
+        'status' => 'pending',
+        'expired_at' => now('Asia/Jakarta')->subMinutes(2),
+    ]);
+
+    $this->get(route('order.status', ['order_number' => $order1->order_number]))
+        ->assertOk();
 
     expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(5)
         ->and($order1->items()->firstOrFail()->stock_state)->toBe('released');
 
-    // Customer mencoba bayar ulang (initiatePayment) -> stok direservasi kembali dari 5 menjadi 2
-    $initRetry = $this->postJson(route('payments.initiate', ['order_number' => $order1->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-        'force_new' => true,
+    // Customer beralih ke Tunai di Kasir -> stok direservasi kembali dari 5 menjadi 2
+    $this->postJson(route('order.switch-payment-method', ['order_number' => $order1->order_number]), [
+        'payment_method' => 'cash',
     ])->assertOk();
-    $paymentRefRetry = $initRetry->json('payment.payment_reference');
 
     expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(2)
         ->and($order1->items()->firstOrFail()->stock_state)->toBe('reserved');
 
-    // Webhook PAID mengonfirmasi stok tanpa memotong ganda (tetap 2)
-    $this->withHeaders([
-        'X-CALLBACK-TOKEN' => 'test-xendit-stock-secret',
-    ])->postJson(route('payments.webhook', ['driver' => 'xendit']), [
-        'id' => 'inv_paid_002',
-        'external_id' => $paymentRefRetry,
-        'status' => 'PAID',
-        'amount' => $order1->total_amount,
-        'paid_amount' => $order1->total_amount,
-        'payment_channel' => 'QRIS',
-    ])->assertOk();
+    // Kasir mengonfirmasi pembayaran tunai -> stok dikonfirmasi tanpa memotong ganda (tetap 2)
+    $this->actingAs($this->cashier)
+        ->postJson(route('cashier.orders.confirm-payment', $order1), [
+            'payment_method' => 'cash',
+            'cash_received' => $order1->total_amount,
+        ])->assertOk();
 
     expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(2)
         ->and($order1->fresh()->payment_status)->toBe('paid')
         ->and($order1->items()->firstOrFail()->stock_state)->toBe('confirmed');
 
-    // Simulasi stok habis sebelum retry pembayaran pada order lain yang sudah kedaluwarsa -> gagal dengan 422
+    // Simulasi stok habis sebelum retry beralih ke tunai pada order lain yang sudah kedaluwarsa -> gagal dengan 422
     $this->post(route('order.checkout'), [
         'qr_token' => $this->tableB->qr_token,
         'customer_name' => 'Hana',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $this->limitedMenu->id,
@@ -538,27 +521,24 @@ test('gateway webhook paid confirms stock and expired releases stock safely with
     ])->assertRedirect();
 
     $order2 = Order::latest('id')->firstOrFail();
-    $initRes2 = $this->postJson(route('payments.initiate', ['order_number' => $order2->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk();
-
-    $this->withHeaders([
-        'X-CALLBACK-TOKEN' => 'test-xendit-stock-secret',
-    ])->postJson(route('payments.webhook', ['driver' => 'xendit']), [
-        'id' => 'inv_expired_003',
-        'external_id' => $initRes2->json('payment.payment_reference'),
-        'status' => 'EXPIRED',
+    $order2->update(['payment_method' => 'qris', 'payment_gateway' => 'digital']);
+    $order2->payments()->create([
+        'payment_reference' => 'PAY-DIG-EXP-002',
+        'gateway' => 'digital',
+        'method' => 'qris',
         'amount' => $order2->total_amount,
-    ])->assertOk();
+        'status' => 'pending',
+        'expired_at' => now('Asia/Jakarta')->subMinutes(2),
+    ]);
 
-    // Admin menurunkan stok menjadi 1 sehingga order2 (butuh 2) tidak bisa di-retry pembayarannya
+    $this->get(route('order.status', ['order_number' => $order2->order_number]))
+        ->assertOk();
+
+    // Admin menurunkan stok menjadi 1 sehingga order2 (butuh 2) tidak bisa di-retry ke tunai
     $this->limitedMenu->update(['stock_quantity' => 1]);
 
-    $this->postJson(route('payments.initiate', ['order_number' => $order2->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-        'force_new' => true,
+    $this->postJson(route('order.switch-payment-method', ['order_number' => $order2->order_number]), [
+        'payment_method' => 'cash',
     ])->assertStatus(422);
 });
 
@@ -718,13 +698,13 @@ test('custom multi-day stock validity stays purchasable within window and expire
     ])->assertSessionHasErrors('items.0.quantity');
 });
 
-test('overdue qris auto-expires on cashier sync, releases limited stock, and re-reserves on explicit cash switch or rejects when stock depletes', function () {
+test('overdue pending digital payment auto-expires on cashier sync, releases limited stock, and re-reserves on explicit cash switch', function () {
     Event::fake([OrderCreated::class, OrderStatusUpdated::class]);
 
     $this->post(route('order.checkout'), [
         'qr_token' => $this->tableA->qr_token,
-        'customer_name' => 'Rizky Abandon QRIS',
-        'payment_method' => 'qris',
+        'customer_name' => 'Rizky Abandon Digital',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $this->limitedMenu->id,
@@ -735,14 +715,19 @@ test('overdue qris auto-expires on cashier sync, releases limited stock, and re-
     ])->assertRedirect();
 
     $order = Order::latest('id')->firstOrFail();
-    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk();
+    $order->update(['payment_method' => 'qris', 'payment_gateway' => 'digital']);
+    $order->payments()->create([
+        'payment_reference' => 'PAY-DIG-CASHIER-SYNC',
+        'gateway' => 'digital',
+        'method' => 'qris',
+        'amount' => $order->total_amount,
+        'status' => 'pending',
+        'expired_at' => now('Asia/Jakarta')->addMinutes(15),
+    ]);
 
     expect((int) $this->limitedMenu->fresh()->stock_quantity)->toBe(2);
 
-    // Pelanggan menunda 30 menit; ketika kasir sync antrean, QRIS otomatis kedaluwarsa & stok 3 porsi kembali ke 5
+    // Pelanggan menunda 30 menit; ketika kasir sync antrean, pending digital otomatis kedaluwarsa & stok 3 porsi kembali ke 5
     $this->travel(30)->minutes();
 
     $this->actingAs($this->cashier)
@@ -754,7 +739,7 @@ test('overdue qris auto-expires on cashier sync, releases limited stock, and re-
         ->and($order->items()->firstOrFail()->stock_state)->toBe('released')
         ->and(Payment::where('order_id', $order->id)->firstOrFail()->status)->toBe('expired');
 
-    // Alihkan dari QRIS kedaluwarsa ke Tunai di Kasir -> stok ter-reservasi kembali ke 2 dan payment_status = unpaid
+    // Alihkan dari digital kedaluwarsa ke Tunai di Kasir -> stok ter-reservasi kembali ke 2 dan payment_status = unpaid
     $this->postJson(route('order.switch-payment-method', ['order_number' => $order->order_number]), [
         'payment_method' => 'cash',
     ])->assertOk();

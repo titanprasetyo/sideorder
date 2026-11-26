@@ -906,59 +906,6 @@ test('admin can configure and update product size icons and customer order page 
         ->and($optionItemsPayload[2]['icon'])->toBe('pint-large');
 });
 
-test('simulate payment endpoint security prevents public access in production', function () {
-    $order = Order::create([
-        'cafe_table_id' => $this->table->id,
-        'customer_name' => 'Tamu Meja Publik',
-        'subtotal' => 25000,
-        'total_amount' => 25000,
-        'order_status' => 'pending',
-        'payment_status' => 'unpaid',
-    ]);
-
-    // Di testing/local environment, simulasi payment berhasil
-    $response = $this->post(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ]);
-    $response->assertSessionHas('success');
-
-    $order->refresh();
-    expect($order->payment_status)->toBe('paid');
-
-    // Reset status
-    $order->update(['payment_status' => 'unpaid', 'order_status' => 'pending']);
-
-    // Ubah environment ke production untuk menguji proteksi
-    app()->detectEnvironment(fn () => 'production');
-
-    // Customer publik tanpa login mencoba bypass simulasi pembayaran di production -> 403 Forbidden
-    $blocked = $this->withSession(['_token' => 'test-csrf-token'])
-        ->post(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-            'status' => 'paid',
-            '_token' => 'test-csrf-token',
-        ]);
-    $blocked->assertForbidden();
-
-    $order->refresh();
-    expect($order->payment_status)->toBe('unpaid');
-
-    // Staf kasir yang sedang login mencoba simulasi -> diizinkan
-    $cashier = User::factory()->create(['role' => 'cashier']);
-    $allowedStaff = $this->actingAs($cashier)
-        ->withSession(['_token' => 'test-csrf-token'])
-        ->post(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-            'status' => 'paid',
-            '_token' => 'test-csrf-token',
-        ]);
-    $allowedStaff->assertSessionHas('success');
-
-    $order->refresh();
-    expect($order->payment_status)->toBe('paid');
-
-    // Kembalikan environment ke testing
-    app()->detectEnvironment(fn () => 'testing');
-});
-
 test('tambah menu on order with failed payment status resets payment status to unpaid', function () {
     $order = Order::create([
         'cafe_table_id' => $this->table->id,
@@ -1083,7 +1030,7 @@ test('customer checkout allows multiple cart items sharing the same option ids a
     $response = $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Titan Uji',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
         'items' => [
             [
                 'menu_id' => $espresso->id,
@@ -1271,11 +1218,11 @@ test('follow-up checkout assigns sequential batch numbers across settlement wave
         'is_active' => true,
     ]);
 
-    // Batch 1: Pesanan awal QRIS & dilunasi langsung via pembayaran QRIS (otomatis ketrima ke processing)
+    // Batch 1: Pesanan awal Tunai & dilunasi oleh kasir (otomatis masuk ke processing)
     $this->post(route('order.checkout'), [
         'qr_token' => $this->table->qr_token,
         'customer_name' => 'Titan Uji',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
         'items' => [
             ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
         ],
@@ -1283,9 +1230,11 @@ test('follow-up checkout assigns sequential batch numbers across settlement wave
 
     $order = Order::latest('id')->firstOrFail();
 
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk();
+    $this->actingAs($cashier)
+        ->postJson(route('cashier.orders.confirm-payment', $order), [
+            'payment_method' => 'cash',
+            'cash_received' => 30000,
+        ])->assertOk();
 
     // Gelombang susulan pertama (belum bayar -> batch_number = 2)
     $this->post(route('order.checkout'), [
@@ -1319,10 +1268,12 @@ test('follow-up checkout assigns sequential batch numbers across settlement wave
         ->and($batch2Items[0]->is_followup)->toBeTrue()
         ->and($batch2Items[1]->payment_status)->toBe('unpaid');
 
-    // Lunasi batch 2 melalui simulasi QRIS
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk();
+    // Lunasi batch 2 melalui kasir
+    $this->actingAs($cashier)
+        ->postJson(route('cashier.orders.confirm-payment', $order), [
+            'payment_method' => 'cash',
+            'cash_received' => 40000,
+        ])->assertOk();
 
     expect($order->fresh()->payment_status)->toBe('paid')
         ->and($order->items()->where('batch_number', 2)->where('payment_status', 'paid')->count())->toBe(2);
@@ -1344,227 +1295,46 @@ test('follow-up checkout assigns sequential batch numbers across settlement wave
         ->and($order->fresh()->payment_status)->toBe('unpaid');
 });
 
-test('public guest cannot simulate payment on cash order unless switched to qris', function () {
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'customer_name' => 'Tamu Tunai',
-        'payment_method' => 'cash',
-        'items' => [
-            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
-        ],
-    ])->assertRedirect();
-
-    $order = Order::latest('id')->firstOrFail();
-
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertStatus(422)
-        ->assertJsonPath('success', false);
-
-    expect($order->fresh()->payment_status)->toBe('unpaid')
-        ->and($order->fresh()->order_status)->toBe('pending');
-
-    // Setelah dialihkan ke QRIS, simulasi pembayaran berhasil & item ikut lunas
-    $this->postJson(route('order.switch-payment-method', ['order_number' => $order->order_number]), [
+test('overdue pending digital payment expires locally when status page is opened and can be switched to cash', function () {
+    $order = Order::create([
+        'cafe_table_id' => $this->table->id,
+        'customer_name' => 'Tamu Pending Historis',
+        'subtotal' => 25000,
+        'total_amount' => 25000,
+        'order_status' => 'pending',
+        'payment_status' => 'unpaid',
         'payment_method' => 'qris',
-    ])->assertOk();
+        'payment_gateway' => 'digital',
+    ]);
 
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk();
-
-    expect($order->fresh()->payment_status)->toBe('paid')
-        ->and($order->fresh()->order_status)->toBe('processing')
-        ->and($order->items()->where('payment_status', 'paid')->count())->toBe(1);
-});
-
-test('expired qris does not auto-reset when reopening status or initiate without force_new, and only resets on explicit force_new', function () {
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'customer_name' => 'Penunda 30 Menit',
-        'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
-        ],
-    ])->assertRedirect();
-
-    $order = Order::latest('id')->firstOrFail();
-
-    $firstInit = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk()
-        ->assertJsonPath('is_expired', false);
-
-    $firstRef = $firstInit->json('payment.payment_reference');
-    $firstExpiredAt = $firstInit->json('payment.expired_at');
-
-    // Setelah 5 menit (masih dalam masa 15 menit): reuse QRIS yang sama tanpa memperpanjang expired_at
-    $this->travel(5)->minutes();
-
-    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk()
-        ->assertJsonPath('reused', true)
-        ->assertJsonPath('is_expired', false)
-        ->assertJsonPath('payment.payment_reference', $firstRef)
-        ->assertJsonPath('payment.expired_at', $firstExpiredAt);
-
-    expect(Payment::where('order_id', $order->id)->count())->toBe(1);
-
-    // Setelah total 30 menit berlalu: membuka halaman status langsung mengkedaluwarsakan QRIS dan tidak mereset QRIS
-    $this->travel(25)->minutes();
+    $payment = Payment::create([
+        'order_id' => $order->id,
+        'payment_reference' => 'PAY-LEGACY-EXP-01',
+        'gateway' => 'digital',
+        'method' => 'qris',
+        'channel' => 'QRIS',
+        'type' => 'initial',
+        'amount' => 25000,
+        'settled_amount' => 0,
+        'status' => 'pending',
+        'expired_at' => now('Asia/Jakarta')->subMinutes(5),
+    ]);
 
     $this->get(route('order.status', ['order_number' => $order->order_number]))
         ->assertOk()
         ->assertInertia(fn ($page) => $page
             ->component('customer/status')
             ->where('order.payment_status', 'failed')
-            ->where('order.latest_payment.payment_reference', $firstRef)
+            ->where('order.latest_payment.payment_reference', $payment->payment_reference)
             ->where('order.latest_payment.status', 'expired'));
 
-    // Memanggil initiate tanpa force_new atau membuka /order/payment tidak boleh membuat QRIS baru
-    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
+    // Beralih ke Tunai di Kasir -> payment_status kembali ke unpaid dan metode menjadi cash
+    $this->postJson(route('order.switch-payment-method', ['order_number' => $order->order_number]), [
+        'payment_method' => 'cash',
     ])->assertOk()
-        ->assertJsonPath('is_expired', true)
-        ->assertJsonPath('reused', false)
-        ->assertJsonPath('payment.payment_reference', $firstRef)
-        ->assertJsonPath('payment.status', 'expired');
+        ->assertJsonPath('payment_method', 'cash');
 
-    $this->get(route('order.payment', ['order_number' => $order->order_number]))
-        ->assertOk();
-
-    expect(Payment::where('order_id', $order->id)->count())->toBe(1)
-        ->and($order->fresh()->payment_status)->toBe('failed');
-
-    // Hanya ketika user klik tombol Reset / Buat QRIS Baru (force_new = true), barulah dibuat kode QRIS baru
-    $resetInit = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-        'force_new' => true,
-    ])->assertOk()
-        ->assertJsonPath('is_expired', false)
-        ->assertJsonPath('reused', false);
-
-    $secondRef = $resetInit->json('payment.payment_reference');
-    expect($secondRef)->not->toBe($firstRef)
-        ->and(Payment::where('order_id', $order->id)->count())->toBe(2)
-        ->and($order->fresh()->payment_status)->toBe('unpaid');
-
-    $this->travelBack();
-});
-
-test('direct initiate without prior status reload expires overdue pending qris instead of auto-resetting', function () {
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'customer_name' => 'Langsung Initiate',
-        'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
-        ],
-    ])->assertRedirect();
-
-    $order = Order::latest('id')->firstOrFail();
-
-    $firstInit = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk();
-    $firstRef = $firstInit->json('payment.payment_reference');
-
-    $this->travel(30)->minutes();
-
-    // Tanpa membuka /order/status lebih dulu, panggilan /initiate biasa tetap mengembalikan expired (tidak auto-reset)
-    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk()
-        ->assertJsonPath('is_expired', true)
-        ->assertJsonPath('payment.payment_reference', $firstRef)
-        ->assertJsonPath('payment.status', 'expired');
-
-    expect(Payment::where('order_id', $order->id)->count())->toBe(1)
-        ->and($order->fresh()->payment_status)->toBe('failed');
-
-    $this->travelBack();
-});
-
-test('follow-up batch 2 qris expiry keeps batch 1 settled and requires force_new to reset batch 2 qris', function () {
-    $pastryMenu = Menu::create([
-        'category_id' => $this->category->id,
-        'name' => 'Croissant Susulan',
-        'slug' => 'croissant-susulan',
-        'base_price' => 25000,
-        'is_active' => true,
-    ]);
-
-    // Batch 1 lunas QRIS
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'customer_name' => 'Susulan Expired',
-        'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $this->menu->id, 'quantity' => 1, 'selected_option_ids' => [$this->optionLarge->id]],
-        ],
-    ])->assertRedirect();
-
-    $order = Order::latest('id')->firstOrFail();
-    $this->postJson(route('order.simulate-payment', ['order_number' => $order->order_number]), [
-        'status' => 'paid',
-    ])->assertOk();
-
-    // Tambah susulan Batch 2 QRIS & inisiasi QRIS tambahan
-    $this->post(route('order.checkout'), [
-        'qr_token' => $this->table->qr_token,
-        'order_number' => $order->order_number,
-        'customer_name' => 'Susulan Expired',
-        'payment_method' => 'qris',
-        'items' => [
-            ['menu_id' => $pastryMenu->id, 'quantity' => 1, 'selected_option_ids' => []],
-        ],
-    ])->assertRedirect();
-
-    $batch2Init = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk();
-    $batch2Ref = $batch2Init->json('payment.payment_reference');
-
-    $this->travel(30)->minutes();
-
-    // Status page mengkedaluwarsakan Batch 2 sambil menjaga settlement Batch 1 tetap utuh
-    $this->get(route('order.status', ['order_number' => $order->order_number]))
-        ->assertOk()
-        ->assertInertia(fn ($page) => $page
-            ->component('customer/status')
-            ->where('order.payment_status', 'unpaid')
-            ->where('order.latest_payment.payment_reference', $batch2Ref)
-            ->where('order.latest_payment.status', 'expired'));
-
-    // Initiate tanpa force_new tidak mereset Batch 2
-    $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-    ])->assertOk()
-        ->assertJsonPath('is_expired', true)
-        ->assertJsonPath('payment.payment_reference', $batch2Ref);
-
-    expect(Payment::where('order_id', $order->id)->count())->toBe(2)
-        ->and($order->fresh()->getSettledAmount())->toBe(25000.0);
-
-    // Reset eksplisit membuat Batch 2 QRIS baru
-    $resetBatch2 = $this->postJson(route('payments.initiate', ['order_number' => $order->order_number]), [
-        'payment_method' => 'qris',
-        'gateway' => 'xendit',
-        'force_new' => true,
-    ])->assertOk()
-        ->assertJsonPath('is_expired', false);
-
-    expect($resetBatch2->json('payment.payment_reference'))->not->toBe($batch2Ref)
-        ->and(Payment::where('order_id', $order->id)->count())->toBe(3);
-
-    $this->travelBack();
+    expect($order->fresh()->payment_status)->toBe('unpaid')
+        ->and($order->fresh()->payment_method)->toBe('cash')
+        ->and($order->fresh()->payment_gateway)->toBe('manual');
 });

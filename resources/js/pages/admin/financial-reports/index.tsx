@@ -263,16 +263,16 @@ export default function FinancialReportsIndex({
 
     const period = summary.period;
     const digitalGateway = summary.payment_gateways.find(
-        (g) => g.gateway === 'xendit',
+        (g) => g.gateway === 'digital',
     );
     const manualGateway = summary.payment_gateways.find(
         (g) => g.gateway === 'manual',
     );
     const digitalRevenue =
-        digitalGateway?.net_revenue ?? summary.xendit_integration.net_revenue;
+        digitalGateway?.net_revenue ?? summary.gateway_integration.net_revenue;
     const digitalCount =
         digitalGateway?.transactions_count ??
-        summary.xendit_integration.transactions_count;
+        summary.gateway_integration.transactions_count;
     const digitalShare = digitalGateway?.revenue_share_percent ?? 0;
 
     const cashRevenue =

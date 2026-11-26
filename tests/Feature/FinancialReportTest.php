@@ -1,6 +1,5 @@
 <?php
 
-use App\Http\Controllers\PaymentWebhookController;
 use App\Models\CafeTable;
 use App\Models\Category;
 use App\Models\Menu;
@@ -326,72 +325,34 @@ test('daily, weekly, and monthly recaps and date boundaries do not double count 
         ->and((float) $oct20Point['net_revenue'])->toBe(0.0);
 });
 
-test('payment gateway webhook verifies signature and amount, updates revenue, and prevents duplicate webhook double counting', function () {
+test('cashier payment confirmation updates revenue idempotently and prevents duplicate counting', function () {
     $order = Order::create([
-        'order_number' => 'SO-20261022-GW01',
+        'order_number' => 'SO-20261022-POS01',
         'cafe_table_id' => $this->table->id,
-        'customer_name' => 'Maya QRIS',
+        'customer_name' => 'Maya Tunai',
         'subtotal' => 90000,
         'total_amount' => 90000,
         'order_status' => 'pending',
         'payment_status' => 'unpaid',
-        'payment_method' => 'qris',
+        'payment_method' => 'cash',
     ]);
 
-    // 1. Webhook dengan signature palsu ditolak 401
-    $this->postJson(route('payments.webhook'), [
-        'order_number' => $order->order_number,
-        'status' => 'paid',
-        'gross_amount' => 90000,
-        'payment_type' => 'qris',
-        'signature' => 'invalid-signature',
-    ])->assertStatus(401);
+    // 1. Konfirmasi pertama oleh kasir berhasil melunasi pesanan
+    $this->actingAs($this->cashier)
+        ->postJson(route('cashier.orders.confirm-payment', $order), [
+            'payment_method' => 'cash',
+            'cash_received' => 100000,
+        ])
+        ->assertOk()
+        ->assertJsonPath('success', true);
 
-    // 2. Webhook dengan manipulasi nominal (berbeda dari total_amount database) ditolak 422
-    $tamperedSig = PaymentWebhookController::generateSignature($order->order_number, 'paid', 10000);
-    $this->postJson(route('payments.webhook'), [
-        'order_number' => $order->order_number,
-        'status' => 'paid',
-        'gross_amount' => 10000,
-        'payment_type' => 'qris',
-        'signature' => $tamperedSig,
-    ])->assertStatus(422);
-
-    $order->refresh();
-    expect($order->payment_status)->toBe('unpaid');
-
-    // 3. Webhook valid pertama berhasil memverifikasi pembayaran
-    $validSig = PaymentWebhookController::generateSignature($order->order_number, 'paid', 90000);
-    $firstWebhook = $this->postJson(route('payments.webhook'), [
-        'order_number' => $order->order_number,
-        'status' => 'paid',
-        'gross_amount' => 90000,
-        'payment_type' => 'qris',
-        'transaction_id' => 'MID-QRIS-0001',
-        'signature' => $validSig,
-    ]);
-
-    $firstWebhook->assertOk()
-        ->assertJson([
-            'status' => 'ok',
-            'already_processed' => false,
-        ]);
-
-    // 4. Kirim webhook duplikat (retry) -> harus idempotent dan tidak menggandakan history maupun pendapatan
-    $duplicateWebhook = $this->postJson(route('payments.webhook'), [
-        'order_number' => $order->order_number,
-        'status' => 'paid',
-        'gross_amount' => 90000,
-        'payment_type' => 'qris',
-        'transaction_id' => 'MID-QRIS-0001',
-        'signature' => $validSig,
-    ]);
-
-    $duplicateWebhook->assertOk()
-        ->assertJson([
-            'status' => 'ok',
-            'already_processed' => true,
-        ]);
+    // 2. Konfirmasi duplikat (retry) harus idempotent dan tidak menggandakan history maupun pendapatan
+    $this->actingAs($this->cashier)
+        ->postJson(route('cashier.orders.confirm-payment', $order), [
+            'payment_method' => 'cash',
+            'cash_received' => 100000,
+        ])
+        ->assertOk();
 
     expect(OrderStatusHistory::where('order_id', $order->id)->count())->toBe(1);
 

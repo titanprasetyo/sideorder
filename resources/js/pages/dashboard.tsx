@@ -76,12 +76,12 @@ interface SystemSnapshot {
     is_enforcement_active: boolean;
     access_radius_meters: number;
     allow_cash_payment: boolean;
-    allow_xendit_payment: boolean;
+    allow_digital_payment?: boolean;
     payment_expiry_minutes: number;
     gateway_label: string;
     gateway_mode: string;
     gateway_configured: boolean;
-    xendit_pending_payments: number;
+    digital_pending_payments: number;
     failed_payments_recent: number;
 }
 
@@ -303,17 +303,17 @@ export default function Dashboard({
     const cashFlow = period.cash_flow;
 
     const digitalGateway = summary.payment_gateways.find(
-        (g) => g.gateway === 'xendit',
+        (g) => g.gateway === 'digital',
     );
     const manualGateway = summary.payment_gateways.find(
         (g) => g.gateway === 'manual',
     );
 
     const digitalRevenue =
-        digitalGateway?.net_revenue ?? summary.xendit_integration.net_revenue;
+        digitalGateway?.net_revenue ?? summary.gateway_integration.net_revenue;
     const digitalCount =
         digitalGateway?.transactions_count ??
-        summary.xendit_integration.transactions_count;
+        summary.gateway_integration.transactions_count;
     const digitalShare = digitalGateway?.revenue_share_percent ?? 0;
 
     const cashRevenue = manualGateway?.net_revenue ?? cashFlow.inflow_cash;
@@ -622,7 +622,7 @@ export default function Dashboard({
                                     Gateway Pembayaran
                                 </p>
                                 <p className="truncate text-xs font-extrabold text-[#18181B]">
-                                    QRIS • {system_snapshot.gateway_mode}
+                                    {system_snapshot.gateway_label}
                                 </p>
                             </div>
                         </div>
@@ -738,7 +738,7 @@ export default function Dashboard({
                         <Panel className="p-4">
                             <div className="flex items-start justify-between gap-2">
                                 <p className="text-[11px] font-bold tracking-wide text-[#78716C] uppercase">
-                                    Pembayaran Digital (QRIS)
+                                    Pembayaran Digital
                                 </p>
                                 <StatusPill tone="brand">
                                     {digitalShare}% pangsa
@@ -750,10 +750,10 @@ export default function Dashboard({
                             <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] font-medium text-[#78716C]">
                                 <span>{digitalCount} transaksi lunas</span>
                                 <span>•</span>
-                                <span>QRIS</span>
+                                <span>Non-Tunai</span>
                             </div>
                             <div className="mt-2 border-t border-[#EFE5CF] pt-2 text-[10px] font-semibold text-[#8C7A6B]">
-                                Mode Gateway: {system_snapshot.gateway_mode}
+                                Status: {summary.gateway_integration.mode}
                             </div>
                         </Panel>
 
@@ -1381,13 +1381,13 @@ export default function Dashboard({
                                         Metode Aktif:{' '}
                                         <strong className="text-[#18181B]">
                                             {[
-                                                system_snapshot.allow_xendit_payment &&
-                                                    'QRIS',
+                                                system_snapshot.allow_digital_payment &&
+                                                    'Pembayaran Digital',
                                                 system_snapshot.allow_cash_payment &&
                                                     'Tunai Kasir',
                                             ]
                                                 .filter(Boolean)
-                                                .join(' + ')}
+                                                .join(' + ') || 'Nonaktif'}
                                         </strong>
                                     </span>
                                     <span>

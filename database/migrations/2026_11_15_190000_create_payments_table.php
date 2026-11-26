@@ -15,8 +15,8 @@ return new class extends Migration
             $table->id();
             $table->foreignId('order_id')->constrained('orders')->cascadeOnDelete();
             $table->string('payment_reference', 120)->unique();
-            $table->string('gateway', 30)->default('xendit')->index();
-            $table->string('method', 30)->default('qris')->index();
+            $table->string('gateway', 30)->default('manual')->index();
+            $table->string('method', 30)->default('cash')->index();
             $table->string('channel', 50)->nullable();
             $table->string('type', 20)->default('initial');
             $table->decimal('amount', 12, 2);

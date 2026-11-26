@@ -40,7 +40,7 @@ class Expense extends Model
     public const array PAYMENT_SOURCES = [
         'cash' => 'Kas Tunai Laci',
         'bank' => 'Rekening Bank',
-        'xendit_balance' => 'Saldo Digital (QRIS)',
+        'digital_balance' => 'Saldo Pembayaran Digital',
     ];
 
     protected $fillable = [
@@ -81,6 +81,10 @@ class Expense extends Model
 
     public function getPaymentSourceLabelAttribute(): string
     {
+        if ($this->payment_source === 'xendit_balance') {
+            return 'Saldo Pembayaran Digital';
+        }
+
         return self::PAYMENT_SOURCES[$this->payment_source] ?? 'Kas Tunai Laci';
     }
 }
