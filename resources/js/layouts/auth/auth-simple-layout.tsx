@@ -8,7 +8,7 @@ export default function AuthSimpleLayout({
     description,
 }: AuthLayoutProps) {
     return (
-        <div className="theme-sideline relative flex min-h-svh flex-col items-center justify-center gap-6 overflow-hidden bg-[#FAF6EC] p-4 font-sans text-[#18181B] sm:p-6 md:p-10">
+        <div className="theme-sideline theme-oxanium relative flex min-h-svh flex-col items-center justify-center gap-6 overflow-hidden bg-[#FAF6EC] p-4 font-sans text-[#18181B] sm:p-6 md:p-10">
             <div className="pointer-events-none absolute -top-24 -left-24 size-80 rounded-full bg-[#FBF1CB]/70 blur-3xl" />
             <div className="pointer-events-none absolute -right-24 -bottom-24 size-80 rounded-full bg-[#F3080A]/8 blur-3xl" />
 

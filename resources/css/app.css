@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap');
 @import 'tailwindcss';
 
 @import 'tw-animate-css';
@@ -9,14 +8,51 @@
 /* `dark:` utilities are disabled inside the warm admin theme scope (.theme-sideline) */
 @custom-variant dark (&:is(.dark *):not(.theme-sideline, .theme-sideline *));
 
+/* Self-hosted official Oxanium variable font (Google Fonts v21, weights 200-800)
+ * so Admin & Kasir views always render genuine Oxanium reliably (including offline & print).
+ * Declared 200-900 with font-synthesis-weight: none so Tailwind `font-black` (900) clamps cleanly
+ * to Oxanium ExtraBold (800) without blurry browser faux-bolding.
+ */
+@font-face {
+    font-family: 'Oxanium';
+    font-style: normal;
+    font-weight: 200 900;
+    font-display: swap;
+    src: url('../fonts/oxanium-latin-ext.woff2') format('woff2');
+    unicode-range:
+        U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+        U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+        U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+    font-family: 'Oxanium';
+    font-style: normal;
+    font-weight: 200 900;
+    font-display: swap;
+    src: url('../fonts/oxanium-latin.woff2') format('woff2');
+    unicode-range:
+        U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+        U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+        U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 @theme {
-    --font-sans: 'Outfit', sans-serif;
+    --font-sans: var(--app-font-family);
 
-    --font-heading: 'Outfit', sans-serif;
+    --font-heading: var(--app-font-family);
 
-    --font-mono: 'Outfit', sans-serif;
+    --font-mono: var(--app-font-family);
 
-    --font-serif: 'Outfit', sans-serif;
+    --font-serif: var(--app-font-family);
+
+    --font-oxanium:
+        'Oxanium', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+        Helvetica, Arial, sans-serif;
+
+    --font-outfit:
+        'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+        Helvetica, Arial, sans-serif;
 
     --radius-lg: var(--radius);
     --radius-md: calc(var(--radius) - 2px);
@@ -67,6 +103,13 @@
 }
 
 :root {
+    --font-family-outfit:
+        'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+        Helvetica, Arial, sans-serif;
+    --font-family-oxanium:
+        'Oxanium', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+        Helvetica, Arial, sans-serif;
+    --app-font-family: var(--font-family-outfit);
     --background: #faf6ec;
     --foreground: #18181b;
     --card: #fffdf9;
@@ -138,10 +181,22 @@
 }
 
 /*
- * SIDEORDER Admin Theme (warm cream + brand red).
- * Applied to the admin shell (and <body> for portaled dialogs/selects) so every
- * shadcn component uses the same palette regardless of OS dark mode.
+ * SIDEORDER Admin & Cashier Theme (warm cream + brand red + Oxanium typography).
+ * Applied to the admin/cashier shell (and <html>/<body> for portaled dialogs/selects/toasts)
+ * so every component uses the same palette and Oxanium font regardless of OS dark mode.
  */
+html.theme-oxanium,
+body.theme-oxanium,
+.theme-oxanium,
+.theme-sideline {
+    --app-font-family: var(--font-family-oxanium);
+    --font-sans: var(--font-family-oxanium);
+    --font-heading: var(--font-family-oxanium);
+    --font-mono: var(--font-family-oxanium);
+    --font-serif: var(--font-family-oxanium);
+    font-synthesis-weight: none;
+}
+
 .theme-sideline {
     color-scheme: light;
     --radius: 0.375rem;
@@ -210,11 +265,11 @@
     *::before,
     *::after {
         @apply border-border;
-        font-family: 'Outfit', sans-serif;
+        font-family: var(--app-font-family);
     }
 
     html {
-        font-family: 'Outfit', sans-serif;
+        font-family: var(--app-font-family);
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
         text-rendering: optimizeLegibility;
@@ -223,7 +278,7 @@
 
     body {
         @apply bg-background font-sans text-foreground antialiased;
-        font-family: 'Outfit', sans-serif;
+        font-family: var(--app-font-family);
         letter-spacing: -0.005em;
     }
 
@@ -234,7 +289,7 @@
     h5,
     h6,
     .font-heading {
-        font-family: 'Outfit', sans-serif;
+        font-family: var(--font-heading);
         letter-spacing: -0.015em;
     }
 
@@ -244,7 +299,7 @@
     textarea,
     optgroup,
     label {
-        font-family: 'Outfit', sans-serif;
+        font-family: var(--app-font-family);
     }
 
     code,
@@ -252,9 +307,23 @@
     samp,
     pre,
     .font-mono {
-        font-family: 'Outfit', sans-serif !important;
+        font-family: var(--font-mono);
         font-variant-numeric: tabular-nums;
         letter-spacing: -0.01em;
+    }
+
+    /* Jaga proporsi geometris alami Oxanium (tracking netral) pada tampilan Admin & Kasir */
+    html.theme-oxanium body,
+    body.theme-oxanium,
+    html.theme-oxanium h1,
+    html.theme-oxanium h2,
+    html.theme-oxanium h3,
+    html.theme-oxanium h4,
+    html.theme-oxanium h5,
+    html.theme-oxanium h6,
+    html.theme-oxanium .font-heading,
+    html.theme-oxanium .font-mono {
+        letter-spacing: 0;
     }
 
     ::selection {
@@ -263,31 +332,48 @@
     }
 }
 
-/* Konsistensi global 1 keluarga font (Outfit) untuk seluruh halaman (Customer, Cashier, Admin), portal modal, toast, dan role */
-*,
-*::before,
-*::after,
-html,
-body,
-#app,
-#app *,
+/* Tampilan Customer tetap menggunakan keluarga font Outfit secara konsisten */
+html.theme-customer,
+html.theme-customer *,
+html.theme-customer *::before,
+html.theme-customer *::after,
+body.theme-customer,
+body.theme-customer *,
+body.theme-customer *::before,
+body.theme-customer *::after {
+    font-family: var(--font-family-outfit) !important;
+}
+
+/* Tampilan Admin, Kasir, Settings & Auth menggunakan keluarga font Oxanium secara konsisten
+ * termasuk seluruh portal modal Radix, toast Sonner, sidebar, struk cetak, dan peta Leaflet. */
+html.theme-oxanium,
+html.theme-oxanium *,
+html.theme-oxanium *::before,
+html.theme-oxanium *::after,
+body.theme-oxanium,
+body.theme-oxanium *,
+body.theme-oxanium *::before,
+body.theme-oxanium *::after,
+.theme-oxanium,
+.theme-oxanium *,
+.theme-oxanium *::before,
+.theme-oxanium *::after,
 .theme-sideline,
 .theme-sideline *,
-[data-sidebar],
-[data-sidebar] *,
-[data-radix-portal],
-[data-radix-portal] *,
-[data-sonner-toaster],
-[data-sonner-toaster] * {
-    font-family:
-        'Outfit',
-        -apple-system,
-        BlinkMacSystemFont,
-        'Segoe UI',
-        Roboto,
-        Helvetica,
-        Arial,
-        sans-serif !important;
+.theme-sideline *::before,
+.theme-sideline *::after,
+body.theme-oxanium [data-sidebar],
+body.theme-oxanium [data-sidebar] *,
+body.theme-oxanium [data-radix-portal],
+body.theme-oxanium [data-radix-portal] *,
+body.theme-oxanium [data-sonner-toaster],
+body.theme-oxanium [data-sonner-toaster] *,
+body.theme-oxanium .printable-receipt-sheet,
+body.theme-oxanium .printable-receipt-sheet *,
+body.theme-oxanium .leaflet-container,
+body.theme-oxanium .leaflet-container * {
+    font-family: var(--font-family-oxanium) !important;
+    font-synthesis-weight: none;
 }
 
 /* Utilitas scrollbar halus bertema hangat & no-scrollbar */

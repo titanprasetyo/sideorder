@@ -335,10 +335,10 @@ export default function CashierOrdersIndex({
         useState('Sel, 27 Okt 2026');
 
     useLayoutEffect(() => {
-        document.body.classList.add('theme-sideline');
-        return () => {
-            document.body.classList.remove('theme-sideline');
-        };
+        document.documentElement.classList.add('theme-oxanium');
+        document.documentElement.classList.remove('theme-customer');
+        document.body.classList.add('theme-sideline', 'theme-oxanium');
+        document.body.classList.remove('theme-customer');
     }, []);
 
     useEffect(() => {
@@ -2160,7 +2160,7 @@ export default function CashierOrdersIndex({
         <>
             <Head title="Kasir Meja Depan • SIDE LINE Cafe" />
 
-            <div className="theme-sideline flex h-screen w-full overflow-hidden bg-[#FAF7F0] font-sans text-neutral-900 select-none">
+            <div className="theme-sideline theme-oxanium flex h-screen w-full overflow-hidden bg-[#FAF7F0] font-sans text-neutral-900 select-none">
                 {/* ========================================================================= */}
                 {/* 1. SIDEBAR KASIR (Warm Cream Elegant Theme) */}
                 {/* ========================================================================= */}
