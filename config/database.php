@@ -87,14 +87,7 @@ return [
         'pgsql' => [
             'driver' => 'pgsql',
             'url' => env('DB_URL'),
-            'host' => (static function (): string {
-                $host = env('DB_HOST', '127.0.0.1');
-                if (! is_string($host) || $host === '') {
-                    return '127.0.0.1';
-                }
-
-                return filter_var($host, FILTER_VALIDATE_IP) !== false ? $host : gethostbyname($host);
-            })(),
+            'host' => env('DB_HOST', '127.0.0.1'),
             'port' => env('DB_PORT', '5432'),
             'database' => env('DB_DATABASE', 'laravel'),
             'username' => env('DB_USERNAME', 'root'),
@@ -102,12 +95,8 @@ return [
             'charset' => env('DB_CHARSET', 'utf8'),
             'prefix' => '',
             'prefix_indexes' => true,
-            'search_path' => env('DB_SEARCH_PATH'),
+            'search_path' => env('DB_SEARCH_PATH', 'public'),
             'sslmode' => env('DB_SSLMODE', 'prefer'),
-            'options' => [
-                PDO::ATTR_TIMEOUT => 5,
-                PDO::ATTR_PERSISTENT => env('DB_PERSISTENT', true),
-            ],
         ],
 
         'sqlsrv' => [
