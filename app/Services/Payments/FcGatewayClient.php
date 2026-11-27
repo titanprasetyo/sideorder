@@ -16,18 +16,23 @@ class FcGatewayClient
             && $this->apiKey() !== '';
     }
 
+    public function isWebhookSecretConfigured(): bool
+    {
+        return $this->secretKey() !== '';
+    }
+
     public function baseUrl(): string
     {
-        $raw = rtrim(trim((string) config('services.fcgateway.base_url', '')), '/');
+        $raw = rtrim(trim((string) config('services.fcgateway.base_url', 'https://pay.fcs.my.id')), '/');
         if ($raw === '') {
             return '';
         }
 
-        // Bersihkan otomatis jika pengguna tidak sengaja menempelkan URL endpoint lengkap (mis. /api/v1/gateway/webhook/qris)
+        // Bersihkan otomatis jika pengguna tidak sengaja menempelkan path dokumentasi/endpoint lengkap
         $parsed = parse_url($raw);
         if (is_array($parsed) && ! empty($parsed['scheme']) && ! empty($parsed['host'])) {
             $path = (string) ($parsed['path'] ?? '');
-            if (preg_match('#^/(api|gateway)(/|$)#i', $path) === 1) {
+            if (preg_match('#^/(api|fc|gateway)(/|$)#i', $path) === 1) {
                 $clean = $parsed['scheme'].'://'.$parsed['host'];
                 if (! empty($parsed['port'])) {
                     $clean .= ':'.$parsed['port'];
@@ -45,9 +50,23 @@ class FcGatewayClient
         return trim((string) config('services.fcgateway.api_key', ''));
     }
 
-    public function webhookSecret(): string
+    public function secretKey(): string
     {
-        return trim((string) config('services.fcgateway.webhook_secret', ''));
+        return trim((string) config('services.fcgateway.secret_key', ''));
+    }
+
+    public function upstreamGateway(): string
+    {
+        $gateway = strtoupper(trim((string) config('services.fcgateway.gateway', 'MIDTRANS')));
+
+        return in_array($gateway, ['MIDTRANS', 'XENDIT'], true) ? $gateway : 'MIDTRANS';
+    }
+
+    public function paymentMethod(): string
+    {
+        $method = strtoupper(trim((string) config('services.fcgateway.payment_method', 'QRIS')));
+
+        return $method !== '' ? $method : 'QRIS';
     }
 
     public function timeout(): int
@@ -55,86 +74,31 @@ class FcGatewayClient
         return max(5, (int) config('services.fcgateway.timeout', 15));
     }
 
-    public function resolveCallbackUrl(): string
+    public function webhookEndpointUrl(): string
     {
-        $override = trim((string) config('services.fcgateway.callback_url', ''));
-        if ($override !== '') {
-            return $override;
-        }
-
         return route('webhooks.fcgateway');
     }
 
     /**
-     * Kembalikan callback_url hanya jika bisa diakses publik (menghindari penolakan proteksi SSRF FCGateway saat dev lokal).
+     * Verifikasi signature webhook HMAC-SHA256 sesuai standar FCGateway (header X-FC-Signature).
      */
-    public function resolvePublicCallbackUrl(): ?string
+    public function verifyWebhookSignature(string $rawPayload, string $incomingSignature): bool
     {
-        $override = trim((string) config('services.fcgateway.callback_url', ''));
-        if ($override !== '') {
-            return $override;
-        }
+        $secret = $this->secretKey();
+        $signature = trim($incomingSignature);
 
-        $url = route('webhooks.fcgateway');
-        if (app()->runningUnitTests()) {
-            return $url;
-        }
-
-        return $this->isPublicUrl($url) ? $url : null;
-    }
-
-    public function isPublicUrl(string $url): bool
-    {
-        $parsed = parse_url($url);
-        if (! is_array($parsed) || empty($parsed['scheme']) || empty($parsed['host'])) {
+        if ($secret === '' || $signature === '') {
             return false;
         }
 
-        $scheme = strtolower((string) $parsed['scheme']);
-        if (! in_array($scheme, ['http', 'https'], true)) {
-            return false;
-        }
+        $expected = hash_hmac('sha256', $rawPayload, $secret);
 
-        $host = strtolower(trim((string) $parsed['host'], '[]'));
-        if (
-            $host === ''
-            || $host === 'localhost'
-            || str_ends_with($host, '.localhost')
-            || str_ends_with($host, '.test')
-            || str_ends_with($host, '.local')
-            || str_ends_with($host, '.internal')
-        ) {
-            return false;
-        }
-
-        if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
-            return filter_var(
-                $host,
-                FILTER_VALIDATE_IP,
-                FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
-            ) !== false;
-        }
-
-        return str_contains($host, '.');
+        return hash_equals($expected, $signature);
     }
 
     /**
-     * Header otentikasi standar ke FCGateway (mengirim X-Gateway-Secret & X-Api-Key sekaligus).
-     *
-     * @return array<string, string>
-     */
-    private function authHeaders(): array
-    {
-        $apiKey = $this->apiKey();
-
-        return [
-            'X-Gateway-Secret' => $apiKey,
-            'X-Api-Key' => $apiKey,
-        ];
-    }
-
-    /**
-     * Buat tagihan QRIS Dinamis pada server FCGateway.
+     * Inisiasi tagihan pembayaran FCGateway & Midtrans (Snap & Multi-Channel).
+     * Endpoint: POST /api/v1/fc/payments/create
      *
      * @param  array<string, mixed>  $payload
      * @return array{
@@ -144,32 +108,34 @@ class FcGatewayClient
      *
      * @throws PaymentGatewayException
      */
-    public function createTransaction(array $payload): array
+    public function createPayment(array $payload): array
     {
         if (! $this->isConfigured()) {
             throw new PaymentGatewayException(
-                'Payment gateway FCGateway belum dikonfigurasi. Lengkapi FCGATEWAY_BASE_URL dan FCGATEWAY_API_KEY di file .env.',
+                'Payment gateway FCGateway Midtrans belum dikonfigurasi. Lengkapi FCGATEWAY_API_KEY di file .env.',
                 503
             );
         }
 
-        $endpoint = $this->baseUrl().'/api/v1/gateway/transactions/create';
+        $endpoint = $this->baseUrl().'/api/v1/fc/payments/create';
 
         try {
             $response = Http::acceptJson()
                 ->asJson()
                 ->timeout($this->timeout())
-                ->withHeaders($this->authHeaders())
+                ->withHeaders([
+                    'X-Api-Key' => $this->apiKey(),
+                ])
                 ->post($endpoint, $payload);
         } catch (ConnectionException $e) {
-            Log::error('FCGateway createTransaction connection error', [
+            Log::error('FCGateway createPayment connection error', [
                 'endpoint' => $endpoint,
                 'order_id' => $payload['order_id'] ?? null,
                 'error' => $e->getMessage(),
             ]);
 
             throw new PaymentGatewayException(
-                'Gagal terhubung ke server pembayaran FCGateway. Silakan coba lagi atau pilih pembayaran Tunai di Kasir.',
+                'Gagal terhubung ke server pembayaran FCGateway Midtrans. Silakan coba lagi atau pilih pembayaran Tunai di Kasir.',
                 503,
                 $e
             );
@@ -183,7 +149,7 @@ class FcGatewayClient
                 ? trim($body['message'])
                 : "HTTP {$response->status()}";
 
-            Log::warning('FCGateway createTransaction rejected', [
+            Log::warning('FCGateway createPayment rejected', [
                 'endpoint' => $endpoint,
                 'status' => $response->status(),
                 'order_id' => $payload['order_id'] ?? null,
@@ -191,26 +157,31 @@ class FcGatewayClient
             ]);
 
             throw new PaymentGatewayException(
-                "FCGateway menolak pembuatan tagihan QRIS ({$gatewayMessage}). Silakan coba lagi atau bayar Tunai di Kasir.",
+                "FCGateway Midtrans menolak pembuatan tagihan ({$gatewayMessage}). Silakan coba lagi atau bayar Tunai di Kasir.",
                 502
             );
         }
 
         $data = isset($body['data']) && is_array($body['data']) ? $body['data'] : null;
-        $txId = is_array($data) && isset($data['id']) && is_string($data['id']) ? trim($data['id']) : '';
-        $checkoutUrl = is_array($data) && isset($data['checkout_url']) && is_string($data['checkout_url'])
-            ? trim($data['checkout_url'])
+        $referenceId = is_array($data) && isset($data['reference_id']) && is_scalar($data['reference_id'])
+            ? trim((string) $data['reference_id'])
             : '';
+        $paymentUrl = is_array($data) && isset($data['payment_url']) && is_string($data['payment_url'])
+            ? trim($data['payment_url'])
+            : '';
+        if ($paymentUrl === '' && is_array($data) && isset($data['upstream_payment_url']) && is_string($data['upstream_payment_url'])) {
+            $paymentUrl = trim($data['upstream_payment_url']);
+        }
 
-        if ($data === null || $txId === '' || $checkoutUrl === '') {
-            Log::error('FCGateway createTransaction malformed response', [
+        if ($data === null || $referenceId === '' || $paymentUrl === '') {
+            Log::error('FCGateway createPayment malformed response', [
                 'endpoint' => $endpoint,
                 'order_id' => $payload['order_id'] ?? null,
                 'body_keys' => array_keys($body),
             ]);
 
             throw new PaymentGatewayException(
-                'Respons dari FCGateway tidak lengkap (checkout_url tidak ditemukan). Silakan hubungi pengelola kafe.',
+                'Respons dari FCGateway Midtrans tidak lengkap (reference_id / payment_url tidak ditemukan).',
                 502
             );
         }
@@ -222,42 +193,45 @@ class FcGatewayClient
     }
 
     /**
-     * Cek status transaksi langsung ke server FCGateway (untuk verifikasi webhook & fallback polling).
+     * Cek status tagihan realtime berdasarkan reference_id, merchant_order_id, atau short_code.
+     * Endpoint: GET /api/v1/fc/payments/{referenceId}/status
      *
      * @return array<string, mixed>
      *
      * @throws PaymentGatewayException
      */
-    public function getTransactionStatus(string $transactionIdOrOrderId): array
+    public function getPaymentStatus(string $referenceIdOrOrderId): array
     {
         if (! $this->isConfigured()) {
             throw new PaymentGatewayException(
-                'Payment gateway FCGateway belum dikonfigurasi.',
+                'Payment gateway FCGateway Midtrans belum dikonfigurasi.',
                 503
             );
         }
 
-        $trimmedId = trim($transactionIdOrOrderId);
+        $trimmedId = trim($referenceIdOrOrderId);
         if ($trimmedId === '') {
-            throw new PaymentGatewayException('ID transaksi FCGateway tidak valid.', 422);
+            throw new PaymentGatewayException('Referensi transaksi FCGateway tidak valid.', 422);
         }
 
-        $endpoint = $this->baseUrl().'/api/v1/gateway/transactions/'.rawurlencode($trimmedId).'/status';
+        $endpoint = $this->baseUrl().'/api/v1/fc/payments/'.rawurlencode($trimmedId).'/status';
 
         try {
             $response = Http::acceptJson()
                 ->timeout($this->timeout())
-                ->withHeaders($this->authHeaders())
+                ->withHeaders([
+                    'X-Api-Key' => $this->apiKey(),
+                ])
                 ->get($endpoint);
         } catch (ConnectionException $e) {
-            Log::warning('FCGateway getTransactionStatus connection error', [
+            Log::warning('FCGateway getPaymentStatus connection error', [
                 'endpoint' => $endpoint,
                 'lookup_id' => $trimmedId,
                 'error' => $e->getMessage(),
             ]);
 
             throw new PaymentGatewayException(
-                'Tidak dapat memverifikasi status pembayaran ke server FCGateway.',
+                'Tidak dapat memverifikasi status pembayaran ke server FCGateway Midtrans.',
                 503,
                 $e
             );
@@ -272,7 +246,7 @@ class FcGatewayClient
                 : "HTTP {$response->status()}";
 
             throw new PaymentGatewayException(
-                "Gagal mengambil status transaksi dari FCGateway ({$gatewayMessage}).",
+                "Gagal mengambil status transaksi dari FCGateway Midtrans ({$gatewayMessage}).",
                 $response->status() === 404 ? 404 : 502
             );
         }
@@ -280,11 +254,43 @@ class FcGatewayClient
         $data = isset($body['data']) && is_array($body['data']) ? $body['data'] : null;
         if ($data === null || ! isset($data['status']) || ! is_string($data['status'])) {
             throw new PaymentGatewayException(
-                'Format respons status transaksi FCGateway tidak valid.',
+                'Format respons status transaksi FCGateway Midtrans tidak valid.',
                 502
             );
         }
 
         return $data;
+    }
+
+    /**
+     * Batalkan transaksi Midtrans yang masih berstatus pending (best-effort).
+     * Endpoint: POST /api/v1/fc/midtrans/cancel/{orderId}
+     */
+    public function cancelMidtransTransaction(string $orderId): bool
+    {
+        $trimmedOrderId = trim($orderId);
+        if (! $this->isConfigured() || $trimmedOrderId === '' || $this->upstreamGateway() !== 'MIDTRANS') {
+            return false;
+        }
+
+        $endpoint = $this->baseUrl().'/api/v1/fc/midtrans/cancel/'.rawurlencode($trimmedOrderId);
+
+        try {
+            $response = Http::acceptJson()
+                ->timeout(min(8, $this->timeout()))
+                ->withHeaders([
+                    'X-Api-Key' => $this->apiKey(),
+                ])
+                ->post($endpoint);
+
+            return $response->successful();
+        } catch (\Throwable $e) {
+            Log::debug('FCGateway cancelMidtransTransaction skipped', [
+                'order_id' => $trimmedOrderId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
     }
 }

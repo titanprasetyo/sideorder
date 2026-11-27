@@ -832,6 +832,10 @@ class OrderController extends Controller
         );
 
         try {
+            if ($method === 'cash') {
+                $this->paymentService->cancelPendingFcGatewayPayments($order);
+            }
+
             DB::transaction(function () use ($order, $method, $gateway, $channel): void {
                 /** @var Order $locked */
                 $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();

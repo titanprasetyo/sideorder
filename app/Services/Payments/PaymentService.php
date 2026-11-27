@@ -101,18 +101,40 @@ class PaymentService
 
         return [
             'driver' => 'fcgateway',
-            'label' => 'FCGateway (QRIS Dinamis)',
+            'label' => 'FCGateway Midtrans (QRIS)',
             'is_configured' => true,
-            'is_webhook_configured' => true,
+            'is_webhook_configured' => $this->fcGatewayClient->isWebhookSecretConfigured(),
             'is_ready' => true,
-            'mode' => 'live',
-            'supported_channels' => ['QRIS', 'CASH'],
-            'webhook_endpoint' => $this->fcGatewayClient->resolveCallbackUrl(),
+            'mode' => strtolower($this->fcGatewayClient->upstreamGateway()),
+            'supported_channels' => [$this->fcGatewayClient->paymentMethod(), 'CASH'],
+            'webhook_endpoint' => $this->fcGatewayClient->webhookEndpointUrl(),
         ];
     }
 
     /**
-     * Buat transaksi pembayaran QRIS Dinamis via FCGateway dan simpan pada ledger `payments`.
+     * Batalkan transaksi pending FCGateway Midtrans secara best-effort (mis. saat customer pindah ke Tunai).
+     */
+    public function cancelPendingFcGatewayPayments(Order $order): void
+    {
+        if (! $this->isFcGatewayConfigured()) {
+            return;
+        }
+
+        $pendingRefs = $order->payments()
+            ->where('gateway', 'fcgateway')
+            ->where('status', 'pending')
+            ->pluck('payment_reference');
+
+        foreach ($pendingRefs as $ref) {
+            if (is_string($ref) && $ref !== '') {
+                $this->fcGatewayClient->cancelMidtransTransaction($ref);
+            }
+        }
+    }
+
+    /**
+     * Buat transaksi pembayaran QRIS via FCGateway & Midtrans (POST /api/v1/fc/payments/create)
+     * dan simpan pada ledger `payments`.
      *
      * @throws PaymentGatewayException
      */
@@ -123,7 +145,7 @@ class PaymentService
     ): Payment {
         if (! $this->isFcGatewayConfigured()) {
             throw new PaymentGatewayException(
-                'Payment gateway FCGateway belum dikonfigurasi. Lengkapi FCGATEWAY_BASE_URL dan FCGATEWAY_API_KEY di .env.',
+                'Payment gateway FCGateway Midtrans belum dikonfigurasi. Lengkapi FCGATEWAY_API_KEY di file .env.',
                 503
             );
         }
@@ -162,27 +184,21 @@ class PaymentService
             )
         );
 
-        $callbackUrl = $this->fcGatewayClient->resolvePublicCallbackUrl();
+        $orderSlug = strtolower(preg_replace('/[^a-zA-Z0-9]/', '', $freshOrder->order_number) ?: 'guest');
+        $customerEmail = "{$orderSlug}@customer.sideline.local";
+        $paymentChannel = $this->fcGatewayClient->paymentMethod();
+        $upstreamGateway = $this->fcGatewayClient->upstreamGateway();
 
         $requestPayload = [
-            'amount' => $roundedAmount,
             'order_id' => $paymentReference,
+            'amount' => $roundedAmount,
+            'payment_method' => $paymentChannel,
             'customer_name' => $freshOrder->customer_name,
-            'return_url' => route('order.status', ['order_number' => $freshOrder->order_number]),
-            'expire_minutes' => $expiryMinutes,
+            'customer_email' => $customerEmail,
+            'gateway' => $upstreamGateway,
         ];
 
-        if ($callbackUrl !== null) {
-            $requestPayload['callback_url'] = $callbackUrl;
-        } else {
-            Log::info('FCGateway callback_url dilewati karena host lokal/privat (gunakan ngrok atau domain publik HTTPS untuk menerima webhook otomatis).', [
-                'order_number' => $freshOrder->order_number,
-                'payment_reference' => $paymentReference,
-                'configured_app_url' => config('app.url'),
-            ]);
-        }
-
-        $gatewayResponse = $this->fcGatewayClient->createTransaction($requestPayload);
+        $gatewayResponse = $this->fcGatewayClient->createPayment($requestPayload);
         $data = $gatewayResponse['data'];
 
         $expiredAt = now('Asia/Jakarta')->addMinutes($expiryMinutes);
@@ -193,15 +209,32 @@ class PaymentService
             }
         }
 
+        $referenceId = isset($data['reference_id']) && is_scalar($data['reference_id']) && trim((string) $data['reference_id']) !== ''
+            ? trim((string) $data['reference_id'])
+            : $paymentReference;
+        $merchantOrderId = isset($data['merchant_order_id']) && is_scalar($data['merchant_order_id']) && trim((string) $data['merchant_order_id']) !== ''
+            ? trim((string) $data['merchant_order_id'])
+            : $paymentReference;
+        $paymentUrl = isset($data['payment_url']) && is_string($data['payment_url']) && trim($data['payment_url']) !== ''
+            ? trim($data['payment_url'])
+            : (isset($data['upstream_payment_url']) && is_string($data['upstream_payment_url']) ? trim($data['upstream_payment_url']) : null);
+        $adminFee = isset($data['admin_fee']) && is_numeric($data['admin_fee'])
+            ? max(0.0, (float) $data['admin_fee'])
+            : 0.0;
+
         /** @var Payment $createdPayment */
         $createdPayment = DB::transaction(function () use (
             $freshOrder,
             $paymentReference,
+            $merchantOrderId,
+            $referenceId,
+            $paymentUrl,
+            $adminFee,
+            $paymentChannel,
             $paymentType,
             $roundedAmount,
             $requestPayload,
             $gatewayResponse,
-            $data,
             $expiredAt
         ): Payment {
             /** @var Order $lockedOrder */
@@ -216,18 +249,16 @@ class PaymentService
                 'payment_reference' => $paymentReference,
                 'gateway' => 'fcgateway',
                 'method' => 'qris',
-                'channel' => 'QRIS',
+                'channel' => $paymentChannel,
                 'type' => $paymentType,
                 'amount' => $roundedAmount,
                 'settled_amount' => 0.0,
-                'fee_amount' => 0.0,
+                'fee_amount' => $adminFee,
                 'status' => 'pending',
-                'external_id' => $paymentReference,
-                'gateway_transaction_id' => is_scalar($data['id'] ?? null) ? trim((string) $data['id']) : $paymentReference,
-                'checkout_url' => is_scalar($data['checkout_url'] ?? null) ? trim((string) $data['checkout_url']) : null,
-                'qr_string' => isset($data['dynamic_qris']) && is_string($data['dynamic_qris'])
-                    ? trim($data['dynamic_qris'])
-                    : null,
+                'external_id' => $merchantOrderId,
+                'gateway_transaction_id' => $referenceId,
+                'checkout_url' => $paymentUrl,
+                'qr_string' => null,
                 'request_payload' => $requestPayload,
                 'response_payload' => $gatewayResponse['raw'],
                 'expired_at' => $expiredAt,
@@ -236,7 +267,7 @@ class PaymentService
             $orderUpdate = [
                 'payment_method' => 'qris',
                 'payment_gateway' => 'fcgateway',
-                'payment_channel' => 'QRIS',
+                'payment_channel' => $paymentChannel,
                 'payment_reference' => $paymentReference,
             ];
 
@@ -253,7 +284,8 @@ class PaymentService
     }
 
     /**
-     * Proses webhook callback dari FCGateway dengan verifikasi server-to-server ke endpoint status gateway.
+     * Proses webhook callback dari FCGateway & Midtrans dengan verifikasi HMAC `X-FC-Signature`
+     * dan/atau pengecekan status server-to-server ke GET /api/v1/fc/payments/{referenceId}/status.
      *
      * @param  array<string, mixed>  $payload
      * @return array{
@@ -264,18 +296,26 @@ class PaymentService
      *
      * @throws PaymentGatewayException
      */
-    public function handleFcGatewayWebhook(array $payload, bool $isSecretVerified = false): array
+    public function handleFcGatewayWebhook(array $payload, bool $isSignatureVerified = false): array
     {
-        $incomingOrderId = isset($payload['order_id']) && is_scalar($payload['order_id'])
-            ? trim((string) $payload['order_id'])
-            : '';
-        $incomingTxId = isset($payload['transaction_id']) && is_scalar($payload['transaction_id'])
-            ? trim((string) $payload['transaction_id'])
-            : '';
+        $nested = isset($payload['data']) && is_array($payload['data']) ? $payload['data'] : [];
 
-        $payment = $this->findFcGatewayPayment($incomingOrderId, $incomingTxId);
+        $incomingOrderId = $this->firstNonEmptyScalar([
+            $payload['merchant_order_id'] ?? null,
+            $payload['order_id'] ?? null,
+            $nested['merchant_order_id'] ?? null,
+            $nested['order_id'] ?? null,
+        ]);
+        $incomingRefId = $this->firstNonEmptyScalar([
+            $payload['reference_id'] ?? null,
+            $payload['transaction_id'] ?? null,
+            $nested['reference_id'] ?? null,
+            $nested['transaction_id'] ?? null,
+        ]);
+
+        $payment = $this->findFcGatewayPayment($incomingOrderId, $incomingRefId);
         if (! $payment) {
-            throw new PaymentGatewayException('Transaksi pembayaran FCGateway tidak ditemukan.', 404);
+            throw new PaymentGatewayException('Transaksi pembayaran FCGateway Midtrans tidak ditemukan.', 404);
         }
 
         if ($payment->status === 'paid') {
@@ -286,37 +326,53 @@ class PaymentService
             ];
         }
 
-        // Verifikasi balik langsung ke server FCGateway untuk mencegah webhook palsu (spoofing)
+        // Verifikasi balik langsung ke endpoint status FCGateway (GET /api/v1/fc/payments/{referenceId}/status)
         $lookupId = $payment->gateway_transaction_id ?: $payment->payment_reference;
         try {
-            $verified = $this->fcGatewayClient->getTransactionStatus($lookupId);
+            $verified = $this->fcGatewayClient->getPaymentStatus($lookupId);
         } catch (PaymentGatewayException $e) {
-            // Jika endpoint /status gateway sedang 5xx/error sementara, hanya izinkan fallback jika header secret webhook terverifikasi
-            if ($isSecretVerified && in_array((int) $e->getCode(), [502, 503], true)) {
-                Log::warning('FCGateway status API unavailable; falling back to secret-verified webhook payload', [
+            // Jika endpoint /status gateway sedang 5xx/error sementara, hanya izinkan fallback jika HMAC X-FC-Signature sudah terverifikasi
+            if ($isSignatureVerified && in_array((int) $e->getCode(), [502, 503], true)) {
+                Log::warning('FCGateway status API unavailable; falling back to HMAC-verified webhook payload', [
                     'payment_reference' => $payment->payment_reference,
                     'error' => $e->getMessage(),
                 ]);
 
+                $rawWebhookStatus = $this->firstNonEmptyScalar([
+                    $payload['status'] ?? null,
+                    $payload['transaction_status'] ?? null,
+                    $nested['status'] ?? null,
+                    $nested['transaction_status'] ?? null,
+                ]);
+                $rawFraudStatus = $this->firstNonEmptyScalar([
+                    $payload['fraud_status'] ?? null,
+                    $nested['fraud_status'] ?? null,
+                ]);
+
                 $verified = [
-                    'id' => $incomingTxId !== '' ? $incomingTxId : $payment->gateway_transaction_id,
-                    'order_id' => $incomingOrderId !== '' ? $incomingOrderId : $payment->payment_reference,
-                    'status' => isset($payload['status']) && is_scalar($payload['status']) ? strtoupper(trim((string) $payload['status'])) : '',
-                    'base_amount' => $payload['base_amount'] ?? null,
-                    'total_amount' => $payload['total_amount'] ?? null,
-                    'paid_at' => $payload['paid_at'] ?? null,
+                    'reference_id' => $incomingRefId !== '' ? $incomingRefId : $payment->gateway_transaction_id,
+                    'merchant_order_id' => $incomingOrderId !== '' ? $incomingOrderId : $payment->payment_reference,
+                    'status' => $this->normalizeGatewayState($rawWebhookStatus, $rawFraudStatus),
+                    'amount' => $payload['amount'] ?? $nested['amount'] ?? $payload['gross_amount'] ?? $nested['gross_amount'] ?? null,
+                    'admin_fee' => $payload['admin_fee'] ?? $nested['admin_fee'] ?? null,
+                    'payment_method' => $payload['payment_method'] ?? $nested['payment_method'] ?? null,
+                    'gateway' => $payload['gateway'] ?? $nested['gateway'] ?? 'MIDTRANS',
+                    'paid_at' => $payload['paid_at'] ?? $nested['paid_at'] ?? null,
                 ];
             } else {
                 throw $e;
             }
         }
-        $verifiedStatus = isset($verified['status']) && is_string($verified['status'])
-            ? strtoupper(trim($verified['status']))
-            : '';
 
-        $verifiedOrderId = isset($verified['order_id']) && is_scalar($verified['order_id'])
-            ? trim((string) $verified['order_id'])
-            : '';
+        $verifiedStatus = $this->normalizeGatewayState(
+            isset($verified['status']) && is_string($verified['status']) ? $verified['status'] : '',
+            isset($verified['fraud_status']) && is_string($verified['fraud_status']) ? $verified['fraud_status'] : ''
+        );
+
+        $verifiedOrderId = $this->firstNonEmptyScalar([
+            $verified['merchant_order_id'] ?? null,
+            $verified['order_id'] ?? null,
+        ]);
 
         if (
             $verifiedOrderId !== ''
@@ -331,24 +387,14 @@ class PaymentService
         }
 
         if ($verifiedStatus === 'PAID') {
-            $verifiedBaseAmount = isset($verified['base_amount']) && is_numeric($verified['base_amount'])
-                ? (float) $verified['base_amount']
-                : null;
-            $verifiedTotalAmount = isset($verified['total_amount']) && is_numeric($verified['total_amount'])
-                ? (float) $verified['total_amount']
+            $verifiedAmount = isset($verified['amount']) && is_numeric($verified['amount'])
+                ? (float) $verified['amount']
                 : null;
             $expectedAmount = (float) $payment->amount;
 
-            if ($verifiedBaseAmount !== null && abs($verifiedBaseAmount - $expectedAmount) >= 1.0) {
+            if ($verifiedAmount !== null && abs($verifiedAmount - $expectedAmount) >= 1.0) {
                 throw new PaymentGatewayException(
-                    'Nominal dasar pembayaran FCGateway tidak sesuai dengan tagihan sistem.',
-                    422
-                );
-            }
-
-            if ($verifiedBaseAmount === null && $verifiedTotalAmount !== null && $verifiedTotalAmount + 0.01 < $expectedAmount) {
-                throw new PaymentGatewayException(
-                    'Nominal pembayaran FCGateway kurang dari nilai tagihan sistem.',
+                    'Nominal pembayaran FCGateway tidak sesuai dengan tagihan sistem.',
                     422
                 );
             }
@@ -362,18 +408,19 @@ class PaymentService
             ];
         }
 
-        if ($verifiedStatus === 'EXPIRED') {
-            $expiredOrder = $this->markSingleFcGatewayPaymentExpired($payment, $payload);
+        if (in_array($verifiedStatus, ['EXPIRED', 'FAILED'], true)) {
+            $terminalStatus = $verifiedStatus === 'FAILED' ? 'failed' : 'expired';
+            $updatedOrder = $this->markSingleFcGatewayPaymentTerminal($payment, $payload, $terminalStatus);
 
             return [
-                'status' => 'expired',
-                'order' => $expiredOrder,
+                'status' => $terminalStatus,
+                'order' => $updatedOrder,
                 'payment' => $payment->fresh(),
             ];
         }
 
         throw new PaymentGatewayException(
-            "Status pembayaran belum terkonfirmasi lunas di server FCGateway (status aktual: {$verifiedStatus}).",
+            "Status pembayaran belum terkonfirmasi lunas di server FCGateway Midtrans (status aktual: {$verifiedStatus}).",
             422
         );
     }
@@ -761,10 +808,11 @@ class PaymentService
                 $lookupId = $pendingFcPayment->gateway_transaction_id ?: $pendingFcPayment->payment_reference;
 
                 try {
-                    $verified = $this->fcGatewayClient->getTransactionStatus($lookupId);
-                    $verifiedStatus = isset($verified['status']) && is_string($verified['status'])
-                        ? strtoupper(trim($verified['status']))
-                        : '';
+                    $verified = $this->fcGatewayClient->getPaymentStatus($lookupId);
+                    $verifiedStatus = $this->normalizeGatewayState(
+                        isset($verified['status']) && is_string($verified['status']) ? $verified['status'] : '',
+                        isset($verified['fraud_status']) && is_string($verified['fraud_status']) ? $verified['fraud_status'] : ''
+                    );
 
                     if ($verifiedStatus === 'PAID') {
                         $this->settleVerifiedFcGatewayPayment(
@@ -773,10 +821,11 @@ class PaymentService
                             $verified
                         );
                         $didChange = true;
-                    } elseif ($verifiedStatus === 'EXPIRED') {
-                        $this->markSingleFcGatewayPaymentExpired(
+                    } elseif (in_array($verifiedStatus, ['EXPIRED', 'FAILED'], true)) {
+                        $this->markSingleFcGatewayPaymentTerminal(
                             $pendingFcPayment,
-                            ['source' => 'status_poll', 'data' => $verified]
+                            ['source' => 'status_poll', 'data' => $verified],
+                            $verifiedStatus === 'FAILED' ? 'failed' : 'expired'
                         );
                         $didChange = true;
                     }
@@ -920,14 +969,26 @@ class PaymentService
             }
 
             $settledAmount = (float) $lockedPayment->amount;
+            $feeAmount = isset($verifiedData['admin_fee']) && is_numeric($verifiedData['admin_fee'])
+                ? max(0.0, (float) $verifiedData['admin_fee'])
+                : (float) $lockedPayment->fee_amount;
+            $resolvedReferenceId = $this->firstNonEmptyScalar([
+                $verifiedData['reference_id'] ?? null,
+                $verifiedData['id'] ?? null,
+            ]);
+            $resolvedChannel = $this->firstNonEmptyScalar([
+                $verifiedData['payment_method'] ?? null,
+                $lockedPayment->channel,
+                'QRIS',
+            ]);
 
             $lockedPayment->update([
                 'status' => 'paid',
+                'channel' => strtoupper($resolvedChannel),
                 'settled_amount' => $settledAmount,
+                'fee_amount' => $feeAmount,
                 'paid_at' => $paidAt,
-                'gateway_transaction_id' => isset($verifiedData['id']) && is_scalar($verifiedData['id'])
-                    ? trim((string) $verifiedData['id'])
-                    : $lockedPayment->gateway_transaction_id,
+                'gateway_transaction_id' => $resolvedReferenceId !== '' ? $resolvedReferenceId : $lockedPayment->gateway_transaction_id,
                 'webhook_payload' => $webhookPayload,
             ]);
 
@@ -952,7 +1013,7 @@ class PaymentService
                 'payment_status' => $isFullySettled ? 'paid' : 'unpaid',
                 'payment_method' => 'qris',
                 'payment_gateway' => 'fcgateway',
-                'payment_channel' => 'QRIS',
+                'payment_channel' => strtoupper($resolvedChannel),
                 'paid_at' => $lockedOrder->paid_at ?? $paidAt,
                 'payment_reference' => $lockedPayment->payment_reference,
                 'order_status' => $newOrderStatus,
@@ -966,18 +1027,16 @@ class PaymentService
                 $paidAt
             );
 
-            $provider = isset($webhookPayload['provider']) && is_scalar($webhookPayload['provider']) && trim((string) $webhookPayload['provider']) !== ''
-                ? strtoupper(trim((string) $webhookPayload['provider']))
-                : 'QRIS';
-            $gatewayTotalPaid = isset($verifiedData['total_amount']) && is_numeric($verifiedData['total_amount'])
-                ? (float) $verifiedData['total_amount']
-                : $settledAmount;
+            $upstreamName = strtoupper($this->firstNonEmptyScalar([
+                $verifiedData['gateway'] ?? null,
+                'MIDTRANS',
+            ]));
             $formattedSettled = number_format($settledAmount, 0, ',', '.');
-            $formattedGatewayPaid = number_format($gatewayTotalPaid, 0, ',', '.');
+            $channelLabel = strtoupper($resolvedChannel);
 
             $notes = $lockedPayment->type === 'additional'
-                ? "Pembayaran QRIS tambahan sebesar Rp {$formattedSettled} (transfer Rp {$formattedGatewayPaid} via {$provider}) terverifikasi otomatis oleh FCGateway."
-                : "Pembayaran QRIS sebesar Rp {$formattedSettled} (transfer Rp {$formattedGatewayPaid} via {$provider}) terverifikasi otomatis oleh FCGateway.";
+                ? "Pembayaran tambahan {$channelLabel} sebesar Rp {$formattedSettled} terverifikasi otomatis oleh FCGateway ({$upstreamName})."
+                : "Pembayaran {$channelLabel} sebesar Rp {$formattedSettled} terverifikasi otomatis oleh FCGateway ({$upstreamName}).";
 
             OrderStatusHistory::create([
                 'order_id' => $lockedOrder->id,
@@ -1004,13 +1063,18 @@ class PaymentService
     }
 
     /**
-     * Tandai satu transaksi FCGateway sebagai kedaluwarsa dan rilis stok reserved jika tidak ada tagihan pending lain.
+     * Tandai satu transaksi FCGateway sebagai expired/failed dan rilis stok reserved jika tidak ada tagihan pending lain.
      *
      * @param  array<string, mixed>  $webhookPayload
      */
-    private function markSingleFcGatewayPaymentExpired(Payment $payment, array $webhookPayload): ?Order
-    {
-        $updatedOrder = DB::transaction(function () use ($payment, $webhookPayload): ?Order {
+    private function markSingleFcGatewayPaymentTerminal(
+        Payment $payment,
+        array $webhookPayload,
+        string $terminalStatus = 'expired'
+    ): ?Order {
+        $normalizedStatus = $terminalStatus === 'failed' ? 'failed' : 'expired';
+
+        $updatedOrder = DB::transaction(function () use ($payment, $webhookPayload, $normalizedStatus): ?Order {
             /** @var Payment|null $lockedPayment */
             $lockedPayment = Payment::whereKey($payment->id)->lockForUpdate()->first();
             if (! $lockedPayment || $lockedPayment->status !== 'pending') {
@@ -1024,7 +1088,7 @@ class PaymentService
             }
 
             $lockedPayment->update([
-                'status' => 'expired',
+                'status' => $normalizedStatus,
                 'webhook_payload' => $webhookPayload,
             ]);
 
@@ -1048,7 +1112,9 @@ class PaymentService
                 'order_id' => $lockedOrder->id,
                 'user_id' => null,
                 'status' => $lockedOrder->order_status,
-                'notes' => 'Transaksi QRIS FCGateway telah kedaluwarsa.',
+                'notes' => $normalizedStatus === 'failed'
+                    ? 'Transaksi FCGateway Midtrans ditolak atau dibatalkan.'
+                    : 'Transaksi FCGateway Midtrans telah kedaluwarsa.',
             ]);
 
             return $lockedOrder->fresh(['table', 'latestPayment']);
@@ -1062,6 +1128,40 @@ class PaymentService
         }
 
         return $updatedOrder;
+    }
+
+    /**
+     * Normalisasi status transaksi FCGateway & Midtrans sesuai Monotonic State Machine.
+     */
+    private function normalizeGatewayState(string $rawStatus, string $fraudStatus = ''): string
+    {
+        $status = strtoupper(trim($rawStatus));
+        $fraud = strtolower(trim($fraudStatus));
+
+        return match ($status) {
+            'PAID', 'SETTLEMENT' => 'PAID',
+            'CAPTURE' => $fraud === 'challenge' ? 'PENDING' : 'PAID',
+            'EXPIRED', 'EXPIRE' => 'EXPIRED',
+            'FAILED', 'DENY', 'CANCEL', 'CANCELLED' => 'FAILED',
+            default => $status !== '' ? $status : 'PENDING',
+        };
+    }
+
+    /**
+     * @param  list<mixed>  $candidates
+     */
+    private function firstNonEmptyScalar(array $candidates): string
+    {
+        foreach ($candidates as $value) {
+            if (is_scalar($value)) {
+                $trimmed = trim((string) $value);
+                if ($trimmed !== '') {
+                    return $trimmed;
+                }
+            }
+        }
+
+        return '';
     }
 
     private function generateUniquePaymentReference(string $orderNumber): string

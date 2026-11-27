@@ -37,10 +37,11 @@ return [
 
     'fcgateway' => [
         'enabled' => filter_var(env('FCGATEWAY_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-        'base_url' => rtrim(trim((string) env('FCGATEWAY_BASE_URL', '')), '/'),
+        'base_url' => rtrim(trim((string) env('FCGATEWAY_BASE_URL', 'https://pay.fcs.my.id')), '/'),
         'api_key' => trim((string) env('FCGATEWAY_API_KEY', '')),
-        'webhook_secret' => trim((string) env('FCGATEWAY_WEBHOOK_SECRET', '')),
-        'callback_url' => trim((string) env('FCGATEWAY_CALLBACK_URL', '')),
+        'secret_key' => trim((string) env('FCGATEWAY_SECRET_KEY', '')),
+        'gateway' => strtoupper(trim((string) env('FCGATEWAY_GATEWAY', 'MIDTRANS'))),
+        'payment_method' => strtoupper(trim((string) env('FCGATEWAY_PAYMENT_METHOD', 'QRIS'))),
         'timeout' => max(5, (int) env('FCGATEWAY_TIMEOUT', 15)),
     ],
 

@@ -18,68 +18,63 @@ class FcGatewayWebhookController extends Controller
     ) {}
 
     /**
-     * Terima notifikasi webhook/callback status pembayaran dari FCGateway.
+     * Terima notifikasi webhook/callback status pembayaran dari FCGateway & Midtrans.
+     * Memverifikasi signature HMAC-SHA256 melalui header `X-FC-Signature`.
      */
     public function handle(Request $request): JsonResponse
     {
-        $configuredSecret = $this->fcGatewayClient->webhookSecret();
-        $isSecretVerified = false;
-        if ($configuredSecret !== '') {
-            $incomingSecret = (string) (
-                $request->header('X-Gateway-Secret')
-                ?? $request->header('X-Webhook-Secret')
-                ?? $request->header('X-Callback-Token')
-                ?? ''
-            );
+        $isSignatureVerified = false;
+        if ($this->fcGatewayClient->isWebhookSecretConfigured()) {
+            $incomingSignature = (string) $request->header('X-FC-Signature', '');
+            $rawContent = $request->getContent();
 
-            if ($incomingSecret === '' || ! hash_equals($configuredSecret, $incomingSecret)) {
-                Log::warning('FCGateway webhook rejected: invalid secret header', [
+            if (! $this->fcGatewayClient->verifyWebhookSignature($rawContent, $incomingSignature)) {
+                Log::warning('FCGateway webhook rejected: invalid X-FC-Signature', [
                     'ip' => $request->ip(),
+                    'has_signature' => $incomingSignature !== '',
                 ]);
 
                 return response()->json([
+                    'error' => 'Invalid signature',
                     'success' => false,
-                    'message' => 'Unauthorized webhook request.',
                 ], 401);
             }
 
-            $isSecretVerified = true;
+            $isSignatureVerified = true;
         }
 
         $payload = $request->all();
+        $data = isset($payload['data']) && is_array($payload['data']) ? $payload['data'] : [];
 
-        $orderId = isset($payload['order_id']) && is_scalar($payload['order_id'])
-            ? trim((string) $payload['order_id'])
-            : '';
-        $transactionId = isset($payload['transaction_id']) && is_scalar($payload['transaction_id'])
-            ? trim((string) $payload['transaction_id'])
-            : '';
-        $status = isset($payload['status']) && is_scalar($payload['status'])
-            ? strtoupper(trim((string) $payload['status']))
-            : '';
+        $merchantOrderId = $this->extractFirstString([$payload['merchant_order_id'] ?? null, $payload['order_id'] ?? null, $data['merchant_order_id'] ?? null, $data['order_id'] ?? null]);
+        $referenceId = $this->extractFirstString([$payload['reference_id'] ?? null, $payload['transaction_id'] ?? null, $data['reference_id'] ?? null, $data['transaction_id'] ?? null]);
+        $status = strtoupper($this->extractFirstString([$payload['status'] ?? null, $payload['transaction_status'] ?? null, $data['status'] ?? null, $data['transaction_status'] ?? null]));
 
-        Log::info('FCGateway webhook received', [
+        Log::info('FCGateway Midtrans webhook received', [
             'event' => $payload['event'] ?? null,
-            'order_id' => $orderId,
-            'transaction_id' => $transactionId,
+            'merchant_order_id' => $merchantOrderId,
+            'reference_id' => $referenceId,
             'status' => $status,
-            'total_amount' => $payload['total_amount'] ?? null,
-            'provider' => $payload['provider'] ?? null,
+            'amount' => $payload['amount'] ?? $data['amount'] ?? null,
+            'gateway' => $payload['gateway'] ?? $data['gateway'] ?? null,
+            'payment_method' => $payload['payment_method'] ?? $data['payment_method'] ?? null,
+            'signature_verified' => $isSignatureVerified,
         ]);
 
-        if (($orderId === '' && $transactionId === '') || $status === '') {
+        if (($merchantOrderId === '' && $referenceId === '') || $status === '') {
             return response()->json([
                 'success' => false,
-                'message' => 'Payload webhook tidak valid (order_id/transaction_id dan status wajib diisi).',
+                'message' => 'Payload webhook tidak valid (merchant_order_id/reference_id dan status wajib diisi).',
             ], 422);
         }
 
         try {
-            $result = $this->paymentService->handleFcGatewayWebhook($payload, $isSecretVerified);
+            $result = $this->paymentService->handleFcGatewayWebhook($payload, $isSignatureVerified);
 
             return response()->json([
+                'status' => 'OK',
                 'success' => true,
-                'status' => $result['status'],
+                'payment_status' => $result['status'],
                 'order_number' => $result['order']?->order_number,
                 'payment_reference' => $result['payment']?->payment_reference,
             ]);
@@ -87,9 +82,9 @@ class FcGatewayWebhookController extends Controller
             $code = (int) $e->getCode();
             $httpStatus = in_array($code, [400, 401, 403, 404, 422, 502, 503], true) ? $code : 422;
 
-            Log::warning('FCGateway webhook handling failed', [
-                'order_id' => $orderId,
-                'transaction_id' => $transactionId,
+            Log::warning('FCGateway Midtrans webhook handling failed', [
+                'merchant_order_id' => $merchantOrderId,
+                'reference_id' => $referenceId,
                 'status' => $status,
                 'http_status' => $httpStatus,
                 'error' => $e->getMessage(),
@@ -100,5 +95,22 @@ class FcGatewayWebhookController extends Controller
                 'message' => $e->getMessage(),
             ], $httpStatus);
         }
+    }
+
+    /**
+     * @param  list<mixed>  $candidates
+     */
+    private function extractFirstString(array $candidates): string
+    {
+        foreach ($candidates as $value) {
+            if (is_scalar($value)) {
+                $trimmed = trim((string) $value);
+                if ($trimmed !== '') {
+                    return $trimmed;
+                }
+            }
+        }
+
+        return '';
     }
 }

@@ -35,7 +35,8 @@
         <env name="FCGATEWAY_ENABLED" value="false"/>
         <env name="FCGATEWAY_BASE_URL" value=""/>
         <env name="FCGATEWAY_API_KEY" value=""/>
-        <env name="FCGATEWAY_WEBHOOK_SECRET" value=""/>
-        <env name="FCGATEWAY_CALLBACK_URL" value=""/>
+        <env name="FCGATEWAY_SECRET_KEY" value=""/>
+        <env name="FCGATEWAY_GATEWAY" value="MIDTRANS"/>
+        <env name="FCGATEWAY_PAYMENT_METHOD" value="QRIS"/>
     </php>
 </phpunit>

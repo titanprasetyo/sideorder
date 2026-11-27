@@ -1675,11 +1675,11 @@ class FinancialReportController extends Controller
                 'configured' => $gatewayPublicConfig['is_configured'],
                 'is_production' => $gatewayPublicConfig['is_configured'],
                 'mode' => $gatewayPublicConfig['is_configured']
-                    ? 'Live (FCGateway QRIS)'
+                    ? 'FCGateway Midtrans ('.strtoupper($gatewayPublicConfig['mode']).')'
                     : 'Belum Terintegrasi (Tunai POS)',
                 'webhook_endpoint' => $gatewayPublicConfig['webhook_endpoint'],
                 'supported_channels' => $gatewayPublicConfig['is_configured']
-                    ? ['QRIS (FCGateway)', 'Tunai (Cash)']
+                    ? ['QRIS (Midtrans / FCGateway)', 'Tunai (Cash)']
                     : ['Tunai (Cash)'],
                 'transactions_count' => (int) ($gatewayBreakdownRows->get('digital')->paid_count ?? 0),
                 'net_revenue' => $inflowDigital,

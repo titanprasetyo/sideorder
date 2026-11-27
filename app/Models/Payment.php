@@ -116,7 +116,7 @@ class Payment extends Model
     {
         return match ($this->gateway) {
             'manual' => 'Kasir POS',
-            'fcgateway' => 'FCGateway QRIS',
+            'fcgateway' => 'FCGateway Midtrans',
             default => 'Pembayaran Digital',
         };
     }

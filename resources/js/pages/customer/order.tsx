@@ -3278,8 +3278,8 @@ export default function CustomerOrder({
                                                 <span>
                                                     {paymentMethod === 'qris'
                                                         ? activeOrder
-                                                            ? `Digabung ke Pesanan #${activeOrder.order_number} (QRIS)`
-                                                            : 'Pembayaran QRIS Dinamis Otomatis'
+                                                            ? `Digabung ke Pesanan #${activeOrder.order_number} (QRIS Midtrans)`
+                                                            : 'Pembayaran QRIS via Midtrans Snap'
                                                         : activeOrder
                                                           ? `Digabung ke Pesanan #${activeOrder.order_number} (Tunai)`
                                                           : 'Pembayaran Tunai di Meja Kasir'}
@@ -3287,7 +3287,7 @@ export default function CustomerOrder({
                                             </div>
                                             <p className="mt-0.5 text-[10px] leading-snug text-[#7C756B]">
                                                 {paymentMethod === 'qris'
-                                                    ? 'Setelah checkout, Anda akan diarahkan ke halaman pembayaran QRIS. Begitu pembayaran selesai, status pesanan otomatis berubah menjadi lunas.'
+                                                    ? 'Setelah checkout, Anda akan diarahkan ke halaman pembayaran Midtrans Snap QRIS. Begitu pembayaran selesai, status pesanan otomatis menjadi lunas.'
                                                     : 'Setelah kirim, silakan sebutkan nama pemesan di meja kasir untuk menyelesaikan pembayaran.'}
                                             </p>
                                         </div>

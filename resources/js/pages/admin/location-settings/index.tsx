@@ -973,14 +973,14 @@ export default function LocationSettingsPage({
                                                 onChange={
                                                     setAllowDigitalPayment
                                                 }
-                                                label="Izinkan Pembayaran Digital (QRIS — FCGateway)"
-                                                description="Pelanggan memilih QRIS saat checkout, diarahkan ke halaman bayar FCGateway, lalu status lunas otomatis lewat webhook."
+                                                label="Izinkan Pembayaran Digital (QRIS Midtrans — FCGateway)"
+                                                description="Pelanggan memilih QRIS saat checkout, diarahkan ke halaman bayar Midtrans Snap via FCGateway, lalu lunas otomatis lewat webhook HMAC."
                                             />
                                             {!allowDigitalPayment && (
                                                 <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-3 text-xs text-emerald-950">
                                                     <p className="font-extrabold">
-                                                        API FCGateway Sudah
-                                                        Terkonfigurasi!
+                                                        API FCGateway Midtrans
+                                                        Sudah Terkonfigurasi!
                                                     </p>
                                                     <p className="mt-1 text-[11px] leading-relaxed text-emerald-900">
                                                         Aktifkan saklar di atas
@@ -999,25 +999,29 @@ export default function LocationSettingsPage({
                                     ) : (
                                         <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-950">
                                             <p className="font-extrabold">
-                                                API FCGateway Belum Diisi di
-                                                .env
+                                                API FCGateway Midtrans Belum
+                                                Diisi di .env
                                             </p>
                                             <p className="mt-1 text-[11px] leading-relaxed text-amber-900">
-                                                Integrasi FCGateway sudah siap
-                                                digunakan. Isi{' '}
-                                                <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
-                                                    FCGATEWAY_BASE_URL
-                                                </code>{' '}
-                                                dan{' '}
+                                                Integrasi REST API FCGateway &
+                                                Midtrans sudah siap. Isi{' '}
                                                 <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
                                                     FCGATEWAY_API_KEY
                                                 </code>{' '}
-                                                di file{' '}
+                                                (Public API Key{' '}
+                                                <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
+                                                    fc_live_pk_...
+                                                </code>
+                                                ) dan{' '}
+                                                <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
+                                                    FCGATEWAY_SECRET_KEY
+                                                </code>{' '}
+                                                (Secret Key HMAC) di file{' '}
                                                 <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
                                                     .env
                                                 </code>{' '}
-                                                untuk mengaktifkan saklar QRIS
-                                                Online.
+                                                untuk mengaktifkan QRIS
+                                                Midtrans.
                                             </p>
                                         </div>
                                     )}
@@ -1103,8 +1107,8 @@ export default function LocationSettingsPage({
                                             </h2>
                                             <p className="text-[11px] text-[#78716C]">
                                                 {isGatewayConfigured
-                                                    ? 'Terhubung ke FCGateway QRIS Dinamis & endpoint webhook siap menerima callback.'
-                                                    : 'Menunggu pengisian FCGATEWAY_BASE_URL & FCGATEWAY_API_KEY di file .env.'}
+                                                    ? 'Terhubung ke REST API FCGateway & Midtrans (Snap QRIS). Pasang URL Webhook di bawah ke portal FCGateway.'
+                                                    : 'Menunggu pengisian FCGATEWAY_API_KEY & FCGATEWAY_SECRET_KEY di file .env.'}
                                             </p>
                                         </div>
                                         <StatusPill
@@ -1115,7 +1119,7 @@ export default function LocationSettingsPage({
                                             }
                                         >
                                             {isGatewayConfigured
-                                                ? 'FCGateway Siap'
+                                                ? 'Midtrans Siap'
                                                 : 'Mode Tunai POS'}
                                         </StatusPill>
                                     </div>
@@ -1124,28 +1128,51 @@ export default function LocationSettingsPage({
                                         <div className="rounded-xl border border-[#EFE5CF] bg-[#FAF6EC] p-3 text-xs">
                                             <div className="flex items-center justify-between gap-2">
                                                 <span className="text-[10px] font-bold text-[#78716C] uppercase">
-                                                    URL Callback / Webhook
-                                                    SideOrder
+                                                    URL Webhook (Pasang di
+                                                    Portal FCGateway)
                                                 </span>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        void navigator.clipboard.writeText(
-                                                            gatewayConfig.webhook_endpoint ??
-                                                                '',
-                                                        );
-                                                        toast.success(
-                                                            'URL Webhook disalin ke clipboard.',
-                                                        );
-                                                    }}
-                                                    className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#E8DFC8] bg-white px-2 py-0.5 text-[10px] font-bold text-[#5B4126] hover:bg-[#F5EEDC]"
-                                                >
-                                                    <Copy className="size-3" />
-                                                    Salin
-                                                </button>
+                                                <div className="flex items-center gap-1.5">
+                                                    <StatusPill
+                                                        tone={
+                                                            gatewayConfig.is_webhook_configured
+                                                                ? 'success'
+                                                                : 'warning'
+                                                        }
+                                                    >
+                                                        {gatewayConfig.is_webhook_configured
+                                                            ? 'HMAC Aktif'
+                                                            : 'Secret Kosong'}
+                                                    </StatusPill>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            void navigator.clipboard.writeText(
+                                                                gatewayConfig.webhook_endpoint ??
+                                                                    '',
+                                                            );
+                                                            toast.success(
+                                                                'URL Webhook disalin ke clipboard.',
+                                                            );
+                                                        }}
+                                                        className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#E8DFC8] bg-white px-2 py-0.5 text-[10px] font-bold text-[#5B4126] hover:bg-[#F5EEDC]"
+                                                    >
+                                                        <Copy className="size-3" />
+                                                        Salin
+                                                    </button>
+                                                </div>
                                             </div>
                                             <p className="mt-1 font-mono text-[11px] break-all text-[#18181B]">
                                                 {gatewayConfig.webhook_endpoint}
+                                            </p>
+                                            <p className="mt-1 text-[10.5px] text-[#78716C]">
+                                                Tempel URL HTTPS publik ini pada
+                                                menu{' '}
+                                                <strong>
+                                                    Portal FCGateway → Kelola di
+                                                    Pengaturan → Default Webhook
+                                                    URL
+                                                </strong>
+                                                .
                                             </p>
                                         </div>
                                     )}

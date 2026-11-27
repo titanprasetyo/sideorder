@@ -80,9 +80,9 @@ interface LatestPaymentSummary {
     expired_at?: string | null;
     response_payload?: {
         data?: {
-            unique_code?: number;
-            formatted_unique_code?: string;
-            total_amount?: number;
+            reference_id?: string;
+            short_code?: string;
+            gateway?: string;
         };
     } | null;
 }
@@ -202,13 +202,8 @@ export default function OrderStatusPage({
         return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     };
 
-    const gatewayUniqueTotal =
-        latestDigitalPayment?.response_payload?.data?.total_amount ?? null;
-    const gatewayUniqueCode =
-        latestDigitalPayment?.response_payload?.data?.formatted_unique_code ??
-        (latestDigitalPayment?.response_payload?.data?.unique_code !== undefined
-            ? String(latestDigitalPayment.response_payload.data.unique_code)
-            : null);
+    const gatewayReferenceId =
+        latestDigitalPayment?.response_payload?.data?.reference_id ?? null;
 
     // Bersihkan sisa keranjang localStorage meja ini setelah pesanan masuk/kembali dari halaman pembayaran gateway
     useEffect(() => {
@@ -1006,27 +1001,23 @@ export default function OrderStatusPage({
                                                     )}
                                                 </span>
                                             </div>
-                                            {gatewayUniqueTotal !== null && (
+                                            {gatewayReferenceId && (
                                                 <div className="text-right">
                                                     <span className="block text-[10px] font-semibold text-[#6E6A64]">
-                                                        Nominal Transfer QRIS
+                                                        Referensi Gateway
                                                     </span>
-                                                    <span className="font-mono text-xs font-bold text-[#1A1A1A] tabular-nums">
-                                                        {formatRupiah(
-                                                            gatewayUniqueTotal,
-                                                        )}
-                                                        {gatewayUniqueCode
-                                                            ? ` (kode ${gatewayUniqueCode})`
-                                                            : ''}
+                                                    <span className="font-mono text-xs font-bold text-[#1A1A1A]">
+                                                        {gatewayReferenceId}
                                                     </span>
                                                 </div>
                                             )}
                                         </div>
                                         <p className="mt-1.5 text-[11px] leading-relaxed text-[#6E6A64]">
-                                            Status pesanan akan otomatis berubah
-                                            menjadi <strong>LUNAS</strong>{' '}
-                                            segera setelah pembayaran QRIS
-                                            terverifikasi.
+                                            Halaman pembayaran akan membuka
+                                            Midtrans Snap QRIS. Status pesanan
+                                            otomatis berubah menjadi{' '}
+                                            <strong>LUNAS</strong> segera
+                                            setelah pembayaran terverifikasi.
                                         </p>
                                     </div>
 
