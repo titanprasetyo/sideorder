@@ -351,3 +351,63 @@ test('haversine distance calculation yields expected surface meters', function (
         ->and($nearDistance)->toBeGreaterThan(40.0)->toBeLessThan(60.0)
         ->and($farDistance)->toBeGreaterThan(500.0)->toBeLessThan(560.0);
 });
+
+test('indoor gps accuracy tolerance allows genuine indoor drift while rejecting far coordinates and huge ip accuracy values', function () {
+    Event::fake([OrderCreated::class]);
+
+    CafeSetting::query()->delete();
+    CafeSetting::create([
+        'cafe_name' => 'Café SIDE LINE',
+        'is_location_restricted' => true,
+        'latitude' => $this->cafeLat,
+        'longitude' => $this->cafeLng,
+        'access_radius_meters' => 100,
+    ]);
+
+    // 1. Akurasi IP desktop sangat besar (> 100.000 m) tidak boleh gagal validasi 422, tetap dievaluasi (403 bila jauh)
+    $this->postJson(route('order.verify-location'), [
+        'latitude' => $this->outsideLat, // ~530 m
+        'longitude' => $this->outsideLng,
+        'accuracy' => 250000,
+    ])->assertForbidden()
+        ->assertJsonPath('allowed', false)
+        ->assertJsonPath('radius_meters', 100)
+        ->assertJsonPath('effective_radius_meters', 250);
+
+    // 2. Titik sedikit bergeser (~160 m dari pusat) akibat GPS indoor dengan akurasi ±100 m -> ditoleransi (100 + 100 = 200 m)
+    $indoorDriftLat = -6.916180; // ~160 m selatan dari cafeLat
+    $indoorDriftLng = $this->cafeLng;
+
+    $this->postJson(route('order.verify-location'), [
+        'latitude' => $indoorDriftLat,
+        'longitude' => $indoorDriftLng,
+        'accuracy' => 100,
+    ])->assertOk()
+        ->assertJsonPath('allowed', true)
+        ->assertJsonPath('effective_radius_meters', 200);
+
+    // 3. Sesi tetap lolos saat reload katalog, stock-sync, dan checkout
+    $this->get(route('order.index', ['table' => $this->table->qr_token]))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->where('locationAccess.verified', true)
+            ->has('categories', 1));
+
+    $this->getJson(route('order.stock-sync'))->assertOk();
+
+    $this->post(route('order.checkout'), [
+        'qr_token' => $this->table->qr_token,
+        'customer_name' => 'Tamu Indoor',
+        'customer_latitude' => $indoorDriftLat,
+        'customer_longitude' => $indoorDriftLng,
+        'customer_accuracy' => 100,
+        'items' => [
+            [
+                'menu_id' => $this->menu->id,
+                'quantity' => 1,
+            ],
+        ],
+    ])->assertRedirect();
+
+    expect(Order::count())->toBe(1);
+});

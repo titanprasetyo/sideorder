@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Media\MenuImageStorageService;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
@@ -33,6 +34,7 @@ use Illuminate\Support\Facades\Date;
  * @property CarbonInterface|null $updated_at
  * @property-read float $final_price
  * @property-read float $discount_amount
+ * @property-read string|null $image_url
  * @property-read float|null $gross_margin_amount
  * @property-read float|null $gross_margin_percent
  * @property-read int $effective_stock_quantity
@@ -71,6 +73,7 @@ class Menu extends Model
     ];
 
     protected $appends = [
+        'image_url',
         'final_price',
         'discount_amount',
         'gross_margin_amount',
@@ -111,6 +114,14 @@ class Menu extends Model
             'stock_valid_days' => 'integer',
             'stock_updated_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Resolusi URL gambar menu yang kompatibel dengan Laravel Cloud maupun lokal.
+     */
+    public function getImageUrlAttribute(): ?string
+    {
+        return app(MenuImageStorageService::class)->resolvePublicUrl($this->image_path);
     }
 
     /**

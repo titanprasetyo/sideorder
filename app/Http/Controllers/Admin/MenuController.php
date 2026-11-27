@@ -9,11 +9,11 @@ use App\Models\Menu;
 use App\Models\MenuOptionGroup;
 use App\Models\MenuOptionItem;
 use App\Models\OrderItem;
+use App\Services\Media\MenuImageStorageService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Inertia\Inertia;
@@ -21,6 +21,10 @@ use Inertia\Response;
 
 class MenuController extends Controller
 {
+    public function __construct(
+        private readonly MenuImageStorageService $menuImageStorage,
+    ) {}
+
     /**
      * Menampilkan daftar menu beserta kategorinya dan daftar kategori untuk pengelolaan terpadu.
      */
@@ -57,12 +61,11 @@ class MenuController extends Controller
         $validated = $request->validated();
 
         DB::transaction(function () use ($request, $validated): void {
-            // Upload Gambar jika ada
+            // Upload Gambar jika ada (persisten di database + sinkron disk public / S3)
             $imagePath = null;
             $uploadedImage = $request->file('image');
             if ($uploadedImage instanceof UploadedFile) {
-                $stored = $uploadedImage->store('menus', 'public');
-                $imagePath = is_string($stored) ? $stored : null;
+                $imagePath = $this->menuImageStorage->store($uploadedImage);
             }
 
             $slug = ! empty($validated['slug'])
@@ -115,11 +118,12 @@ class MenuController extends Controller
         DB::transaction(function () use ($request, $validated, $menu): void {
             $uploadedImage = $request->file('image');
             if ($uploadedImage instanceof UploadedFile) {
-                if ($menu->image_path && Storage::disk('public')->exists($menu->image_path)) {
-                    Storage::disk('public')->delete($menu->image_path);
+                $previousImagePath = $menu->image_path;
+                $stored = $this->menuImageStorage->store($uploadedImage);
+                if ($stored !== null) {
+                    $this->menuImageStorage->delete($previousImagePath);
+                    $menu->image_path = $stored;
                 }
-                $stored = $uploadedImage->store('menus', 'public');
-                $menu->image_path = is_string($stored) ? $stored : null;
             }
 
             $slug = ! empty($validated['slug'])
@@ -240,9 +244,7 @@ class MenuController extends Controller
             return back()->with('error', 'Menu tidak dapat dihapus karena masih digunakan dalam pesanan aktif. Nonaktifkan menu terlebih dahulu.');
         }
 
-        if ($menu->image_path && Storage::disk('public')->exists($menu->image_path)) {
-            Storage::disk('public')->delete($menu->image_path);
-        }
+        $this->menuImageStorage->delete($menu->image_path);
 
         $menu->delete();
 

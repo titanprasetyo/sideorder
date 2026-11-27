@@ -228,7 +228,7 @@ class OrderController extends Controller
         $validated = $request->validate([
             'latitude' => ['required', 'numeric', 'between:-90,90'],
             'longitude' => ['required', 'numeric', 'between:-180,180'],
-            'accuracy' => ['nullable', 'numeric', 'min:0', 'max:100000'],
+            'accuracy' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         $result = $this->locationAccessService->verifyAndStoreSession(
@@ -243,6 +243,8 @@ class OrderController extends Controller
             'restricted' => $result['restricted'],
             'distance_meters' => $result['distance_meters'],
             'radius_meters' => $result['radius_meters'],
+            'accuracy_meters' => $result['accuracy_meters'],
+            'effective_radius_meters' => $result['effective_radius_meters'],
             'message' => $result['message'],
         ], $result['allowed'] ? 200 : 403);
     }
@@ -342,8 +344,17 @@ class OrderController extends Controller
         $incomingLng = isset($validated['customer_longitude']) && is_numeric($validated['customer_longitude'])
             ? (float) $validated['customer_longitude']
             : null;
+        $incomingAccuracy = isset($validated['customer_accuracy']) && is_numeric($validated['customer_accuracy'])
+            ? (float) $validated['customer_accuracy']
+            : null;
 
-        $locationCheck = $this->locationAccessService->authorizeRequest($request, $incomingLat, $incomingLng);
+        $locationCheck = $this->locationAccessService->authorizeRequest(
+            $request,
+            $incomingLat,
+            $incomingLng,
+            $setting,
+            $incomingAccuracy,
+        );
         if (! $locationCheck['allowed']) {
             throw ValidationException::withMessages([
                 'location' => $locationCheck['message'],

@@ -63,6 +63,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
+import { resolveMenuImageUrl } from '@/lib/menu-image';
 import { cn } from '@/lib/utils';
 
 interface OptionItem {
@@ -91,6 +92,7 @@ interface Menu {
     slug: string;
     description: string | null;
     image_path: string | null;
+    image_url?: string | null;
     base_price: string;
     cost_price?: string | number | null;
     gross_margin_amount?: number | null;
@@ -211,6 +213,15 @@ export default function MenusIndex({
     const [refreshStockTimestamp, setRefreshStockTimestamp] = useState(true);
     const [imageFile, setImageFile] = useState<File | null>(null);
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    const [failedImageUrls, setFailedImageUrls] = useState<
+        Record<string, boolean>
+    >({});
+
+    const markImageFailed = (url: string) => {
+        setFailedImageUrls((prev) =>
+            prev[url] ? prev : { ...prev, [url]: true },
+        );
+    };
 
     // Form state grup kustomisasi (Ukuran & Topping)
     const [optionGroups, setOptionGroups] = useState<OptionGroup[]>([]);
@@ -441,7 +452,7 @@ export default function MenusIndex({
         setStockValidDays(String(menu.stock_valid_days ?? 1));
         setRefreshStockTimestamp(Boolean(menu.is_stock_expired));
         setImageFile(null);
-        setImagePreview(menu.image_path ? `/storage/${menu.image_path}` : null);
+        setImagePreview(resolveMenuImageUrl(menu));
 
         // Petakan option groups yang ada beserta konfigurasi icon-nya
         if (menu.option_groups) {
@@ -1012,6 +1023,12 @@ export default function MenusIndex({
                                         menu.is_limited_stock &&
                                         menu.is_stock_expired,
                                     );
+                                    const menuImageUrl =
+                                        resolveMenuImageUrl(menu);
+                                    const canShowMenuImage = Boolean(
+                                        menuImageUrl &&
+                                        !failedImageUrls[menuImageUrl],
+                                    );
 
                                     return (
                                         <div
@@ -1028,10 +1045,17 @@ export default function MenusIndex({
                                                     className="block size-full cursor-pointer text-left focus:outline-none"
                                                     title={`Lihat detail & varian ${menu.name}`}
                                                 >
-                                                    {menu.image_path ? (
+                                                    {canShowMenuImage &&
+                                                    menuImageUrl ? (
                                                         <img
-                                                            src={`/storage/${menu.image_path}`}
+                                                            src={menuImageUrl}
                                                             alt={menu.name}
+                                                            loading="lazy"
+                                                            onError={() =>
+                                                                markImageFailed(
+                                                                    menuImageUrl,
+                                                                )
+                                                            }
                                                             className={cn(
                                                                 'size-full object-cover transition-transform duration-300 group-hover:scale-105',
                                                                 (!menu.is_active ||
@@ -1365,11 +1389,17 @@ export default function MenusIndex({
                                         htmlFor="image"
                                         className="group relative flex size-36 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-lg bg-[#FAF5E8] text-center"
                                     >
-                                        {imagePreview ? (
+                                        {imagePreview &&
+                                        !failedImageUrls[imagePreview] ? (
                                             <>
                                                 <img
                                                     src={imagePreview}
                                                     alt="Preview"
+                                                    onError={() =>
+                                                        markImageFailed(
+                                                            imagePreview,
+                                                        )
+                                                    }
                                                     className="size-full object-cover"
                                                 />
                                                 <div className="absolute inset-0 flex items-center justify-center bg-black/45 text-[11px] font-bold text-white opacity-0 transition-opacity group-hover:opacity-100">

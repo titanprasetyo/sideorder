@@ -39,6 +39,7 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
+import { resolveMenuImageUrl } from '@/lib/menu-image';
 import { cn } from '@/lib/utils';
 
 interface OptionItem {
@@ -65,6 +66,7 @@ interface Menu {
     slug: string;
     description: string | null;
     image_path: string | null;
+    image_url?: string | null;
     base_price: string;
     is_discount_active?: boolean;
     discount_type?: 'percent' | 'fixed' | null;
@@ -99,6 +101,24 @@ interface LocationAccessInfo {
 interface VerifiedCoords {
     latitude: number;
     longitude: number;
+    accuracy?: number | null;
+}
+
+type LocationBlockReason =
+    | 'out_of_range'
+    | 'permission_denied'
+    | 'position_unavailable'
+    | 'timeout'
+    | 'insecure_context'
+    | 'unsupported'
+    | 'cookie_blocked'
+    | 'network_error';
+
+interface LocationBlockInfo {
+    reason: LocationBlockReason;
+    distanceMeters: number | null;
+    radiusMeters: number | null;
+    accuracyMeters: number | null;
 }
 
 interface Category {
@@ -179,6 +199,38 @@ interface Props {
 }
 
 const VERIFIED_COORDS_STORAGE_KEY = 'sideorder_verified_coords';
+const CSRF_RELOAD_GUARD_KEY = 'sideorder_geo_csrf_reloaded';
+
+function getXsrfCookieToken(): string | null {
+    if (typeof document === 'undefined') return null;
+
+    const match = document.cookie
+        .split('; ')
+        .find((row) => row.startsWith('XSRF-TOKEN='));
+
+    if (!match) return null;
+
+    const raw = match.slice('XSRF-TOKEN='.length);
+    if (!raw) return null;
+
+    try {
+        return decodeURIComponent(raw);
+    } catch {
+        return raw;
+    }
+}
+
+function formatDistanceLabel(meters: number): string {
+    if (!Number.isFinite(meters) || meters < 0) return '-';
+    if (meters >= 1000) {
+        return `${(meters / 1000).toLocaleString('id-ID', {
+            minimumFractionDigits: 1,
+            maximumFractionDigits: 1,
+        })} km`;
+    }
+
+    return `${Math.round(meters).toLocaleString('id-ID')} m`;
+}
 
 function loadStoredCoords(): VerifiedCoords | null {
     if (typeof window === 'undefined') return null;
@@ -196,6 +248,11 @@ function loadStoredCoords(): VerifiedCoords | null {
             return {
                 latitude: parsed.latitude,
                 longitude: parsed.longitude,
+                accuracy:
+                    typeof parsed?.accuracy === 'number' &&
+                    Number.isFinite(parsed.accuracy)
+                        ? parsed.accuracy
+                        : null,
             };
         }
         return null;
@@ -504,6 +561,16 @@ export default function CustomerOrder({
             ? 'checking'
             : 'idle',
     );
+    const [locationBlockInfo, setLocationBlockInfo] =
+        useState<LocationBlockInfo>({
+            reason: 'out_of_range',
+            distanceMeters: null,
+            radiusMeters: locationAccess.radius_meters ?? null,
+            accuracyMeters: null,
+        });
+    const [failedImageUrls, setFailedImageUrls] = useState<
+        Record<string, boolean>
+    >({});
     const [verifiedCoords, setVerifiedCoords] = useState<VerifiedCoords | null>(
         () => loadStoredCoords(),
     );
@@ -511,6 +578,37 @@ export default function CustomerOrder({
         loadLastOrderNumber(table.qr_token),
     );
     const autoGeoTriggeredRef = useRef(false);
+    const geoWatchIdRef = useRef<number | null>(null);
+    const geoRefineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+        null,
+    );
+
+    const markImageFailed = useCallback((url: string) => {
+        setFailedImageUrls((prev) =>
+            prev[url] ? prev : { ...prev, [url]: true },
+        );
+    }, []);
+
+    const clearGeoRefinement = useCallback(() => {
+        if (geoRefineTimerRef.current !== null) {
+            clearTimeout(geoRefineTimerRef.current);
+            geoRefineTimerRef.current = null;
+        }
+        if (
+            geoWatchIdRef.current !== null &&
+            typeof navigator !== 'undefined' &&
+            navigator.geolocation
+        ) {
+            navigator.geolocation.clearWatch(geoWatchIdRef.current);
+            geoWatchIdRef.current = null;
+        }
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            clearGeoRefinement();
+        };
+    }, [clearGeoRefinement]);
 
     // State sinkronisasi stok real-time ringan dari /order/stock-sync
     const [stockOverrides, setStockOverrides] = useState<
@@ -526,27 +624,124 @@ export default function CustomerOrder({
     const isLocationBlocked =
         locationAccess.required && !serverLocationVerified;
 
+    const refineHighAccuracyCoords = useCallback(
+        (
+            initialAccuracy: number | null,
+            maxWaitMs = 4500,
+        ): Promise<{
+            coords: VerifiedCoords;
+            accuracy: number | null;
+        } | null> => {
+            if (typeof navigator === 'undefined' || !navigator.geolocation) {
+                return Promise.resolve(null);
+            }
+
+            clearGeoRefinement();
+
+            return new Promise((resolve) => {
+                let bestSample: {
+                    coords: VerifiedCoords;
+                    accuracy: number | null;
+                } | null = null;
+                let settled = false;
+
+                const finish = (
+                    result: {
+                        coords: VerifiedCoords;
+                        accuracy: number | null;
+                    } | null,
+                ) => {
+                    if (settled) return;
+                    settled = true;
+                    clearGeoRefinement();
+                    resolve(result);
+                };
+
+                geoRefineTimerRef.current = setTimeout(() => {
+                    finish(bestSample);
+                }, maxWaitMs);
+
+                geoWatchIdRef.current = navigator.geolocation.watchPosition(
+                    (position) => {
+                        const acc =
+                            typeof position.coords.accuracy === 'number' &&
+                            Number.isFinite(position.coords.accuracy)
+                                ? position.coords.accuracy
+                                : null;
+                        const candidate = {
+                            coords: {
+                                latitude: position.coords.latitude,
+                                longitude: position.coords.longitude,
+                                accuracy: acc,
+                            },
+                            accuracy: acc,
+                        };
+
+                        if (
+                            bestSample === null ||
+                            (acc !== null &&
+                                (bestSample.accuracy === null ||
+                                    acc < bestSample.accuracy))
+                        ) {
+                            bestSample = candidate;
+                        }
+
+                        const improvedEnough =
+                            acc !== null &&
+                            (acc <= 65 ||
+                                (initialAccuracy !== null &&
+                                    acc < initialAccuracy * 0.6));
+
+                        if (improvedEnough) {
+                            finish(bestSample);
+                        }
+                    },
+                    () => {
+                        finish(bestSample);
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        timeout: maxWaitMs,
+                        maximumAge: 0,
+                    },
+                );
+            });
+        },
+        [clearGeoRefinement],
+    );
+
     const verifyCoordinatesWithServer = useCallback(
-        async (coords: VerifiedCoords, accuracy?: number | null) => {
+        async (
+            coords: VerifiedCoords,
+            accuracy?: number | null,
+            allowAccuracyRefinement = true,
+        ) => {
             setLocationGateStatus('checking');
             const normalizedAccuracy =
                 typeof accuracy === 'number' && Number.isFinite(accuracy)
-                    ? Math.round(accuracy)
+                    ? Math.max(0, Math.round(accuracy))
                     : null;
 
-            const csrfToken = document
+            const xsrfCookie = getXsrfCookieToken();
+            const csrfMeta = document
                 .querySelector('meta[name="csrf-token"]')
                 ?.getAttribute('content');
+
+            const headers: Record<string, string> = {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            };
+            if (xsrfCookie) {
+                headers['X-XSRF-TOKEN'] = xsrfCookie;
+            } else if (csrfMeta) {
+                headers['X-CSRF-TOKEN'] = csrfMeta;
+            }
 
             try {
                 const res = await fetch('/order/verify-location', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Accept: 'application/json',
-                        'X-CSRF-TOKEN': csrfToken || '',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
+                    headers,
                     credentials: 'same-origin',
                     body: JSON.stringify({
                         latitude: coords.latitude,
@@ -555,11 +750,34 @@ export default function CustomerOrder({
                     }),
                 });
 
+                // Jika token CSRF/sesi kedaluwarsa (419), muat ulang halaman penuh satu kali secara otomatis
+                if (res.status === 419 && typeof window !== 'undefined') {
+                    const alreadyReloaded =
+                        sessionStorage.getItem(CSRF_RELOAD_GUARD_KEY) === '1';
+                    if (!alreadyReloaded) {
+                        sessionStorage.setItem(CSRF_RELOAD_GUARD_KEY, '1');
+                        window.location.reload();
+                        return;
+                    }
+                    sessionStorage.removeItem(CSRF_RELOAD_GUARD_KEY);
+                }
+
                 const data = await res.json().catch(() => null);
 
                 if (res.ok && data?.allowed) {
-                    saveStoredCoords(coords);
-                    setVerifiedCoords(coords);
+                    try {
+                        sessionStorage.removeItem(CSRF_RELOAD_GUARD_KEY);
+                    } catch {
+                        // Ignore storage errors
+                    }
+
+                    const coordsToSave: VerifiedCoords = {
+                        latitude: coords.latitude,
+                        longitude: coords.longitude,
+                        accuracy: normalizedAccuracy,
+                    };
+                    saveStoredCoords(coordsToSave);
+                    setVerifiedCoords(coordsToSave);
 
                     router.reload({
                         only: [
@@ -568,36 +786,139 @@ export default function CustomerOrder({
                             'lockedOrderNotice',
                             'locationAccess',
                         ],
-                        onSuccess: () => {
+                        onSuccess: (page) => {
+                            const updatedLocation = (
+                                page.props as {
+                                    locationAccess?: LocationAccessInfo;
+                                }
+                            )?.locationAccess;
+                            if (
+                                updatedLocation?.required &&
+                                !updatedLocation.verified
+                            ) {
+                                setServerLocationVerified(false);
+                                setLocationBlockInfo({
+                                    reason: 'cookie_blocked',
+                                    distanceMeters: null,
+                                    radiusMeters:
+                                        updatedLocation.radius_meters ??
+                                        locationAccess.radius_meters,
+                                    accuracyMeters: normalizedAccuracy,
+                                });
+                                setLocationGateStatus('blocked');
+                                return;
+                            }
+
                             setServerLocationVerified(true);
                             setLocationGateStatus('idle');
                         },
                         onError: () => {
                             setServerLocationVerified(false);
+                            setLocationBlockInfo({
+                                reason: 'network_error',
+                                distanceMeters: null,
+                                radiusMeters: locationAccess.radius_meters,
+                                accuracyMeters: normalizedAccuracy,
+                            });
                             setLocationGateStatus('blocked');
                         },
                     });
                     return;
                 }
 
+                // Jika ditolak 403 padahal akurasi GPS awal masih kasar (> 100 m), tunggu perbaikan sinyal GPS singkat
+                if (
+                    res.status === 403 &&
+                    allowAccuracyRefinement &&
+                    (normalizedAccuracy === null || normalizedAccuracy > 100)
+                ) {
+                    const refined =
+                        await refineHighAccuracyCoords(normalizedAccuracy);
+                    if (
+                        refined &&
+                        (refined.accuracy === null ||
+                            normalizedAccuracy === null ||
+                            refined.accuracy < normalizedAccuracy ||
+                            Math.abs(
+                                refined.coords.latitude - coords.latitude,
+                            ) > 0.0001 ||
+                            Math.abs(
+                                refined.coords.longitude - coords.longitude,
+                            ) > 0.0001)
+                    ) {
+                        await verifyCoordinatesWithServer(
+                            refined.coords,
+                            refined.accuracy,
+                            false,
+                        );
+                        return;
+                    }
+                }
+
                 clearStoredCoords();
                 setVerifiedCoords(null);
                 setServerLocationVerified(false);
+
+                if (res.status === 403 && data) {
+                    setLocationBlockInfo({
+                        reason: 'out_of_range',
+                        distanceMeters:
+                            typeof data.distance_meters === 'number'
+                                ? data.distance_meters
+                                : null,
+                        radiusMeters:
+                            typeof data.radius_meters === 'number'
+                                ? data.radius_meters
+                                : locationAccess.radius_meters,
+                        accuracyMeters:
+                            typeof data.accuracy_meters === 'number'
+                                ? data.accuracy_meters
+                                : normalizedAccuracy,
+                    });
+                } else {
+                    setLocationBlockInfo({
+                        reason: 'network_error',
+                        distanceMeters: null,
+                        radiusMeters: locationAccess.radius_meters,
+                        accuracyMeters: normalizedAccuracy,
+                    });
+                }
+
                 setLocationGateStatus('blocked');
             } catch {
+                setLocationBlockInfo({
+                    reason: 'network_error',
+                    distanceMeters: null,
+                    radiusMeters: locationAccess.radius_meters,
+                    accuracyMeters: normalizedAccuracy,
+                });
                 setLocationGateStatus('blocked');
             }
         },
-        [],
+        [locationAccess.radius_meters, refineHighAccuracyCoords],
     );
 
     const requestCustomerLocation = useCallback(() => {
-        if (
-            typeof window !== 'undefined' &&
-            (!window.isSecureContext ||
-                typeof navigator === 'undefined' ||
-                !navigator.geolocation)
-        ) {
+        clearGeoRefinement();
+
+        if (typeof window !== 'undefined' && !window.isSecureContext) {
+            setLocationBlockInfo({
+                reason: 'insecure_context',
+                distanceMeters: null,
+                radiusMeters: locationAccess.radius_meters,
+                accuracyMeters: null,
+            });
+            setLocationGateStatus('blocked');
+            return;
+        }
+
+        if (typeof navigator === 'undefined' || !navigator.geolocation) {
+            setLocationBlockInfo({
+                reason: 'unsupported',
+                distanceMeters: null,
+                radiusMeters: locationAccess.radius_meters,
+                accuracyMeters: null,
+            });
             setLocationGateStatus('blocked');
             return;
         }
@@ -609,6 +930,12 @@ export default function CustomerOrder({
             allowFallbackRetry: boolean,
         ) => {
             if (err.code === err.PERMISSION_DENIED) {
+                setLocationBlockInfo({
+                    reason: 'permission_denied',
+                    distanceMeters: null,
+                    radiusMeters: locationAccess.radius_meters,
+                    accuracyMeters: null,
+                });
                 setLocationGateStatus('blocked');
                 return;
             }
@@ -620,20 +947,31 @@ export default function CustomerOrder({
                             {
                                 latitude: position.coords.latitude,
                                 longitude: position.coords.longitude,
+                                accuracy: position.coords.accuracy,
                             },
                             position.coords.accuracy,
+                            true,
                         );
                     },
                     (fallbackErr) => handleGeoError(fallbackErr, false),
                     {
                         enableHighAccuracy: false,
-                        timeout: 10000,
+                        timeout: 12000,
                         maximumAge: 30000,
                     },
                 );
                 return;
             }
 
+            setLocationBlockInfo({
+                reason:
+                    err.code === err.TIMEOUT
+                        ? 'timeout'
+                        : 'position_unavailable',
+                distanceMeters: null,
+                radiusMeters: locationAccess.radius_meters,
+                accuracyMeters: null,
+            });
             setLocationGateStatus('blocked');
         };
 
@@ -643,18 +981,24 @@ export default function CustomerOrder({
                     {
                         latitude: position.coords.latitude,
                         longitude: position.coords.longitude,
+                        accuracy: position.coords.accuracy,
                     },
                     position.coords.accuracy,
+                    true,
                 );
             },
             (err) => handleGeoError(err, true),
             {
                 enableHighAccuracy: true,
-                timeout: 12000,
+                timeout: 15000,
                 maximumAge: 0,
             },
         );
-    }, [verifyCoordinatesWithServer]);
+    }, [
+        clearGeoRefinement,
+        locationAccess.radius_meters,
+        verifyCoordinatesWithServer,
+    ]);
 
     // Jalankan verifikasi lokasi otomatis ketika gerbang geofencing terkunci
     useEffect(() => {
@@ -784,6 +1128,12 @@ export default function CustomerOrder({
                     clearStoredCoords();
                     setVerifiedCoords(null);
                     setServerLocationVerified(false);
+                    setLocationBlockInfo({
+                        reason: 'out_of_range',
+                        distanceMeters: null,
+                        radiusMeters: locationAccess.radius_meters,
+                        accuracyMeters: null,
+                    });
                     setLocationGateStatus('blocked');
                 }
                 return;
@@ -1410,6 +1760,7 @@ export default function CustomerOrder({
                 idempotency_key: idempotencyKeyRef.current,
                 customer_latitude: latestCoords?.latitude ?? null,
                 customer_longitude: latestCoords?.longitude ?? null,
+                customer_accuracy: latestCoords?.accuracy ?? null,
                 items: cart.map((item) => ({
                     menu_id: item.menu_id,
                     quantity: item.quantity,
@@ -1430,6 +1781,12 @@ export default function CustomerOrder({
                     if (locationErr) {
                         setIsCartOpen(false);
                         setServerLocationVerified(false);
+                        setLocationBlockInfo({
+                            reason: 'out_of_range',
+                            distanceMeters: null,
+                            radiusMeters: locationAccess.radius_meters,
+                            accuracyMeters: null,
+                        });
                         setLocationGateStatus('blocked');
                         toast.error(locationErr);
                         return;
@@ -1547,8 +1904,94 @@ export default function CustomerOrder({
                 return;
             }
 
+            if (
+                locationBlockInfo.reason === 'network_error' ||
+                locationBlockInfo.reason === 'cookie_blocked'
+            ) {
+                window.location.reload();
+                return;
+            }
+
             requestCustomerLocation();
         };
+
+        const cafeNameLabel = locationAccess.cafe_name || 'Café SIDE LINE';
+        const effectiveRadiusLabel = formatDistanceLabel(
+            locationBlockInfo.radiusMeters ?? locationAccess.radius_meters,
+        );
+        const detectedDistanceLabel =
+            locationBlockInfo.distanceMeters !== null
+                ? formatDistanceLabel(locationBlockInfo.distanceMeters)
+                : null;
+        const detectedAccuracyLabel =
+            locationBlockInfo.accuracyMeters !== null &&
+            locationBlockInfo.accuracyMeters > 0
+                ? formatDistanceLabel(locationBlockInfo.accuracyMeters)
+                : null;
+        const isLowAccuracyEstimate =
+            locationBlockInfo.accuracyMeters !== null &&
+            locationBlockInfo.accuracyMeters > 200;
+
+        let blockTitle = 'Lokasi Di Luar Jangkauan';
+        let blockDescription = `Layanan pemesanan hanya tersedia di area ${cafeNameLabel} (radius ${effectiveRadiusLabel}).`;
+        let blockHint: string | null = null;
+        let retryLabel = 'Periksa Ulang Lokasi';
+
+        switch (locationBlockInfo.reason) {
+            case 'permission_denied':
+                blockTitle = 'Izin Lokasi Diperlukan';
+                blockDescription = `Browser atau perangkat belum mengizinkan akses lokasi untuk memverifikasi area ${cafeNameLabel}.`;
+                blockHint =
+                    'Aktifkan izin Lokasi pada pengaturan browser (ikon pengaturan di sebelah alamat situs) serta pastikan Layanan Lokasi / GPS perangkat menyala, lalu coba lagi.';
+                retryLabel = 'Coba Deteksi Lagi';
+                break;
+            case 'timeout':
+            case 'position_unavailable':
+                blockTitle = 'Sinyal Lokasi Tidak Terbaca';
+                blockDescription =
+                    'Perangkat tidak berhasil mendapatkan koordinat GPS saat ini.';
+                blockHint =
+                    'Pastikan GPS / Layanan Lokasi perangkat aktif dan tidak diblokir, lalu tekan tombol di bawah untuk mencoba ulang.';
+                retryLabel = 'Coba Deteksi Lagi';
+                break;
+            case 'insecure_context':
+                blockTitle = 'Koneksi Wajib HTTPS';
+                blockDescription =
+                    'Verifikasi lokasi hanya dapat berjalan melalui koneksi HTTPS yang aman.';
+                retryLabel = 'Buka Versi HTTPS';
+                break;
+            case 'unsupported':
+                blockTitle = 'Browser Tidak Mendukung Lokasi';
+                blockDescription =
+                    'Browser ini tidak mendukung deteksi GPS. Silakan buka tautan QR melalui Chrome atau Safari pada HP Anda.';
+                retryLabel = 'Muat Ulang';
+                break;
+            case 'cookie_blocked':
+                blockTitle = 'Cookie Browser Tidak Aktif';
+                blockDescription =
+                    'Sesi verifikasi lokasi tidak dapat disimpan karena browser memblokir cookie.';
+                blockHint =
+                    'Aktifkan cookie untuk situs ini (atau buka di luar mode incognito/webview terbatas), lalu muat ulang halaman.';
+                retryLabel = 'Muat Ulang Halaman';
+                break;
+            case 'network_error':
+                blockTitle = 'Gagal Memverifikasi Lokasi';
+                blockDescription =
+                    'Koneksi ke server terganggu atau sesi halaman perlu diperbarui.';
+                retryLabel = 'Muat Ulang Halaman';
+                break;
+            case 'out_of_range':
+            default:
+                blockTitle = 'Lokasi Di Luar Jangkauan';
+                blockDescription = detectedDistanceLabel
+                    ? `Posisi Anda terdeteksi sekitar ${detectedDistanceLabel} dari ${cafeNameLabel} (batas area ${effectiveRadiusLabel}).`
+                    : `Layanan pemesanan hanya tersedia di area ${cafeNameLabel} (radius ${effectiveRadiusLabel}).`;
+                blockHint = isLowAccuracyEstimate
+                    ? `Akurasi lokasi perangkat saat ini rendah (±${detectedAccuracyLabel}). Jika Anda sudah berada di area kafe, aktifkan GPS presisi tinggi di HP, matikan VPN, dan hindari membuka dari browser laptop (sering membaca lokasi ISP).`
+                    : 'Jika Anda sudah berada di dalam kafe, pastikan GPS aktif dan tidak menggunakan VPN, lalu tekan tombol di bawah.';
+                retryLabel = 'Periksa Ulang Lokasi';
+                break;
+        }
 
         return (
             <>
@@ -1561,7 +2004,7 @@ export default function CustomerOrder({
                             <div className="flex flex-col items-center justify-center text-center">
                                 <div className="size-10 animate-spin rounded-full border-[3px] border-[#E8E2D9] border-t-[#C52828]" />
                                 <p className="mt-4 text-sm font-medium text-[#6E6A64]">
-                                    Memuat halaman...
+                                    Memverifikasi lokasi area kafe...
                                 </p>
                             </div>
                         ) : (
@@ -1574,13 +2017,17 @@ export default function CustomerOrder({
                                 </div>
 
                                 <h1 className="text-lg font-extrabold tracking-tight text-[#1A1A1A]">
-                                    Lokasi Di Luar Jangkauan
+                                    {blockTitle}
                                 </h1>
                                 <p className="mt-2 text-xs leading-relaxed text-[#6E6A64] sm:text-sm">
-                                    Layanan pemesanan hanya tersedia di area{' '}
-                                    {locationAccess.cafe_name}. Silakan muat
-                                    ulang halaman.
+                                    {blockDescription}
                                 </p>
+
+                                {blockHint && (
+                                    <div className="mt-4 rounded-xl border border-[#EAE2D6] bg-[#FAF6EC] px-3.5 py-2.5 text-left text-[11px] leading-relaxed text-[#5E5850]">
+                                        {blockHint}
+                                    </div>
+                                )}
 
                                 <button
                                     type="button"
@@ -1591,7 +2038,7 @@ export default function CustomerOrder({
                                         weight="bold"
                                         className="size-4"
                                     />
-                                    <span>Muat Ulang</span>
+                                    <span>{retryLabel}</span>
                                 </button>
                             </div>
                         )}
@@ -1912,12 +2359,18 @@ export default function CustomerOrder({
                                                     remainingForMenu <= 0;
                                                 const stockQty =
                                                     menu.stock_quantity ?? 0;
-                                                const imageSrc = menu.image_path
-                                                    ? `/storage/${menu.image_path}`
-                                                    : getMenuFallbackImage(
-                                                          menu.name,
-                                                          cat.name,
-                                                      );
+                                                const resolvedPrimaryImage =
+                                                    resolveMenuImageUrl(menu);
+                                                const imageSrc =
+                                                    resolvedPrimaryImage &&
+                                                    !failedImageUrls[
+                                                        resolvedPrimaryImage
+                                                    ]
+                                                        ? resolvedPrimaryImage
+                                                        : getMenuFallbackImage(
+                                                              menu.name,
+                                                              cat.name,
+                                                          );
 
                                                 return (
                                                     <div
@@ -1958,12 +2411,34 @@ export default function CustomerOrder({
                                                                 src={imageSrc}
                                                                 alt=""
                                                                 aria-hidden="true"
+                                                                onError={() => {
+                                                                    if (
+                                                                        resolvedPrimaryImage &&
+                                                                        imageSrc ===
+                                                                            resolvedPrimaryImage
+                                                                    ) {
+                                                                        markImageFailed(
+                                                                            resolvedPrimaryImage,
+                                                                        );
+                                                                    }
+                                                                }}
                                                                 className="pointer-events-none absolute inset-0 size-full scale-110 object-cover opacity-30 blur-md"
                                                                 loading="lazy"
                                                             />
                                                             <img
                                                                 src={imageSrc}
                                                                 alt={menu.name}
+                                                                onError={() => {
+                                                                    if (
+                                                                        resolvedPrimaryImage &&
+                                                                        imageSrc ===
+                                                                            resolvedPrimaryImage
+                                                                    ) {
+                                                                        markImageFailed(
+                                                                            resolvedPrimaryImage,
+                                                                        );
+                                                                    }
+                                                                }}
                                                                 className={cn(
                                                                     'relative z-10 size-full object-contain transition-transform duration-300',
                                                                     outOfStock
@@ -2233,12 +2708,16 @@ export default function CustomerOrder({
                         <DialogContent className="flex max-h-[86dvh] w-[calc(100%-1.5rem)] max-w-[356px] flex-col gap-0 overflow-hidden rounded-2xl border border-[#E8E2D8] bg-[#FAF8F4] p-0 font-sans shadow-2xl sm:max-w-[390px] [&>button:last-child]:hidden">
                             {activeMenu &&
                                 (() => {
-                                    const modalImageSrc = activeMenu.image_path
-                                        ? `/storage/${activeMenu.image_path}`
-                                        : getMenuFallbackImage(
-                                              activeMenu.name,
-                                              '',
-                                          );
+                                    const resolvedModalImage =
+                                        resolveMenuImageUrl(activeMenu);
+                                    const modalImageSrc =
+                                        resolvedModalImage &&
+                                        !failedImageUrls[resolvedModalImage]
+                                            ? resolvedModalImage
+                                            : getMenuFallbackImage(
+                                                  activeMenu.name,
+                                                  '',
+                                              );
                                     const unitPrice =
                                         calculateCustomUnitPrice();
 
@@ -2278,6 +2757,17 @@ export default function CustomerOrder({
                                                                     }
                                                                     alt=""
                                                                     aria-hidden="true"
+                                                                    onError={() => {
+                                                                        if (
+                                                                            resolvedModalImage &&
+                                                                            modalImageSrc ===
+                                                                                resolvedModalImage
+                                                                        ) {
+                                                                            markImageFailed(
+                                                                                resolvedModalImage,
+                                                                            );
+                                                                        }
+                                                                    }}
                                                                     className="pointer-events-none absolute inset-0 size-full scale-110 object-cover opacity-30 blur-md"
                                                                 />
                                                                 <img
@@ -2287,6 +2777,17 @@ export default function CustomerOrder({
                                                                     alt={
                                                                         activeMenu.name
                                                                     }
+                                                                    onError={() => {
+                                                                        if (
+                                                                            resolvedModalImage &&
+                                                                            modalImageSrc ===
+                                                                                resolvedModalImage
+                                                                        ) {
+                                                                            markImageFailed(
+                                                                                resolvedModalImage,
+                                                                            );
+                                                                        }
+                                                                    }}
                                                                     className="relative z-10 size-full object-contain"
                                                                 />
                                                             </div>

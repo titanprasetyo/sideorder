@@ -280,20 +280,34 @@ export default function LocationSettingsPage({
             (position) => {
                 const lat = Number(position.coords.latitude.toFixed(6));
                 const lng = Number(position.coords.longitude.toFixed(6));
+                const acc = Math.round(position.coords.accuracy);
                 setLatitudeInput(String(lat));
                 setLongitudeInput(String(lng));
                 setIsDetectingGps(false);
-                toast.success(
-                    `Lokasi GPS terdeteksi (akurasi ±${Math.round(position.coords.accuracy)} m).`,
-                );
+                if (acc > 150) {
+                    toast.warning(
+                        `Lokasi terdeteksi dengan akurasi rendah (±${acc.toLocaleString('id-ID')} m, kemungkinan estimasi IP/Wi-Fi). Geser pin merah manual tepat di bangunan kafe pada peta sebelum menyimpan!`,
+                        { duration: 8000 },
+                    );
+                } else {
+                    toast.success(
+                        `Lokasi GPS terdeteksi (akurasi ±${acc} m). Pastikan pin merah tepat di bangunan kafe.`,
+                    );
+                }
             },
-            () => {
+            (err) => {
                 setIsDetectingGps(false);
-                toast.error(
-                    'Gagal membaca sinyal GPS. Silakan klik lokasi kafe langsung di peta.',
-                );
+                if (err.code === err.PERMISSION_DENIED) {
+                    toast.error(
+                        'Izin lokasi browser ditolak. Aktifkan izin lokasi atau klik titik bangunan kafe langsung pada peta.',
+                    );
+                } else {
+                    toast.error(
+                        'Gagal membaca sinyal GPS. Silakan klik lokasi kafe langsung di peta.',
+                    );
+                }
             },
-            { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 },
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
         );
     };
 

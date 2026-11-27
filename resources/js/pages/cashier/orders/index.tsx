@@ -52,6 +52,7 @@ import {
 } from '@/components/menu/size-icon';
 import ReceiptModal from '@/components/receipt/ReceiptModal';
 import { Button } from '@/components/ui/button';
+import { resolveMenuImageUrl } from '@/lib/menu-image';
 import { cn } from '@/lib/utils';
 import {
     Dialog,
@@ -176,6 +177,7 @@ interface CashierMenu {
     slug: string;
     description: string | null;
     image_path: string | null;
+    image_url?: string | null;
     base_price: string;
     is_discount_active?: boolean;
     discount_type?: 'percent' | 'fixed' | null;
@@ -285,6 +287,15 @@ export default function CashierOrdersIndex({
     const [inspectingMenu, setInspectingMenu] = useState<CashierMenu | null>(
         null,
     );
+    const [failedMenuImageUrls, setFailedMenuImageUrls] = useState<
+        Record<string, boolean>
+    >({});
+
+    const markMenuImageFailed = (url: string) => {
+        setFailedMenuImageUrls((prev) =>
+            prev[url] ? prev : { ...prev, [url]: true },
+        );
+    };
 
     const isFirstMenuSyncRef = useRef<boolean>(true);
     const knownMenuIdsRef = useRef<Set<number>>(
@@ -4498,6 +4509,17 @@ export default function CashierOrdersIndex({
                                                                 r.id ===
                                                                 menu.id,
                                                         );
+                                                    const menuImageUrl =
+                                                        resolveMenuImageUrl(
+                                                            menu,
+                                                        );
+                                                    const canShowMenuImage =
+                                                        Boolean(
+                                                            menuImageUrl &&
+                                                            !failedMenuImageUrls[
+                                                                menuImageUrl
+                                                            ],
+                                                        );
 
                                                     return (
                                                         <div
@@ -4511,11 +4533,20 @@ export default function CashierOrdersIndex({
                                                         >
                                                             {/* Foto Menu */}
                                                             <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#FAF5E8]">
-                                                                {menu.image_path ? (
+                                                                {canShowMenuImage &&
+                                                                menuImageUrl ? (
                                                                     <img
-                                                                        src={`/storage/${menu.image_path}`}
+                                                                        src={
+                                                                            menuImageUrl
+                                                                        }
                                                                         alt={
                                                                             menu.name
+                                                                        }
+                                                                        loading="lazy"
+                                                                        onError={() =>
+                                                                            markMenuImageFailed(
+                                                                                menuImageUrl,
+                                                                            )
                                                                         }
                                                                         className={cn(
                                                                             'size-full object-cover transition-transform duration-300 group-hover:scale-105',
@@ -4865,26 +4896,49 @@ export default function CashierOrdersIndex({
                                                 }
                                             >
                                                 <div className="relative flex size-36 items-center justify-center overflow-hidden rounded-lg bg-[#FAF5E8] text-center">
-                                                    {inspectingMenu.image_path ? (
-                                                        <img
-                                                            src={`/storage/${inspectingMenu.image_path}`}
-                                                            alt={
-                                                                inspectingMenu.name
-                                                            }
-                                                            className={cn(
-                                                                'size-full object-cover',
-                                                                !isAvailable &&
-                                                                    'grayscale-[60%]',
-                                                            )}
-                                                        />
-                                                    ) : (
-                                                        <div className="flex flex-col items-center gap-1 px-2 text-[#B8A67E]">
-                                                            <ImageIcon className="size-8 stroke-[1.5]" />
-                                                            <span className="text-[10px] font-semibold">
-                                                                Belum ada foto
-                                                            </span>
-                                                        </div>
-                                                    )}
+                                                    {(() => {
+                                                        const inspectingImageUrl =
+                                                            resolveMenuImageUrl(
+                                                                inspectingMenu,
+                                                            );
+                                                        if (
+                                                            inspectingImageUrl &&
+                                                            !failedMenuImageUrls[
+                                                                inspectingImageUrl
+                                                            ]
+                                                        ) {
+                                                            return (
+                                                                <img
+                                                                    src={
+                                                                        inspectingImageUrl
+                                                                    }
+                                                                    alt={
+                                                                        inspectingMenu.name
+                                                                    }
+                                                                    onError={() =>
+                                                                        markMenuImageFailed(
+                                                                            inspectingImageUrl,
+                                                                        )
+                                                                    }
+                                                                    className={cn(
+                                                                        'size-full object-cover',
+                                                                        !isAvailable &&
+                                                                            'grayscale-[60%]',
+                                                                    )}
+                                                                />
+                                                            );
+                                                        }
+
+                                                        return (
+                                                            <div className="flex flex-col items-center gap-1 px-2 text-[#B8A67E]">
+                                                                <ImageIcon className="size-8 stroke-[1.5]" />
+                                                                <span className="text-[10px] font-semibold">
+                                                                    Belum ada
+                                                                    foto
+                                                                </span>
+                                                            </div>
+                                                        );
+                                                    })()}
                                                 </div>
                                             </StandeeModalCard>
                                         </div>

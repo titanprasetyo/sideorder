@@ -34,6 +34,7 @@ class CheckoutOrderRequest extends FormRequest
             'idempotency_key' => ['nullable', 'string', 'max:100'],
             'customer_latitude' => ['nullable', 'numeric', 'between:-90,90'],
             'customer_longitude' => ['nullable', 'numeric', 'between:-180,180'],
+            'customer_accuracy' => ['nullable', 'numeric', 'min:0'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.menu_id' => ['required', 'integer', 'exists:menus,id'],
             'items.*.quantity' => ['required', 'integer', 'min:1', 'max:50'],
