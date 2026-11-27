@@ -35,4 +35,13 @@ return [
         ],
     ],
 
+    'fcgateway' => [
+        'enabled' => filter_var(env('FCGATEWAY_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        'base_url' => rtrim(trim((string) env('FCGATEWAY_BASE_URL', '')), '/'),
+        'api_key' => trim((string) env('FCGATEWAY_API_KEY', '')),
+        'webhook_secret' => trim((string) env('FCGATEWAY_WEBHOOK_SECRET', '')),
+        'callback_url' => trim((string) env('FCGATEWAY_CALLBACK_URL', '')),
+        'timeout' => max(5, (int) env('FCGATEWAY_TIMEOUT', 15)),
+    ],
+
 ];

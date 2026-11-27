@@ -76,33 +76,62 @@ class CafeSetting extends Model
         ];
     }
 
+    private const string REQUEST_CACHE_KEY = 'sideorder.cafe_setting.current';
+
+    protected static function booted(): void
+    {
+        static::saved(function (self $setting): void {
+            if (app()->bound('request')) {
+                request()->attributes->set(self::REQUEST_CACHE_KEY, $setting);
+            }
+        });
+
+        static::deleted(function (): void {
+            if (app()->bound('request')) {
+                request()->attributes->remove(self::REQUEST_CACHE_KEY);
+            }
+        });
+    }
+
     /**
      * Ambil baris konfigurasi aktif atau buat default jika belum tersedia.
+     * Di-memoize pada atribut HTTP request aktif agar tidak melakukan query berulang dalam satu request.
      */
     public static function current(): self
     {
+        if (! app()->runningInConsole() && app()->bound('request')) {
+            $cached = request()->attributes->get(self::REQUEST_CACHE_KEY);
+            if ($cached instanceof self) {
+                return $cached;
+            }
+        }
+
         /** @var self|null $existing */
         $existing = self::query()->orderBy('id')->first();
 
-        if ($existing instanceof self) {
-            return $existing;
+        $resolved = $existing instanceof self
+            ? $existing
+            : self::query()->create([
+                'cafe_name' => 'Café SIDE LINE',
+                'address' => null,
+                'phone' => null,
+                'receipt_footer' => 'Terima kasih atas kunjungan Anda! Nikmati momen hangat di SIDE LINE.',
+                'is_ordering_enabled' => true,
+                'closed_message' => 'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
+                'allow_cash_payment' => true,
+                'allow_xendit_payment' => false,
+                'payment_expiry_minutes' => self::DEFAULT_PAYMENT_EXPIRY_MINUTES,
+                'is_location_restricted' => false,
+                'latitude' => null,
+                'longitude' => null,
+                'access_radius_meters' => self::DEFAULT_RADIUS_METERS,
+            ]);
+
+        if (! app()->runningInConsole() && app()->bound('request')) {
+            request()->attributes->set(self::REQUEST_CACHE_KEY, $resolved);
         }
 
-        return self::query()->create([
-            'cafe_name' => 'Café SIDE LINE',
-            'address' => null,
-            'phone' => null,
-            'receipt_footer' => 'Terima kasih atas kunjungan Anda! Nikmati momen hangat di SIDE LINE.',
-            'is_ordering_enabled' => true,
-            'closed_message' => 'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
-            'allow_cash_payment' => true,
-            'allow_xendit_payment' => false,
-            'payment_expiry_minutes' => self::DEFAULT_PAYMENT_EXPIRY_MINUTES,
-            'is_location_restricted' => false,
-            'latitude' => null,
-            'longitude' => null,
-            'access_radius_meters' => self::DEFAULT_RADIUS_METERS,
-        ]);
+        return $resolved;
     }
 
     /**

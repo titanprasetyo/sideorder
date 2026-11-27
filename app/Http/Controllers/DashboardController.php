@@ -242,7 +242,7 @@ class DashboardController extends Controller
             'is_enforcement_active' => $setting->isEnforcementActive(),
             'access_radius_meters' => (int) $setting->access_radius_meters,
             'allow_cash_payment' => (bool) $setting->allow_cash_payment,
-            'allow_digital_payment' => false,
+            'allow_digital_payment' => $paymentService->isDigitalPaymentEnabled($setting),
             'payment_expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
             'gateway_label' => $gateway['label'],
             'gateway_mode' => $gateway['mode'],

@@ -1,6 +1,7 @@
 import { Head, Link, router } from '@inertiajs/react';
 import {
     ArrowLeft,
+    ArrowSquareOut,
     ArrowsClockwise,
     Check,
     CheckCircle,
@@ -77,6 +78,13 @@ interface LatestPaymentSummary {
     checkout_url?: string | null;
     qr_string?: string | null;
     expired_at?: string | null;
+    response_payload?: {
+        data?: {
+            unique_code?: number;
+            formatted_unique_code?: string;
+            total_amount?: number;
+        };
+    } | null;
 }
 
 interface Order {
@@ -153,6 +161,64 @@ export default function OrderStatusPage({
             (Boolean(latestDigitalPayment.expired_at) &&
                 Date.parse(String(latestDigitalPayment.expired_at)) <=
                     Date.now()));
+
+    const [isGeneratingQris, setIsGeneratingQris] = useState(false);
+    const [remainingSeconds, setRemainingSeconds] = useState<number | null>(
+        () => {
+            if (!latestDigitalPayment?.expired_at) return null;
+            const diff = Math.floor(
+                (Date.parse(String(latestDigitalPayment.expired_at)) -
+                    Date.now()) /
+                    1000,
+            );
+            return diff > 0 ? diff : 0;
+        },
+    );
+
+    useEffect(() => {
+        if (!latestDigitalPayment?.expired_at) {
+            setRemainingSeconds(null);
+            return;
+        }
+
+        const updateRemaining = () => {
+            const diff = Math.floor(
+                (Date.parse(String(latestDigitalPayment.expired_at)) -
+                    Date.now()) /
+                    1000,
+            );
+            setRemainingSeconds(diff > 0 ? diff : 0);
+        };
+
+        updateRemaining();
+        const timer = setInterval(updateRemaining, 1000);
+        return () => clearInterval(timer);
+    }, [latestDigitalPayment?.expired_at]);
+
+    const formatCountdown = (seconds: number | null) => {
+        if (seconds === null) return null;
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    };
+
+    const gatewayUniqueTotal =
+        latestDigitalPayment?.response_payload?.data?.total_amount ?? null;
+    const gatewayUniqueCode =
+        latestDigitalPayment?.response_payload?.data?.formatted_unique_code ??
+        (latestDigitalPayment?.response_payload?.data?.unique_code !== undefined
+            ? String(latestDigitalPayment.response_payload.data.unique_code)
+            : null);
+
+    // Bersihkan sisa keranjang localStorage meja ini setelah pesanan masuk/kembali dari halaman pembayaran gateway
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        try {
+            localStorage.removeItem(`sideorder_cart_${order.table.qr_token}`);
+        } catch {
+            // Ignore storage errors
+        }
+    }, [order.table.qr_token, order.order_number]);
 
     const [soundEnabled, setSoundEnabled] = useState(() => {
         if (typeof window === 'undefined') return true;
@@ -245,6 +311,30 @@ export default function OrderStatusPage({
                             ? firstErr
                             : 'Gagal mengalihkan metode ke Tunai di Kasir.',
                     );
+                },
+            },
+        );
+    };
+
+    const handleSwitchOrRetryQris = () => {
+        if (isGeneratingQris) return;
+        setIsGeneratingQris(true);
+
+        router.post(
+            `/order/switch-payment-method/${order.order_number}`,
+            { payment_method: 'qris' },
+            {
+                preserveScroll: true,
+                onError: (errors) => {
+                    const firstErr = Object.values(errors)[0];
+                    toast.error(
+                        typeof firstErr === 'string' && firstErr !== ''
+                            ? firstErr
+                            : 'Gagal membuat halaman pembayaran QRIS. Silakan coba lagi.',
+                    );
+                },
+                onFinish: () => {
+                    setIsGeneratingQris(false);
                 },
             },
         );
@@ -812,32 +902,62 @@ export default function OrderStatusPage({
                                     </div>
 
                                     <p className="text-xs leading-relaxed text-[#6E6A64]">
-                                        Sesi pembayaran digital sebelumnya telah
-                                        berakhir. Silakan beralih ke pembayaran
-                                        tunai di meja kasir untuk melanjutkan
-                                        pesanan Anda.
+                                        Sesi pembayaran QRIS sebelumnya telah
+                                        berakhir.{' '}
+                                        {paymentPolicy.allow_digital
+                                            ? 'Anda dapat membuat tagihan QRIS baru atau beralih ke pembayaran tunai di meja kasir.'
+                                            : 'Silakan beralih ke pembayaran tunai di meja kasir untuk melanjutkan pesanan Anda.'}
                                     </p>
 
-                                    {paymentPolicy.allow_cash && (
-                                        <div className="border-t border-[#EBE5DC] pt-2">
-                                            <button
-                                                type="button"
-                                                onClick={handleSwitchToCash}
-                                                className="flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-xs transition hover:bg-[#B02222]"
-                                            >
-                                                <Money
-                                                    weight="bold"
-                                                    className="size-4"
-                                                />
-                                                <span>
-                                                    Bayar Tunai di Kasir
-                                                </span>
-                                            </button>
+                                    {(paymentPolicy.allow_digital ||
+                                        paymentPolicy.allow_cash) && (
+                                        <div className="flex flex-col gap-2 border-t border-[#EBE5DC] pt-2.5 sm:flex-row">
+                                            {paymentPolicy.allow_digital && (
+                                                <button
+                                                    type="button"
+                                                    disabled={isGeneratingQris}
+                                                    onClick={
+                                                        handleSwitchOrRetryQris
+                                                    }
+                                                    className="flex h-10 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-xs transition hover:bg-[#B02222] disabled:opacity-50"
+                                                >
+                                                    <QrCode
+                                                        weight="bold"
+                                                        className="size-4"
+                                                    />
+                                                    <span>
+                                                        {isGeneratingQris
+                                                            ? 'Menyiapkan QRIS...'
+                                                            : 'Buat Tagihan QRIS Baru'}
+                                                    </span>
+                                                </button>
+                                            )}
+
+                                            {paymentPolicy.allow_cash && (
+                                                <button
+                                                    type="button"
+                                                    onClick={handleSwitchToCash}
+                                                    className={cn(
+                                                        'flex h-10 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg px-4 text-xs font-bold transition',
+                                                        paymentPolicy.allow_digital
+                                                            ? 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#4A2C18] hover:bg-[#EBE5DC]'
+                                                            : 'bg-[#C52828] text-white shadow-xs hover:bg-[#B02222]',
+                                                    )}
+                                                >
+                                                    <Money
+                                                        weight="bold"
+                                                        className="size-4"
+                                                    />
+                                                    <span>
+                                                        Bayar Tunai di Kasir
+                                                    </span>
+                                                </button>
+                                            )}
                                         </div>
                                     )}
                                 </div>
                             ) : order.payment_method === 'qris' ? (
-                                /* 2C: Pesanan QRIS historis yang belum lunas -> arahkan ke Tunai Kasir */
+                                /* 2C: Pembayaran QRIS Pending -> Arahkan ke Checkout Page FCGateway */
                                 <div className="space-y-3.5 rounded-xl border-[1.5px] border-[#C52828] bg-[#FFFDFB] p-5 shadow-[0_4px_16px_rgba(197,40,40,0.06)]">
                                     <div className="flex items-center justify-between gap-2">
                                         <div className="flex min-w-0 items-center gap-2.5">
@@ -849,38 +969,115 @@ export default function OrderStatusPage({
                                             </div>
                                             <div className="min-w-0">
                                                 <span className="block text-[14px] leading-snug font-bold text-[#1A1A1A]">
-                                                    Pembayaran Digital Sedang
-                                                    Disiapkan
+                                                    {latestDigitalPayment?.checkout_url
+                                                        ? 'Menunggu Pembayaran QRIS'
+                                                        : paymentPolicy.allow_digital
+                                                          ? 'Lanjutkan Pembayaran QRIS'
+                                                          : 'Pembayaran Digital Tidak Aktif'}
                                                 </span>
                                                 <span className="block text-[11px] text-[#6E6A64]">
-                                                    Silakan alihkan tagihan ini
-                                                    ke Tunai di Kasir
+                                                    {latestDigitalPayment?.checkout_url
+                                                        ? 'Buka halaman pembayaran QRIS untuk scan & bayar'
+                                                        : paymentPolicy.allow_digital
+                                                          ? 'Tekan tombol di bawah untuk membuka halaman pembayaran QRIS'
+                                                          : 'Silakan alihkan tagihan ini ke Tunai di Kasir'}
                                                 </span>
                                             </div>
                                         </div>
-                                        <span className="shrink-0 rounded-[4px] bg-[#FDECEB] px-2.5 py-1 text-[10px] font-bold text-[#C52828]">
-                                            Belum Bayar
+                                        <span className="shrink-0 rounded-[4px] bg-[#FDECEB] px-2.5 py-1 text-[10px] font-bold text-[#C52828] tabular-nums">
+                                            {remainingSeconds !== null &&
+                                            remainingSeconds > 0
+                                                ? `Sisa ${formatCountdown(remainingSeconds)}`
+                                                : 'Belum Bayar'}
                                         </span>
                                     </div>
 
-                                    <div className="flex items-center justify-between rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-4 py-3">
-                                        <div>
-                                            <span className="block text-[10px] font-semibold tracking-wider text-[#6E6A64] uppercase">
-                                                Total Tagihan
-                                            </span>
-                                            <span className="text-[20px] font-bold text-[#C52828] tabular-nums">
-                                                {formatRupiah(
-                                                    unpaidBalance > 0
-                                                        ? unpaidBalance
-                                                        : order.total_amount,
-                                                )}
-                                            </span>
+                                    <div className="rounded-xl border border-[#E6DFD3] bg-[#F3EFE6] px-4 py-3">
+                                        <div className="flex items-center justify-between gap-2">
+                                            <div>
+                                                <span className="block text-[10px] font-semibold tracking-wider text-[#6E6A64] uppercase">
+                                                    Total Tagihan
+                                                </span>
+                                                <span className="text-[20px] font-bold text-[#C52828] tabular-nums">
+                                                    {formatRupiah(
+                                                        unpaidBalance > 0
+                                                            ? unpaidBalance
+                                                            : order.total_amount,
+                                                    )}
+                                                </span>
+                                            </div>
+                                            {gatewayUniqueTotal !== null && (
+                                                <div className="text-right">
+                                                    <span className="block text-[10px] font-semibold text-[#6E6A64]">
+                                                        Nominal Transfer QRIS
+                                                    </span>
+                                                    <span className="font-mono text-xs font-bold text-[#1A1A1A] tabular-nums">
+                                                        {formatRupiah(
+                                                            gatewayUniqueTotal,
+                                                        )}
+                                                        {gatewayUniqueCode
+                                                            ? ` (kode ${gatewayUniqueCode})`
+                                                            : ''}
+                                                    </span>
+                                                </div>
+                                            )}
                                         </div>
+                                        <p className="mt-1.5 text-[11px] leading-relaxed text-[#6E6A64]">
+                                            Status pesanan akan otomatis berubah
+                                            menjadi <strong>LUNAS</strong>{' '}
+                                            segera setelah pembayaran QRIS
+                                            terverifikasi.
+                                        </p>
+                                    </div>
+
+                                    <div className="flex flex-col gap-2 sm:flex-row">
+                                        {latestDigitalPayment?.checkout_url ? (
+                                            <a
+                                                href={
+                                                    latestDigitalPayment.checkout_url
+                                                }
+                                                className="flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222]"
+                                            >
+                                                <ArrowSquareOut
+                                                    weight="bold"
+                                                    className="size-4"
+                                                />
+                                                <span>
+                                                    Buka Halaman Pembayaran QRIS
+                                                </span>
+                                            </a>
+                                        ) : paymentPolicy.allow_digital ? (
+                                            <button
+                                                type="button"
+                                                disabled={isGeneratingQris}
+                                                onClick={
+                                                    handleSwitchOrRetryQris
+                                                }
+                                                className="flex h-10 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] disabled:opacity-50"
+                                            >
+                                                <QrCode
+                                                    weight="bold"
+                                                    className="size-4"
+                                                />
+                                                <span>
+                                                    {isGeneratingQris
+                                                        ? 'Menyiapkan QRIS...'
+                                                        : 'Buat Halaman Pembayaran QRIS'}
+                                                </span>
+                                            </button>
+                                        ) : null}
+
                                         {paymentPolicy.allow_cash && (
                                             <button
                                                 type="button"
                                                 onClick={handleSwitchToCash}
-                                                className="flex h-10 cursor-pointer items-center gap-1.5 rounded-lg bg-[#C52828] px-4 text-xs font-bold text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] transition hover:bg-[#B02222] active:scale-95"
+                                                className={cn(
+                                                    'flex h-10 cursor-pointer items-center justify-center gap-1.5 rounded-lg px-4 text-xs font-bold transition',
+                                                    latestDigitalPayment?.checkout_url ||
+                                                        paymentPolicy.allow_digital
+                                                        ? 'border border-[#E6DFD3] bg-[#F3EFE6] text-[#4A2C18] hover:bg-[#EBE5DC]'
+                                                        : 'flex-1 bg-[#C52828] text-white shadow-[0_4px_12px_rgba(197,40,40,0.25)] hover:bg-[#B02222]',
+                                                )}
                                             >
                                                 <Money
                                                     weight="bold"
@@ -935,6 +1132,31 @@ export default function OrderStatusPage({
                                         </strong>{' '}
                                         (Meja {order.table.table_number}).
                                     </div>
+
+                                    {paymentPolicy.allow_digital &&
+                                        order.order_status !== 'completed' &&
+                                        order.order_status !== 'cancelled' && (
+                                            <div className="border-t border-[#EBE5DC] pt-2.5">
+                                                <button
+                                                    type="button"
+                                                    disabled={isGeneratingQris}
+                                                    onClick={
+                                                        handleSwitchOrRetryQris
+                                                    }
+                                                    className="flex h-10 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[#C52828]/30 bg-[#FFF7F6] px-4 text-xs font-bold text-[#C52828] transition hover:bg-[#FDECEB] disabled:opacity-50"
+                                                >
+                                                    <QrCode
+                                                        weight="bold"
+                                                        className="size-4"
+                                                    />
+                                                    <span>
+                                                        {isGeneratingQris
+                                                            ? 'Menyiapkan Halaman QRIS...'
+                                                            : 'Atau Bayar Sekarang via QRIS Online'}
+                                                    </span>
+                                                </button>
+                                            </div>
+                                        )}
                                 </div>
                             )}
 

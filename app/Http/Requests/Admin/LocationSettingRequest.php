@@ -4,6 +4,7 @@ namespace App\Http\Requests\Admin;
 
 use App\Models\CafeSetting;
 use App\Models\User;
+use App\Services\Payments\PaymentService;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Validator;
@@ -32,6 +33,7 @@ class LocationSettingRequest extends FormRequest
             'is_ordering_enabled' => ['sometimes', 'boolean'],
             'closed_message' => ['nullable', 'string', 'max:255'],
             'allow_cash_payment' => ['sometimes', 'boolean'],
+            'allow_digital_payment' => ['sometimes', 'boolean'],
             'payment_expiry_minutes' => [
                 'sometimes',
                 'integer',
@@ -84,8 +86,25 @@ class LocationSettingRequest extends FormRequest
     {
         return [
             function (Validator $validator): void {
-                if ($this->has('allow_cash_payment') && ! $this->boolean('allow_cash_payment')) {
-                    $validator->errors()->add('allow_cash_payment', 'Pembayaran tunai di kasir harus tetap aktif selama integrasi payment gateway belum tersedia.');
+                $setting = CafeSetting::current();
+                $gatewayConfigured = app(PaymentService::class)->isFcGatewayConfigured();
+
+                $cashEnabled = $this->has('allow_cash_payment')
+                    ? $this->boolean('allow_cash_payment')
+                    : (bool) $setting->allow_cash_payment;
+                $digitalEnabled = $gatewayConfigured && (
+                    $this->has('allow_digital_payment')
+                        ? $this->boolean('allow_digital_payment')
+                        : (bool) $setting->allow_xendit_payment
+                );
+
+                if (! $cashEnabled && ! $digitalEnabled) {
+                    $validator->errors()->add(
+                        'allow_cash_payment',
+                        $gatewayConfigured
+                            ? 'Minimal satu metode pembayaran (Tunai di Kasir atau QRIS Digital) harus aktif.'
+                            : 'Pembayaran tunai di kasir harus tetap aktif selama integrasi payment gateway belum tersedia.'
+                    );
                 }
 
                 if (! $this->boolean('is_location_restricted')) {

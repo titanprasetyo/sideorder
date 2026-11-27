@@ -4,28 +4,55 @@ namespace App\Services\Payments;
 
 use App\Events\OrderStatusUpdated;
 use App\Exceptions\PaymentGatewayException;
+use App\Models\CafeSetting;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\OrderStatusHistory;
 use App\Models\Payment;
 use App\Services\Stock\MenuStockService;
+use Carbon\Carbon;
 use Carbon\CarbonInterface;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class PaymentService
 {
     public function __construct(
         private readonly MenuStockService $menuStockService,
+        private readonly FcGatewayClient $fcGatewayClient,
     ) {}
+
+    public function isFcGatewayConfigured(): bool
+    {
+        return $this->fcGatewayClient->isConfigured();
+    }
+
+    public function isDigitalPaymentEnabled(?CafeSetting $setting = null): bool
+    {
+        if (! $this->isFcGatewayConfigured()) {
+            return false;
+        }
+
+        $resolvedSetting = $setting ?? CafeSetting::current();
+
+        return (bool) $resolvedSetting->allow_xendit_payment;
+    }
 
     public function defaultGatewayName(): string
     {
-        return 'manual';
+        return $this->isFcGatewayConfigured() ? 'fcgateway' : 'manual';
     }
 
     public function resolveGatewayForMethod(string $method): string
     {
+        $normalized = strtolower(trim($method));
+
+        if ($normalized === 'qris' && $this->isFcGatewayConfigured()) {
+            return 'fcgateway';
+        }
+
         return 'manual';
     }
 
@@ -35,8 +62,8 @@ class PaymentService
             return strtoupper(trim($requestedChannel));
         }
 
-        return match ($method) {
-            'qris' => 'QRIS_POS',
+        return match (strtolower(trim($method))) {
+            'qris' => $this->isFcGatewayConfigured() ? 'QRIS' : 'QRIS_POS',
             'transfer' => 'BANK_TRANSFER',
             'debit' => 'EDC_DEBIT',
             default => 'CASH',
@@ -45,7 +72,6 @@ class PaymentService
 
     /**
      * Metadata non-rahasia status pembayaran untuk antarmuka frontend dan laporan.
-     * Payment gateway digital belum diintegrasikan (menunggu dokumentasi Midtrans).
      *
      * @return array{
      *     driver: string,
@@ -60,16 +86,296 @@ class PaymentService
      */
     public function getPublicGatewayConfig(): array
     {
+        if (! $this->isFcGatewayConfigured()) {
+            return [
+                'driver' => 'manual',
+                'label' => 'Kasir POS (Tunai)',
+                'is_configured' => false,
+                'is_webhook_configured' => false,
+                'is_ready' => false,
+                'mode' => 'manual_only',
+                'supported_channels' => ['CASH'],
+                'webhook_endpoint' => null,
+            ];
+        }
+
         return [
-            'driver' => 'manual',
-            'label' => 'Kasir POS (Tunai)',
-            'is_configured' => false,
-            'is_webhook_configured' => false,
-            'is_ready' => false,
-            'mode' => 'manual_only',
-            'supported_channels' => ['CASH'],
-            'webhook_endpoint' => null,
+            'driver' => 'fcgateway',
+            'label' => 'FCGateway (QRIS Dinamis)',
+            'is_configured' => true,
+            'is_webhook_configured' => true,
+            'is_ready' => true,
+            'mode' => 'live',
+            'supported_channels' => ['QRIS', 'CASH'],
+            'webhook_endpoint' => $this->fcGatewayClient->resolveCallbackUrl(),
         ];
+    }
+
+    /**
+     * Buat transaksi pembayaran QRIS Dinamis via FCGateway dan simpan pada ledger `payments`.
+     *
+     * @throws PaymentGatewayException
+     */
+    public function createFcGatewayPayment(
+        Order $order,
+        ?float $explicitAmountDue = null,
+        ?string $explicitType = null
+    ): Payment {
+        if (! $this->isFcGatewayConfigured()) {
+            throw new PaymentGatewayException(
+                'Payment gateway FCGateway belum dikonfigurasi. Lengkapi FCGATEWAY_BASE_URL dan FCGATEWAY_API_KEY di .env.',
+                503
+            );
+        }
+
+        $freshOrder = $order->fresh(['payments', 'items']) ?? $order;
+
+        if (in_array($freshOrder->order_status, ['completed', 'cancelled'], true)) {
+            throw new PaymentGatewayException(
+                "Pesanan #{$freshOrder->order_number} berstatus {$freshOrder->order_status} dan tidak dapat membuat tagihan pembayaran baru.",
+                422
+            );
+        }
+
+        $settledBefore = $freshOrder->getSettledAmount();
+        $amountDue = $explicitAmountDue !== null
+            ? max(0.0, $explicitAmountDue)
+            : max(0.0, (float) $freshOrder->total_amount - $settledBefore);
+
+        $roundedAmount = (int) round($amountDue);
+        if ($roundedAmount <= 0) {
+            throw new PaymentGatewayException(
+                "Pesanan #{$freshOrder->order_number} tidak memiliki sisa tagihan yang perlu dibayar.",
+                422
+            );
+        }
+
+        $paymentType = $explicitType ?? ($settledBefore > 0 ? 'additional' : 'initial');
+        $paymentReference = $this->generateUniquePaymentReference($freshOrder->order_number);
+
+        $setting = CafeSetting::current();
+        $expiryMinutes = max(
+            CafeSetting::MIN_PAYMENT_EXPIRY_MINUTES,
+            min(
+                CafeSetting::MAX_PAYMENT_EXPIRY_MINUTES,
+                (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES)
+            )
+        );
+
+        $callbackUrl = $this->fcGatewayClient->resolvePublicCallbackUrl();
+
+        $requestPayload = [
+            'amount' => $roundedAmount,
+            'order_id' => $paymentReference,
+            'customer_name' => $freshOrder->customer_name,
+            'return_url' => route('order.status', ['order_number' => $freshOrder->order_number]),
+            'expire_minutes' => $expiryMinutes,
+        ];
+
+        if ($callbackUrl !== null) {
+            $requestPayload['callback_url'] = $callbackUrl;
+        } else {
+            Log::info('FCGateway callback_url dilewati karena host lokal/privat (gunakan ngrok atau domain publik HTTPS untuk menerima webhook otomatis).', [
+                'order_number' => $freshOrder->order_number,
+                'payment_reference' => $paymentReference,
+                'configured_app_url' => config('app.url'),
+            ]);
+        }
+
+        $gatewayResponse = $this->fcGatewayClient->createTransaction($requestPayload);
+        $data = $gatewayResponse['data'];
+
+        $expiredAt = now('Asia/Jakarta')->addMinutes($expiryMinutes);
+        if (isset($data['expired_at']) && is_string($data['expired_at']) && trim($data['expired_at']) !== '') {
+            try {
+                $expiredAt = Carbon::parse($data['expired_at'])->timezone('Asia/Jakarta');
+            } catch (\Throwable) {
+            }
+        }
+
+        /** @var Payment $createdPayment */
+        $createdPayment = DB::transaction(function () use (
+            $freshOrder,
+            $paymentReference,
+            $paymentType,
+            $roundedAmount,
+            $requestPayload,
+            $gatewayResponse,
+            $data,
+            $expiredAt
+        ): Payment {
+            /** @var Order $lockedOrder */
+            $lockedOrder = Order::whereKey($freshOrder->id)->lockForUpdate()->firstOrFail();
+
+            $lockedOrder->payments()
+                ->where('status', 'pending')
+                ->update(['status' => 'expired']);
+
+            $payment = Payment::create([
+                'order_id' => $lockedOrder->id,
+                'payment_reference' => $paymentReference,
+                'gateway' => 'fcgateway',
+                'method' => 'qris',
+                'channel' => 'QRIS',
+                'type' => $paymentType,
+                'amount' => $roundedAmount,
+                'settled_amount' => 0.0,
+                'fee_amount' => 0.0,
+                'status' => 'pending',
+                'external_id' => $paymentReference,
+                'gateway_transaction_id' => is_scalar($data['id'] ?? null) ? trim((string) $data['id']) : $paymentReference,
+                'checkout_url' => is_scalar($data['checkout_url'] ?? null) ? trim((string) $data['checkout_url']) : null,
+                'qr_string' => isset($data['dynamic_qris']) && is_string($data['dynamic_qris'])
+                    ? trim($data['dynamic_qris'])
+                    : null,
+                'request_payload' => $requestPayload,
+                'response_payload' => $gatewayResponse['raw'],
+                'expired_at' => $expiredAt,
+            ]);
+
+            $orderUpdate = [
+                'payment_method' => 'qris',
+                'payment_gateway' => 'fcgateway',
+                'payment_channel' => 'QRIS',
+                'payment_reference' => $paymentReference,
+            ];
+
+            if ($lockedOrder->payment_status === 'failed' && ! $lockedOrder->hasAnySettlement()) {
+                $orderUpdate['payment_status'] = 'unpaid';
+            }
+
+            $lockedOrder->update($orderUpdate);
+
+            return $payment;
+        });
+
+        return $createdPayment;
+    }
+
+    /**
+     * Proses webhook callback dari FCGateway dengan verifikasi server-to-server ke endpoint status gateway.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array{
+     *     status: string,
+     *     order: Order|null,
+     *     payment: Payment|null
+     * }
+     *
+     * @throws PaymentGatewayException
+     */
+    public function handleFcGatewayWebhook(array $payload, bool $isSecretVerified = false): array
+    {
+        $incomingOrderId = isset($payload['order_id']) && is_scalar($payload['order_id'])
+            ? trim((string) $payload['order_id'])
+            : '';
+        $incomingTxId = isset($payload['transaction_id']) && is_scalar($payload['transaction_id'])
+            ? trim((string) $payload['transaction_id'])
+            : '';
+
+        $payment = $this->findFcGatewayPayment($incomingOrderId, $incomingTxId);
+        if (! $payment) {
+            throw new PaymentGatewayException('Transaksi pembayaran FCGateway tidak ditemukan.', 404);
+        }
+
+        if ($payment->status === 'paid') {
+            return [
+                'status' => 'already_paid',
+                'order' => $payment->order,
+                'payment' => $payment,
+            ];
+        }
+
+        // Verifikasi balik langsung ke server FCGateway untuk mencegah webhook palsu (spoofing)
+        $lookupId = $payment->gateway_transaction_id ?: $payment->payment_reference;
+        try {
+            $verified = $this->fcGatewayClient->getTransactionStatus($lookupId);
+        } catch (PaymentGatewayException $e) {
+            // Jika endpoint /status gateway sedang 5xx/error sementara, hanya izinkan fallback jika header secret webhook terverifikasi
+            if ($isSecretVerified && in_array((int) $e->getCode(), [502, 503], true)) {
+                Log::warning('FCGateway status API unavailable; falling back to secret-verified webhook payload', [
+                    'payment_reference' => $payment->payment_reference,
+                    'error' => $e->getMessage(),
+                ]);
+
+                $verified = [
+                    'id' => $incomingTxId !== '' ? $incomingTxId : $payment->gateway_transaction_id,
+                    'order_id' => $incomingOrderId !== '' ? $incomingOrderId : $payment->payment_reference,
+                    'status' => isset($payload['status']) && is_scalar($payload['status']) ? strtoupper(trim((string) $payload['status'])) : '',
+                    'base_amount' => $payload['base_amount'] ?? null,
+                    'total_amount' => $payload['total_amount'] ?? null,
+                    'paid_at' => $payload['paid_at'] ?? null,
+                ];
+            } else {
+                throw $e;
+            }
+        }
+        $verifiedStatus = isset($verified['status']) && is_string($verified['status'])
+            ? strtoupper(trim($verified['status']))
+            : '';
+
+        $verifiedOrderId = isset($verified['order_id']) && is_scalar($verified['order_id'])
+            ? trim((string) $verified['order_id'])
+            : '';
+
+        if (
+            $verifiedOrderId !== ''
+            && $verifiedOrderId !== $payment->payment_reference
+            && $verifiedOrderId !== ($payment->external_id ?? '')
+            && $verifiedOrderId !== $payment->order->order_number
+        ) {
+            throw new PaymentGatewayException(
+                'Referensi transaksi pada hasil verifikasi FCGateway tidak cocok.',
+                422
+            );
+        }
+
+        if ($verifiedStatus === 'PAID') {
+            $verifiedBaseAmount = isset($verified['base_amount']) && is_numeric($verified['base_amount'])
+                ? (float) $verified['base_amount']
+                : null;
+            $verifiedTotalAmount = isset($verified['total_amount']) && is_numeric($verified['total_amount'])
+                ? (float) $verified['total_amount']
+                : null;
+            $expectedAmount = (float) $payment->amount;
+
+            if ($verifiedBaseAmount !== null && abs($verifiedBaseAmount - $expectedAmount) >= 1.0) {
+                throw new PaymentGatewayException(
+                    'Nominal dasar pembayaran FCGateway tidak sesuai dengan tagihan sistem.',
+                    422
+                );
+            }
+
+            if ($verifiedBaseAmount === null && $verifiedTotalAmount !== null && $verifiedTotalAmount + 0.01 < $expectedAmount) {
+                throw new PaymentGatewayException(
+                    'Nominal pembayaran FCGateway kurang dari nilai tagihan sistem.',
+                    422
+                );
+            }
+
+            $settled = $this->settleVerifiedFcGatewayPayment($payment, $payload, $verified);
+
+            return [
+                'status' => $settled['already_paid'] ? 'already_paid' : 'paid',
+                'order' => $settled['order'],
+                'payment' => $settled['payment'],
+            ];
+        }
+
+        if ($verifiedStatus === 'EXPIRED') {
+            $expiredOrder = $this->markSingleFcGatewayPaymentExpired($payment, $payload);
+
+            return [
+                'status' => 'expired',
+                'order' => $expiredOrder,
+                'payment' => $payment->fresh(),
+            ];
+        }
+
+        throw new PaymentGatewayException(
+            "Status pembayaran belum terkonfirmasi lunas di server FCGateway (status aktual: {$verifiedStatus}).",
+            422
+        );
     }
 
     /**
@@ -430,7 +736,7 @@ class PaymentService
     }
 
     /**
-     * Sinkronisasi status kedaluwarsa lokal untuk pesanan terkait.
+     * Sinkronisasi status kedaluwarsa lokal serta fallback cek status ke FCGateway untuk pesanan terkait.
      */
     public function syncPaymentStatus(Order $order): Order
     {
@@ -441,11 +747,321 @@ class PaymentService
             return $order;
         }
 
-        if ($this->expireOverduePendingPayments($order)) {
+        $didChange = $this->expireOverduePendingPayments($order);
+
+        if ($this->isFcGatewayConfigured()) {
+            /** @var Payment|null $pendingFcPayment */
+            $pendingFcPayment = $order->payments()
+                ->where('gateway', 'fcgateway')
+                ->where('status', 'pending')
+                ->latest('id')
+                ->first();
+
+            if ($pendingFcPayment && Cache::add("fcgateway_status_poll:{$pendingFcPayment->id}", true, now()->addSeconds(5))) {
+                $lookupId = $pendingFcPayment->gateway_transaction_id ?: $pendingFcPayment->payment_reference;
+
+                try {
+                    $verified = $this->fcGatewayClient->getTransactionStatus($lookupId);
+                    $verifiedStatus = isset($verified['status']) && is_string($verified['status'])
+                        ? strtoupper(trim($verified['status']))
+                        : '';
+
+                    if ($verifiedStatus === 'PAID') {
+                        $this->settleVerifiedFcGatewayPayment(
+                            $pendingFcPayment,
+                            ['source' => 'status_poll', 'data' => $verified],
+                            $verified
+                        );
+                        $didChange = true;
+                    } elseif ($verifiedStatus === 'EXPIRED') {
+                        $this->markSingleFcGatewayPaymentExpired(
+                            $pendingFcPayment,
+                            ['source' => 'status_poll', 'data' => $verified]
+                        );
+                        $didChange = true;
+                    }
+                } catch (\Throwable $e) {
+                    Log::debug('FCGateway fallback status poll skipped', [
+                        'payment_id' => $pendingFcPayment->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        }
+
+        if ($didChange) {
             return $order->fresh(['table', 'items.options', 'items.rejectedByUser:id,name', 'items.servedByUser:id,name', 'statusHistories', 'latestPayment', 'payments']) ?? $order;
         }
 
         return $order;
+    }
+
+    private function findFcGatewayPayment(string $incomingOrderId, string $incomingTxId): ?Payment
+    {
+        if ($incomingOrderId !== '') {
+            /** @var Payment|null $byRef */
+            $byRef = Payment::query()
+                ->with('order')
+                ->where('gateway', 'fcgateway')
+                ->where(function ($q) use ($incomingOrderId): void {
+                    $q->where('payment_reference', $incomingOrderId)
+                        ->orWhere('external_id', $incomingOrderId);
+                })
+                ->latest('id')
+                ->first();
+
+            if ($byRef) {
+                return $byRef;
+            }
+        }
+
+        if ($incomingTxId !== '') {
+            /** @var Payment|null $byTxId */
+            $byTxId = Payment::query()
+                ->with('order')
+                ->where('gateway', 'fcgateway')
+                ->where('gateway_transaction_id', $incomingTxId)
+                ->latest('id')
+                ->first();
+
+            if ($byTxId) {
+                return $byTxId;
+            }
+        }
+
+        if ($incomingOrderId !== '') {
+            $order = Order::where('order_number', $incomingOrderId)->first();
+            if ($order) {
+                /** @var Payment|null $byOrder */
+                $byOrder = $order->payments()
+                    ->with('order')
+                    ->where('gateway', 'fcgateway')
+                    ->latest('id')
+                    ->first();
+
+                if ($byOrder) {
+                    return $byOrder;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Selesaikan settlement transaksi FCGateway yang telah diverifikasi PAID secara atomik dan idempoten.
+     *
+     * @param  array<string, mixed>  $webhookPayload
+     * @param  array<string, mixed>  $verifiedData
+     * @return array{
+     *     already_paid: bool,
+     *     order: Order,
+     *     payment: Payment
+     * }
+     */
+    private function settleVerifiedFcGatewayPayment(
+        Payment $payment,
+        array $webhookPayload,
+        array $verifiedData
+    ): array {
+        $alreadyPaid = false;
+        $previousOrderStatus = 'pending';
+        /** @var Payment|null $settledPayment */
+        $settledPayment = null;
+
+        /** @var Order $updatedOrder */
+        $updatedOrder = DB::transaction(function () use (
+            $payment,
+            $webhookPayload,
+            $verifiedData,
+            &$alreadyPaid,
+            &$previousOrderStatus,
+            &$settledPayment
+        ): Order {
+            /** @var Payment $lockedPayment */
+            $lockedPayment = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            /** @var Order $lockedOrder */
+            $lockedOrder = Order::whereKey($lockedPayment->order_id)->lockForUpdate()->firstOrFail();
+
+            $previousOrderStatus = $lockedOrder->order_status;
+
+            if ($lockedPayment->status === 'paid') {
+                $alreadyPaid = true;
+                $settledPayment = $lockedPayment;
+
+                return $lockedOrder->fresh(['table', 'items.options', 'items.servedByUser:id,name', 'latestPayment']) ?? $lockedOrder;
+            }
+
+            if ($lockedOrder->order_status === 'cancelled') {
+                $lockedPayment->update([
+                    'webhook_payload' => $webhookPayload,
+                ]);
+                $alreadyPaid = true;
+                $settledPayment = $lockedPayment->fresh() ?? $lockedPayment;
+
+                return $lockedOrder;
+            }
+
+            $lockedActiveItems = $lockedOrder->items()
+                ->where('status', 'active')
+                ->lockForUpdate()
+                ->get();
+
+            $this->ensureLegacySettlementLedgered($lockedOrder);
+            $this->menuStockService->confirmOrderStock($lockedOrder);
+
+            $paidAt = now('Asia/Jakarta');
+            $rawPaidAt = $verifiedData['paid_at'] ?? $webhookPayload['paid_at'] ?? null;
+            if (is_string($rawPaidAt) && trim($rawPaidAt) !== '') {
+                try {
+                    $paidAt = Carbon::parse($rawPaidAt)->timezone('Asia/Jakarta');
+                } catch (\Throwable) {
+                }
+            }
+
+            $settledAmount = (float) $lockedPayment->amount;
+
+            $lockedPayment->update([
+                'status' => 'paid',
+                'settled_amount' => $settledAmount,
+                'paid_at' => $paidAt,
+                'gateway_transaction_id' => isset($verifiedData['id']) && is_scalar($verifiedData['id'])
+                    ? trim((string) $verifiedData['id'])
+                    : $lockedPayment->gateway_transaction_id,
+                'webhook_payload' => $webhookPayload,
+            ]);
+
+            $settledPayment = $lockedPayment->fresh() ?? $lockedPayment;
+
+            $lockedOrder->payments()
+                ->where('status', 'pending')
+                ->where('id', '!=', $lockedPayment->id)
+                ->update(['status' => 'expired']);
+
+            $itemsTotal = $lockedActiveItems->isNotEmpty()
+                ? (float) $lockedActiveItems->sum('total_price')
+                : (float) $lockedOrder->total_amount;
+            $expectedTotal = max((float) $lockedOrder->total_amount, $itemsTotal);
+            $totalSettled = $lockedOrder->getSettledAmount();
+            $isFullySettled = ($totalSettled + 0.01) >= $expectedTotal;
+            $newOrderStatus = $lockedOrder->order_status === 'pending' ? 'processing' : $lockedOrder->order_status;
+
+            $lockedOrder->update([
+                'subtotal' => $expectedTotal,
+                'total_amount' => $expectedTotal,
+                'payment_status' => $isFullySettled ? 'paid' : 'unpaid',
+                'payment_method' => 'qris',
+                'payment_gateway' => 'fcgateway',
+                'payment_channel' => 'QRIS',
+                'paid_at' => $lockedOrder->paid_at ?? $paidAt,
+                'payment_reference' => $lockedPayment->payment_reference,
+                'order_status' => $newOrderStatus,
+            ]);
+
+            $this->allocatePaidStatusToActiveItems(
+                $lockedOrder,
+                $settledPayment,
+                $totalSettled,
+                $isFullySettled,
+                $paidAt
+            );
+
+            $provider = isset($webhookPayload['provider']) && is_scalar($webhookPayload['provider']) && trim((string) $webhookPayload['provider']) !== ''
+                ? strtoupper(trim((string) $webhookPayload['provider']))
+                : 'QRIS';
+            $gatewayTotalPaid = isset($verifiedData['total_amount']) && is_numeric($verifiedData['total_amount'])
+                ? (float) $verifiedData['total_amount']
+                : $settledAmount;
+            $formattedSettled = number_format($settledAmount, 0, ',', '.');
+            $formattedGatewayPaid = number_format($gatewayTotalPaid, 0, ',', '.');
+
+            $notes = $lockedPayment->type === 'additional'
+                ? "Pembayaran QRIS tambahan sebesar Rp {$formattedSettled} (transfer Rp {$formattedGatewayPaid} via {$provider}) terverifikasi otomatis oleh FCGateway."
+                : "Pembayaran QRIS sebesar Rp {$formattedSettled} (transfer Rp {$formattedGatewayPaid} via {$provider}) terverifikasi otomatis oleh FCGateway.";
+
+            OrderStatusHistory::create([
+                'order_id' => $lockedOrder->id,
+                'user_id' => null,
+                'status' => $newOrderStatus,
+                'notes' => $notes,
+            ]);
+
+            return $lockedOrder->fresh(['table', 'items.options', 'items.servedByUser:id,name', 'latestPayment']) ?? $lockedOrder;
+        });
+
+        if (! $alreadyPaid) {
+            try {
+                event(new OrderStatusUpdated($updatedOrder, $previousOrderStatus, $updatedOrder->order_status));
+            } catch (\Throwable) {
+            }
+        }
+
+        return [
+            'already_paid' => $alreadyPaid,
+            'order' => $updatedOrder,
+            'payment' => $settledPayment ?? $payment,
+        ];
+    }
+
+    /**
+     * Tandai satu transaksi FCGateway sebagai kedaluwarsa dan rilis stok reserved jika tidak ada tagihan pending lain.
+     *
+     * @param  array<string, mixed>  $webhookPayload
+     */
+    private function markSingleFcGatewayPaymentExpired(Payment $payment, array $webhookPayload): ?Order
+    {
+        $updatedOrder = DB::transaction(function () use ($payment, $webhookPayload): ?Order {
+            /** @var Payment|null $lockedPayment */
+            $lockedPayment = Payment::whereKey($payment->id)->lockForUpdate()->first();
+            if (! $lockedPayment || $lockedPayment->status !== 'pending') {
+                return null;
+            }
+
+            /** @var Order|null $lockedOrder */
+            $lockedOrder = Order::whereKey($lockedPayment->order_id)->lockForUpdate()->first();
+            if (! $lockedOrder || $lockedOrder->order_status === 'cancelled') {
+                return null;
+            }
+
+            $lockedPayment->update([
+                'status' => 'expired',
+                'webhook_payload' => $webhookPayload,
+            ]);
+
+            if ($lockedOrder->payment_status === 'paid') {
+                return $lockedOrder;
+            }
+
+            $hasOtherPending = $lockedOrder->payments()
+                ->where('status', 'pending')
+                ->where('id', '!=', $lockedPayment->id)
+                ->exists();
+
+            if (! $hasOtherPending) {
+                if (! $lockedOrder->hasAnySettlement()) {
+                    $lockedOrder->update(['payment_status' => 'failed']);
+                }
+                $this->menuStockService->releaseUnsettledOrderStock($lockedOrder);
+            }
+
+            OrderStatusHistory::create([
+                'order_id' => $lockedOrder->id,
+                'user_id' => null,
+                'status' => $lockedOrder->order_status,
+                'notes' => 'Transaksi QRIS FCGateway telah kedaluwarsa.',
+            ]);
+
+            return $lockedOrder->fresh(['table', 'latestPayment']);
+        });
+
+        if ($updatedOrder instanceof Order) {
+            try {
+                event(new OrderStatusUpdated($updatedOrder, $updatedOrder->order_status, $updatedOrder->order_status));
+            } catch (\Throwable) {
+            }
+        }
+
+        return $updatedOrder;
     }
 
     private function generateUniquePaymentReference(string $orderNumber): string

@@ -25,6 +25,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 
 class OrderController extends Controller
 {
@@ -57,11 +58,13 @@ class OrderController extends Controller
             'closed_message' => $setting->closed_message ?: 'Pemesanan mandiri sedang ditutup sementara. Silakan hubungi kasir kami.',
             'cafe_name' => $setting->cafe_name,
         ];
+        $allowCash = (bool) $setting->allow_cash_payment;
+        $allowDigital = $this->paymentService->isDigitalPaymentEnabled($setting);
         $paymentPolicy = [
-            'allow_cash' => (bool) $setting->allow_cash_payment,
-            'allow_digital' => false,
+            'allow_cash' => $allowCash,
+            'allow_digital' => $allowDigital,
             'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
-            'default_method' => 'cash',
+            'default_method' => $allowCash ? 'cash' : ($allowDigital ? 'qris' : 'cash'),
         ];
 
         if (! $setting->is_ordering_enabled) {
@@ -290,7 +293,7 @@ class OrderController extends Controller
      * Memproses checkout pesanan customer dengan kalkulasi harga anti-manipulasi,
      * validasi geofencing backend, dan reservasi stok atomik.
      */
-    public function checkout(CheckoutOrderRequest $request): RedirectResponse
+    public function checkout(CheckoutOrderRequest $request): RedirectResponse|SymfonyResponse
     {
         $validated = $request->validated();
 
@@ -307,19 +310,28 @@ class OrderController extends Controller
             ]);
         }
 
+        $allowCash = (bool) $setting->allow_cash_payment;
+        $allowDigital = $this->paymentService->isDigitalPaymentEnabled($setting);
+
         $requestedMethod = ! empty($validated['payment_method'])
             ? strtolower((string) $validated['payment_method'])
-            : 'cash';
+            : ($allowCash ? 'cash' : ($allowDigital ? 'qris' : 'cash'));
 
-        if ($requestedMethod !== 'cash') {
+        if ($requestedMethod === 'qris' && ! $allowDigital) {
             throw ValidationException::withMessages([
-                'payment_method' => 'Pembayaran digital belum tersedia karena integrasi payment gateway sedang disiapkan. Silakan gunakan metode Tunai di Kasir.',
+                'payment_method' => 'Pembayaran QRIS digital sedang tidak aktif atau belum terkonfigurasi. Silakan gunakan metode Tunai di Kasir.',
             ]);
         }
 
-        if (! $setting->allow_cash_payment) {
+        if ($requestedMethod === 'cash' && ! $allowCash) {
             throw ValidationException::withMessages([
                 'payment_method' => 'Metode pembayaran tunai sedang dinonaktifkan sementara oleh kafe. Silakan hubungi kasir.',
+            ]);
+        }
+
+        if (! in_array($requestedMethod, ['cash', 'qris'], true)) {
+            throw ValidationException::withMessages([
+                'payment_method' => 'Metode pembayaran yang dipilih tidak valid.',
             ]);
         }
 
@@ -345,7 +357,20 @@ class OrderController extends Controller
 
         if ($idempotencyKey) {
             $existingOrderNumber = Cache::get($idempotencyKey);
-            if ($existingOrderNumber) {
+            if (is_string($existingOrderNumber) && $existingOrderNumber !== '') {
+                if ($requestedMethod === 'qris') {
+                    $existingOrder = Order::where('order_number', $existingOrderNumber)
+                        ->with('latestPayment')
+                        ->first();
+                    $existingCheckoutUrl = $existingOrder?->latestPayment?->status === 'pending'
+                        ? $existingOrder->latestPayment->checkout_url
+                        : null;
+
+                    if (is_string($existingCheckoutUrl) && $existingCheckoutUrl !== '') {
+                        return Inertia::location($existingCheckoutUrl);
+                    }
+                }
+
                 return redirect()->route('order.status', ['order_number' => $existingOrderNumber]);
             }
         }
@@ -696,6 +721,27 @@ class OrderController extends Controller
             // Jangan gagalkan checkout jika broadcaster log/driver bermasalah
         }
 
+        // Jika metode pembayaran QRIS aktif: hit FCGateway lalu arahkan pelanggan langsung ke Checkout Page gateway
+        if ($order->payment_method === 'qris' && $allowDigital) {
+            $amountDue = $wasAppended ? $order->getUnpaidBalance() : (float) $order->total_amount;
+
+            try {
+                $payment = $this->paymentService->createFcGatewayPayment(
+                    $order,
+                    $amountDue,
+                    $wasAppended ? 'additional' : 'initial',
+                );
+
+                if (is_string($payment->checkout_url) && $payment->checkout_url !== '') {
+                    return Inertia::location($payment->checkout_url);
+                }
+            } catch (PaymentGatewayException $e) {
+                return redirect()
+                    ->route('order.status', ['order_number' => $order->order_number])
+                    ->with('error', $e->getMessage());
+            }
+        }
+
         return redirect()->route('order.status', ['order_number' => $order->order_number]);
     }
 
@@ -725,19 +771,19 @@ class OrderController extends Controller
             'paymentGateway' => $this->paymentService->getPublicGatewayConfig(),
             'paymentPolicy' => [
                 'allow_cash' => (bool) $setting->allow_cash_payment,
-                'allow_digital' => false,
+                'allow_digital' => $this->paymentService->isDigitalPaymentEnabled($setting),
                 'expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
             ],
         ]);
     }
 
     /**
-     * Mengganti pilihan metode pembayaran pada pesanan aktif yang belum lunas ke Tunai di Kasir.
+     * Mengganti pilihan metode pembayaran (Tunai <-> QRIS) atau membuat ulang tagihan QRIS FCGateway.
      */
-    public function switchPaymentMethod(Request $request, string $order_number): RedirectResponse|JsonResponse
+    public function switchPaymentMethod(Request $request, string $order_number): RedirectResponse|JsonResponse|SymfonyResponse
     {
         $validated = $request->validate([
-            'payment_method' => ['required', 'string', 'in:cash'],
+            'payment_method' => ['required', 'string', 'in:cash,qris'],
             'payment_channel' => ['nullable', 'string', 'max:50'],
         ]);
 
@@ -760,8 +806,18 @@ class OrderController extends Controller
 
         $method = strtolower((string) $validated['payment_method']);
         $setting = CafeSetting::current();
-        if (! $setting->allow_cash_payment) {
+
+        if ($method === 'cash' && ! $setting->allow_cash_payment) {
             $errMsg = 'Metode pembayaran tunai sedang dinonaktifkan sementara oleh kafe.';
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'message' => $errMsg], 422);
+            }
+
+            return back()->with('error', $errMsg);
+        }
+
+        if ($method === 'qris' && ! $this->paymentService->isDigitalPaymentEnabled($setting)) {
+            $errMsg = 'Metode pembayaran QRIS digital sedang tidak aktif atau belum terkonfigurasi.';
             if ($request->wantsJson()) {
                 return response()->json(['success' => false, 'message' => $errMsg], 422);
             }
@@ -786,9 +842,7 @@ class OrderController extends Controller
                     return;
                 }
 
-                if ($method === 'cash') {
-                    $this->menuStockService->reserveBeforePaymentRetry($locked);
-                }
+                $this->menuStockService->reserveBeforePaymentRetry($locked);
 
                 $locked->payments()
                     ->where('status', 'pending')
@@ -801,12 +855,23 @@ class OrderController extends Controller
                     'payment_channel' => $channel,
                 ];
 
-                if ($method === 'cash' && $locked->payment_status === 'failed' && ! $locked->hasAnySettlement()) {
+                if ($locked->payment_status === 'failed' && ! $locked->hasAnySettlement()) {
                     $updatePayload['payment_status'] = 'unpaid';
                 }
 
                 $locked->update($updatePayload);
             });
+
+            $order->refresh();
+
+            $createdCheckoutUrl = null;
+            $createdPaymentRef = null;
+            if ($method === 'qris') {
+                $payment = $this->paymentService->createFcGatewayPayment($order);
+                $createdCheckoutUrl = $payment->checkout_url;
+                $createdPaymentRef = $payment->payment_reference;
+                $order->refresh();
+            }
         } catch (PaymentGatewayException $e) {
             if ($request->wantsJson()) {
                 return response()->json([
@@ -817,8 +882,6 @@ class OrderController extends Controller
 
             return back()->withErrors(['payment_method' => $e->getMessage()])->with('error', $e->getMessage());
         }
-
-        $order->refresh();
 
         try {
             event(new OrderStatusUpdated($order, $order->order_status, $order->order_status));
@@ -831,7 +894,13 @@ class OrderController extends Controller
                 'payment_method' => $order->payment_method,
                 'payment_gateway' => $order->payment_gateway,
                 'payment_channel' => $order->payment_channel,
+                'payment_reference' => $createdPaymentRef,
+                'checkout_url' => $createdCheckoutUrl,
             ]);
+        }
+
+        if ($method === 'qris' && is_string($createdCheckoutUrl) && $createdCheckoutUrl !== '') {
+            return Inertia::location($createdCheckoutUrl);
         }
 
         return back()->with('success', 'Metode pembayaran diperbarui.');

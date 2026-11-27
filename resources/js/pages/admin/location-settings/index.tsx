@@ -4,6 +4,7 @@ import {
     AlertTriangle,
     Clock,
     Compass,
+    Copy,
     CreditCard,
     History,
     LayoutGrid,
@@ -187,8 +188,12 @@ export default function LocationSettingsPage({
     );
 
     // State: Kebijakan Pembayaran & Gateway
+    const isGatewayConfigured = Boolean(gatewayConfig?.is_configured);
     const [allowCashPayment, setAllowCashPayment] = useState<boolean>(
         setting.allow_cash_payment ?? true,
+    );
+    const [allowDigitalPayment, setAllowDigitalPayment] = useState<boolean>(
+        setting.allow_digital_payment ?? false,
     );
     const [expiryMinutesInput, setExpiryMinutesInput] = useState<string>(
         String(setting.payment_expiry_minutes ?? 15),
@@ -309,9 +314,14 @@ export default function LocationSettingsPage({
             return;
         }
 
-        if (!allowCashPayment) {
+        if (
+            !allowCashPayment &&
+            !(isGatewayConfigured && allowDigitalPayment)
+        ) {
             toast.error(
-                'Pembayaran tunai di kasir harus tetap aktif selama integrasi payment gateway belum tersedia.',
+                isGatewayConfigured
+                    ? 'Minimal satu metode pembayaran (Tunai di Kasir atau QRIS FCGateway) harus aktif.'
+                    : 'Pembayaran tunai di kasir harus tetap aktif selama integrasi payment gateway belum tersedia.',
             );
             handleTabChange('gateway');
             return;
@@ -330,6 +340,9 @@ export default function LocationSettingsPage({
                 is_ordering_enabled: setting.is_ordering_enabled ?? true,
                 closed_message: setting.closed_message || null,
                 allow_cash_payment: allowCashPayment,
+                allow_digital_payment: isGatewayConfigured
+                    ? allowDigitalPayment
+                    : false,
                 payment_expiry_minutes: Number.isNaN(expiryNum)
                     ? 15
                     : Math.min(
@@ -952,20 +965,62 @@ export default function LocationSettingsPage({
                                         description="Pelanggan memesan lewat QR meja lalu membayar uang tunai ke kasir."
                                     />
 
-                                    <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-950">
-                                        <p className="font-extrabold">
-                                            Pembayaran Digital (Payment Gateway)
-                                            Belum Aktif
-                                        </p>
-                                        <p className="mt-1 text-[11px] leading-relaxed text-amber-900">
-                                            Integrasi payment gateway saat ini
-                                            sedang dibersihkan dan menunggu
-                                            implementasi Midtrans sesuai
-                                            dokumentasi resmi yang akan
-                                            digunakan. Untuk sementara seluruh
-                                            pesanan menggunakan Tunai di Kasir.
-                                        </p>
-                                    </div>
+                                    {isGatewayConfigured ? (
+                                        <div className="space-y-2.5">
+                                            <ToggleField
+                                                id="allow_digital_payment"
+                                                checked={allowDigitalPayment}
+                                                onChange={
+                                                    setAllowDigitalPayment
+                                                }
+                                                label="Izinkan Pembayaran Digital (QRIS — FCGateway)"
+                                                description="Pelanggan memilih QRIS saat checkout, diarahkan ke halaman bayar FCGateway, lalu status lunas otomatis lewat webhook."
+                                            />
+                                            {!allowDigitalPayment && (
+                                                <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-3 text-xs text-emerald-950">
+                                                    <p className="font-extrabold">
+                                                        API FCGateway Sudah
+                                                        Terkonfigurasi!
+                                                    </p>
+                                                    <p className="mt-1 text-[11px] leading-relaxed text-emerald-900">
+                                                        Aktifkan saklar di atas
+                                                        lalu klik{' '}
+                                                        <strong>
+                                                            Simpan Kebijakan
+                                                            Pembayaran
+                                                        </strong>{' '}
+                                                        agar opsi QRIS Online
+                                                        muncul di halaman
+                                                        checkout pelanggan.
+                                                    </p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-950">
+                                            <p className="font-extrabold">
+                                                API FCGateway Belum Diisi di
+                                                .env
+                                            </p>
+                                            <p className="mt-1 text-[11px] leading-relaxed text-amber-900">
+                                                Integrasi FCGateway sudah siap
+                                                digunakan. Isi{' '}
+                                                <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
+                                                    FCGATEWAY_BASE_URL
+                                                </code>{' '}
+                                                dan{' '}
+                                                <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
+                                                    FCGATEWAY_API_KEY
+                                                </code>{' '}
+                                                di file{' '}
+                                                <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10.5px]">
+                                                    .env
+                                                </code>{' '}
+                                                untuk mengaktifkan saklar QRIS
+                                                Online.
+                                            </p>
+                                        </div>
+                                    )}
 
                                     <FieldError
                                         message={errors.allow_cash_payment}
@@ -1047,15 +1102,53 @@ export default function LocationSettingsPage({
                                                 )
                                             </h2>
                                             <p className="text-[11px] text-[#78716C]">
-                                                Integrasi payment gateway
-                                                eksternal belum dipasang
-                                                (menunggu dokumentasi Midtrans).
+                                                {isGatewayConfigured
+                                                    ? 'Terhubung ke FCGateway QRIS Dinamis & endpoint webhook siap menerima callback.'
+                                                    : 'Menunggu pengisian FCGATEWAY_BASE_URL & FCGATEWAY_API_KEY di file .env.'}
                                             </p>
                                         </div>
-                                        <StatusPill tone="neutral">
-                                            Mode Tunai POS
+                                        <StatusPill
+                                            tone={
+                                                isGatewayConfigured
+                                                    ? 'success'
+                                                    : 'neutral'
+                                            }
+                                        >
+                                            {isGatewayConfigured
+                                                ? 'FCGateway Siap'
+                                                : 'Mode Tunai POS'}
                                         </StatusPill>
                                     </div>
+
+                                    {gatewayConfig?.webhook_endpoint && (
+                                        <div className="rounded-xl border border-[#EFE5CF] bg-[#FAF6EC] p-3 text-xs">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span className="text-[10px] font-bold text-[#78716C] uppercase">
+                                                    URL Callback / Webhook
+                                                    SideOrder
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        void navigator.clipboard.writeText(
+                                                            gatewayConfig.webhook_endpoint ??
+                                                                '',
+                                                        );
+                                                        toast.success(
+                                                            'URL Webhook disalin ke clipboard.',
+                                                        );
+                                                    }}
+                                                    className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#E8DFC8] bg-white px-2 py-0.5 text-[10px] font-bold text-[#5B4126] hover:bg-[#F5EEDC]"
+                                                >
+                                                    <Copy className="size-3" />
+                                                    Salin
+                                                </button>
+                                            </div>
+                                            <p className="mt-1 font-mono text-[11px] break-all text-[#18181B]">
+                                                {gatewayConfig.webhook_endpoint}
+                                            </p>
+                                        </div>
+                                    )}
 
                                     {gatewayStats && (
                                         <div className="grid grid-cols-2 gap-3 text-xs">

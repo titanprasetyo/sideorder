@@ -29,7 +29,7 @@ class CheckoutOrderRequest extends FormRequest
             'force_new_order' => ['nullable', 'boolean'],
             'customer_name' => ['required_without:order_number', 'nullable', 'string', 'max:100'],
             'notes' => ['nullable', 'string', 'max:500'],
-            'payment_method' => ['nullable', 'string', 'in:cash'],
+            'payment_method' => ['nullable', 'string', 'in:cash,qris'],
             'payment_channel' => ['nullable', 'string', 'max:50'],
             'idempotency_key' => ['nullable', 'string', 'max:100'],
             'customer_latitude' => ['nullable', 'numeric', 'between:-90,90'],
@@ -80,7 +80,7 @@ class CheckoutOrderRequest extends FormRequest
             'qr_token.exists' => 'Meja tidak valid atau tidak ditemukan.',
             'customer_latitude.between' => 'Koordinat lokasi GPS tidak valid.',
             'customer_longitude.between' => 'Koordinat lokasi GPS tidak valid.',
-            'payment_method.in' => 'Saat ini hanya metode pembayaran Tunai di Kasir yang tersedia (integrasi payment gateway sedang disiapkan).',
+            'payment_method.in' => 'Metode pembayaran yang dipilih tidak valid. Pilih Tunai di Kasir atau QRIS.',
         ];
     }
 }

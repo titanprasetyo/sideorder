@@ -1319,10 +1319,13 @@ class FinancialReportController extends Controller
             ];
         }
 
-        $activeDriver = 'manual';
+        $gatewayPublicConfig = app(PaymentService::class)->getPublicGatewayConfig();
+        $activeDriver = $gatewayPublicConfig['driver'];
         $gatewayDefinitions = [
             'manual' => 'Kasir POS (Tunai Manual)',
-            'digital' => 'Pembayaran Digital',
+            'digital' => $gatewayPublicConfig['is_configured']
+                ? $gatewayPublicConfig['label']
+                : 'Pembayaran Digital',
         ];
         $paymentGateways = [];
         foreach ($gatewayDefinitions as $gwCode => $gwLabel) {
@@ -1341,7 +1344,7 @@ class FinancialReportController extends Controller
                 'unpaid_amount' => (float) ($gwRow->unpaid_amount ?? 0),
                 'cancelled_count' => (int) ($gwRow->cancelled_count ?? 0),
                 'cancelled_amount' => (float) ($gwRow->cancelled_amount ?? 0),
-                'is_active_slot' => $gwCode === $activeDriver,
+                'is_active_slot' => $gwCode === ($gatewayPublicConfig['is_configured'] ? 'digital' : 'manual'),
             ];
         }
 
@@ -1668,12 +1671,16 @@ class FinancialReportController extends Controller
             'payment_gateways' => $paymentGateways,
             'gateway_integration' => [
                 'driver' => $activeDriver,
-                'label' => 'Kasir POS (Tunai)',
-                'configured' => false,
-                'is_production' => false,
-                'mode' => 'Belum Terintegrasi (Tunai POS)',
-                'webhook_endpoint' => null,
-                'supported_channels' => ['Tunai (Cash)'],
+                'label' => $gatewayPublicConfig['label'],
+                'configured' => $gatewayPublicConfig['is_configured'],
+                'is_production' => $gatewayPublicConfig['is_configured'],
+                'mode' => $gatewayPublicConfig['is_configured']
+                    ? 'Live (FCGateway QRIS)'
+                    : 'Belum Terintegrasi (Tunai POS)',
+                'webhook_endpoint' => $gatewayPublicConfig['webhook_endpoint'],
+                'supported_channels' => $gatewayPublicConfig['is_configured']
+                    ? ['QRIS (FCGateway)', 'Tunai (Cash)']
+                    : ['Tunai (Cash)'],
                 'transactions_count' => (int) ($gatewayBreakdownRows->get('digital')->paid_count ?? 0),
                 'net_revenue' => $inflowDigital,
                 'pending_count' => (int) ($gatewayBreakdownRows->get('digital')->unpaid_count ?? 0),

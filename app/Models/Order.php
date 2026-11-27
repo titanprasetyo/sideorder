@@ -398,6 +398,7 @@ class Order extends Model
     {
         return match ($this->resolveEffectivePaymentGateway()) {
             'manual' => 'Kasir POS',
+            'fcgateway' => 'FCGateway QRIS',
             default => 'Pembayaran Digital',
         };
     }

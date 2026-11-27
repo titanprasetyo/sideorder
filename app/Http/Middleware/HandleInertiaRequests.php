@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Models\CafeSetting;
+use App\Services\Payments\PaymentService;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -51,6 +52,7 @@ class HandleInertiaRequests extends Middleware
             'cafeSettings' => function (): array {
                 try {
                     $setting = CafeSetting::current();
+                    $paymentService = app(PaymentService::class);
 
                     return [
                         'cafe_name' => $setting->cafe_name,
@@ -60,7 +62,7 @@ class HandleInertiaRequests extends Middleware
                         'is_ordering_enabled' => (bool) $setting->is_ordering_enabled,
                         'closed_message' => $setting->closed_message,
                         'allow_cash_payment' => (bool) $setting->allow_cash_payment,
-                        'allow_digital_payment' => false,
+                        'allow_digital_payment' => $paymentService->isDigitalPaymentEnabled($setting),
                         'payment_expiry_minutes' => (int) ($setting->payment_expiry_minutes ?: CafeSetting::DEFAULT_PAYMENT_EXPIRY_MINUTES),
                     ];
                 } catch (\Throwable) {
@@ -77,12 +79,16 @@ class HandleInertiaRequests extends Middleware
                     ];
                 }
             },
-            'paymentGateway' => [
-                'driver' => 'manual',
-                'label' => 'Kasir POS (Tunai)',
-                'isConfigured' => false,
-                'mode' => 'manual_only',
-            ],
+            'paymentGateway' => function (): array {
+                $gateway = app(PaymentService::class)->getPublicGatewayConfig();
+
+                return [
+                    'driver' => $gateway['driver'],
+                    'label' => $gateway['label'],
+                    'isConfigured' => $gateway['is_configured'],
+                    'mode' => $gateway['mode'],
+                ];
+            },
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];
     }
